@@ -1,6 +1,6 @@
 [package]
 name = "omacourses"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.88"
 authors = ["CloudDown"]
@@ -28,6 +28,10 @@ fontdue = "0.9"
 flate2 = "1"
 arboard = "3"
 raw-window-handle = "0.6"
+hayro = "0.5"
+lopdf = "0.36"
+resvg = "0.45"
+usvg = "0.45"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 wayland-backend = { version = "0.3.17", features = ["client_system", "dlopen"] }

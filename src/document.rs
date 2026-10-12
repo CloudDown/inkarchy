@@ -150,6 +150,43 @@ impl ImageObj {
     }
 }
 
+/// A non-editable page background: a copied PDF page or a placed image.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PageBackground {
+    /// Path relative to the notebook directory (`source.pdf`, `media/….png`).
+    pub file: String,
+    /// 0-based page when `file` is a PDF.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pdf_page: Option<u32>,
+    /// Source width and height, in PDF points or image pixels, for aspect-fit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_size: Option<[f32; 2]>,
+}
+
+impl PageBackground {
+    /// Where the background sits inside a page of `page_w` × `page_h`.
+    pub fn fit(&self, page_w: f32, page_h: f32) -> [f32; 4] {
+        match self.source_size {
+            Some([w, h]) => contain_rect(page_w, page_h, w, h),
+            None => [0.0, 0.0, page_w.max(0.0), page_h.max(0.0)],
+        }
+    }
+}
+
+/// Fit `src` inside `dst`, centered, without stretching.
+pub fn contain_rect(dst_w: f32, dst_h: f32, src_w: f32, src_h: f32) -> [f32; 4] {
+    if !(dst_w > 0.0 && dst_h > 0.0 && src_w > 0.0 && src_h > 0.0) {
+        return [0.0, 0.0, dst_w.max(0.0), dst_h.max(0.0)];
+    }
+    let s = (dst_w / src_w).min(dst_h / src_h);
+    let w = src_w * s;
+    let h = src_h * s;
+    if (dst_w - w).abs() < 0.75 && (dst_h - h).abs() < 0.75 {
+        return [0.0, 0.0, dst_w, dst_h];
+    }
+    [(dst_w - w) * 0.5, (dst_h - h) * 0.5, w, h]
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Page {
     pub strokes: Vec<InkStroke>,
@@ -159,6 +196,8 @@ pub struct Page {
     pub col: i32,
     #[serde(default)]
     pub row: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<PageBackground>,
 }
 
 impl Page {
@@ -418,6 +457,12 @@ impl Note {
                 .or_insert_with(|| Page::at(key.0, key.1))
                 .images
                 .push(im);
+        }
+        if let Some(bg) = p.background.clone() {
+            let key = (p.col, p.row);
+            if let Some(home) = tiles.get_mut(&key) {
+                home.background = Some(bg);
+            }
         }
         self.page_w = tw;
         self.page_h = th;
@@ -712,6 +757,27 @@ mod tests {
         assert!(!n.can_tear_unit());
         assert!(!n.remove_unit(0, 0));
         assert_eq!(n.pages.len(), 1);
+    }
+
+    #[test]
+    fn page_without_background_still_loads() {
+        let page: Page = serde_json::from_str(r#"{"strokes":[],"texts":[],"images":[]}"#).unwrap();
+        assert!(page.background.is_none());
+    }
+
+    #[test]
+    fn contain_rect_letterboxes_a_wide_source() {
+        let [x, y, w, h] = contain_rect(100.0, 100.0, 200.0, 100.0);
+        assert!((w - 100.0).abs() < 0.01);
+        assert!((h - 50.0).abs() < 0.01);
+        assert!((x - 0.0).abs() < 0.01);
+        assert!((y - 25.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn contain_rect_fills_when_the_aspect_matches() {
+        let [x, y, w, h] = contain_rect(200.0, 100.0, 400.0, 200.0);
+        assert_eq!([x, y, w, h], [0.0, 0.0, 200.0, 100.0]);
     }
 
     #[test]

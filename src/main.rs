@@ -1,12 +1,16 @@
 mod app;
 mod camera;
+mod cli;
 mod document;
 mod emoji;
 mod export;
 mod fonts;
+mod import;
 mod ink;
+mod ipc;
 mod library;
 mod look;
+mod pdf;
 mod pressure;
 mod seed;
 mod tablet;
@@ -50,24 +54,29 @@ Gestures (inside a notebook):
   drag the pencil-case handle → top / bottom / sides
   hold the pen still ~1s ≈ line, arrow, triangle, square, diamond, ellipse, circle
   ctrl+z/y   ctrl+s save   ctrl+e png   ctrl+shift+e pdf
+  ctrl+o open a PDF, image, or short text file
+
+Open a file (a new window, or the one already running):
+  cahier ~/Downloads/x.pdf
+  cahier notes.png diagram.svg readme.md
 ";
 
 fn main() -> eframe::Result<()> {
-    let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
-        Some("--help") | Some("-h") => {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let files = match cli::parse_args(&args) {
+        Ok(cli::CliRequest::Help) => {
             print!("{HELP}");
             return Ok(());
         }
-        Some("--version") | Some("-V") => {
+        Ok(cli::CliRequest::Version) => {
             println!("cahier {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
-        Some("--data-dir") => {
+        Ok(cli::CliRequest::DataDir) => {
             println!("{}", crate::library::data_dir().display());
             return Ok(());
         }
-        Some("--theme") => {
+        Ok(cli::CliRequest::Theme) => {
             let look = crate::look::Look::load();
             println!("theme: {}", look.name.to_lowercase());
             println!(
@@ -82,12 +91,15 @@ fn main() -> eframe::Result<()> {
             }
             return Ok(());
         }
-        Some(other) => {
-            eprintln!("Error: unknown argument `{other}`.");
+        Ok(cli::CliRequest::Run(files)) => files,
+        Err(err) => {
+            eprintln!("Error: {err}.");
             eprintln!("  cahier --help");
             std::process::exit(2);
         }
-        None => {}
+    };
+    if !files.is_empty() && ipc::forward(&files) {
+        return Ok(());
     }
 
     let options = eframe::NativeOptions {
@@ -102,7 +114,7 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Cahier",
         options,
-        Box::new(|cc| Ok(Box::new(CahierApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(CahierApp::new(cc, files)))),
     )
 }
 

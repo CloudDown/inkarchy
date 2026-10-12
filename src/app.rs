@@ -1,6 +1,7 @@
 #![allow(unknown_lints, float_literal_f32_fallback)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use eframe::egui::*;
@@ -10,7 +11,9 @@ use egui::style::ScrollAnimation;
 use uuid::Uuid;
 
 use crate::camera::{page_at, page_origin, Camera, ZOOM_STOPS};
-use crate::document::{ImageObj, Note, PaperKind, SheetJoin, TextBox, PAGE_H, PAGE_W};
+use crate::document::{
+    ImageObj, Note, PageBackground, PaperKind, SheetJoin, TextBox, PAGE_H, PAGE_W,
+};
 use crate::emoji::Atlas;
 use crate::export::{self, MediaLoader};
 use crate::ink::{
@@ -121,6 +124,7 @@ struct SpineWheel {
 
 #[derive(Clone, Copy)]
 enum MoreAct {
+    Open,
     Linked,
     Separate,
     Download,
@@ -206,6 +210,15 @@ pub struct CahierApp {
     pen_ui_grab: bool,
     /// Open the image picker outside the click (system portal).
     pending_image: Option<(usize, Pos2)>,
+    /// Open the file dialog outside the click (system portal).
+    pending_open: bool,
+    /// Paths sent by a second `cahier file.pdf` while this window is open.
+    inbox: Option<crate::ipc::Inbox>,
+    bg_textures: HashMap<String, TextureHandle>,
+    bg_order: VecDeque<(String, usize)>,
+    bg_bytes: usize,
+    bg_failed: HashSet<String>,
+    startup_toast: Option<String>,
     /// File format chooser shown after saving a note for download.
     export_picker_open: bool,
     /// Explorer-style selection on the shelf.
@@ -245,28 +258,33 @@ pub struct CahierApp {
 }
 
 impl CahierApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, files: Vec<PathBuf>) -> Self {
         crate::fonts::install(&cc.egui_ctx);
         let look = Look::load();
         look.apply(&cc.egui_ctx);
         let mut lib = Library::open();
         seed::seed_if_needed(&mut lib);
         let mut app = Self::with_library(look, lib);
-        if let Ok(q) = std::env::var("CAHIER_OPEN") {
-            let q = q.trim().to_lowercase();
-            if !q.is_empty() {
-                if let Some(id) = app
-                    .lib
-                    .index
-                    .notes
-                    .iter()
-                    .find(|m| m.title.to_lowercase().contains(&q))
-                    .map(|m| m.id)
-                {
-                    app.open_note(id);
+        if files.is_empty() {
+            if let Ok(q) = std::env::var("CAHIER_OPEN") {
+                let q = q.trim().to_lowercase();
+                if !q.is_empty() {
+                    if let Some(id) = app
+                        .lib
+                        .index
+                        .notes
+                        .iter()
+                        .find(|m| m.title.to_lowercase().contains(&q))
+                        .map(|m| m.id)
+                    {
+                        app.open_note(id);
+                    }
                 }
             }
+        } else {
+            app.startup_toast = app.open_paths(&files);
         }
+        app.inbox = crate::ipc::Inbox::bind_default();
         app
     }
 
@@ -337,6 +355,13 @@ impl CahierApp {
             palette_open: false,
             pen_ui_grab: false,
             pending_image: None,
+            pending_open: false,
+            inbox: None,
+            bg_textures: HashMap::new(),
+            bg_order: VecDeque::new(),
+            bg_bytes: 0,
+            bg_failed: HashSet::new(),
+            startup_toast: None,
             export_picker_open: false,
             shelf_sel: Vec::new(),
             shelf_anchor: None,
@@ -561,6 +586,7 @@ impl CahierApp {
             self.fitted_cell = None;
             self.canvas_rect = Rect::ZERO;
             self.textures.clear();
+            self.clear_backgrounds();
             self.tab_held = false;
         }
     }
@@ -645,6 +671,79 @@ impl CahierApp {
         self.sel.clear();
         self.lasso.clear();
         self.mark_dirty();
+    }
+
+    fn clear_backgrounds(&mut self) {
+        self.bg_textures.clear();
+        self.bg_order.clear();
+        self.bg_bytes = 0;
+        self.bg_failed.clear();
+    }
+
+    /// Import files. Images land on the open page; everything else becomes a notebook.
+    fn open_paths(&mut self, paths: &[PathBuf]) -> Option<String> {
+        let place_on_page = matches!(self.scene, Scene::Desk) && self.note.is_some();
+        let mut notebooks = Vec::new();
+        let mut placed = 0usize;
+        let mut messages = Vec::new();
+        for (i, path) in paths.iter().enumerate() {
+            if place_on_page && crate::import::is_placeable_image(path) {
+                match crate::import::load_placed_image(path) {
+                    Ok(png) => {
+                        let (page, local) = self.drop_spot();
+                        let local = local + vec2(i as f32 * 28.0, i as f32 * 28.0);
+                        self.insert_image_bytes(&png, page, local);
+                        placed += 1;
+                    }
+                    Err(err) => messages.push(err.to_string()),
+                }
+            } else {
+                match crate::import::import_new_note(&mut self.lib, path) {
+                    Ok(note) => notebooks.push((note.id, note.title)),
+                    Err(err) => messages.push(err.to_string()),
+                }
+            }
+        }
+        if let Some((id, _)) = notebooks.first() {
+            self.open_note(*id);
+        }
+        let mut parts = Vec::new();
+        match notebooks.as_slice() {
+            [] => {}
+            [(_, title)] if placed == 0 => parts.push(format!("Opened {title}")),
+            many => parts.push(format!("Opened {} files", many.len())),
+        }
+        if placed == 1 {
+            parts.push("Placed an image".into());
+        } else if placed > 1 {
+            parts.push(format!("Placed {placed} images"));
+        }
+        if let Some(msg) = messages.first() {
+            parts.push(msg.clone());
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" · "))
+        }
+    }
+
+    fn pick_open_files(&mut self, ctx: &Context) {
+        let Some(paths) = rfd::FileDialog::new()
+            .set_title("Open")
+            .add_filter(
+                "Notes",
+                &[
+                    "pdf", "png", "jpg", "jpeg", "webp", "svg", "txt", "md", "markdown",
+                ],
+            )
+            .pick_files()
+        else {
+            return;
+        };
+        if let Some(msg) = self.open_paths(&paths) {
+            self.toast(msg, ctx.input(|i| i.time));
+        }
     }
 
     fn trash_open_note(&mut self) {
@@ -804,6 +903,19 @@ impl eframe::App for CahierApp {
         }
         let wants_pen = self.tablet.wants_repaint();
         let t = ctx.input(|i| i.time);
+        let incoming = self
+            .inbox
+            .as_ref()
+            .map(|inbox| inbox.poll())
+            .unwrap_or_default();
+        if !incoming.is_empty() {
+            if let Some(msg) = self.open_paths(&incoming) {
+                self.toast(msg, t);
+            }
+        }
+        if let Some(msg) = self.startup_toast.take() {
+            self.toast(msg, t);
+        }
         self.shortcuts(ctx);
         self.ingest_touch_pressure(ctx);
 
@@ -812,6 +924,10 @@ impl eframe::App for CahierApp {
             Scene::Desk => self.ui_desk(ctx),
         }
 
+        if self.pending_open {
+            self.pending_open = false;
+            self.pick_open_files(ctx);
+        }
         self.autosave();
         self.flush_save_error(ctx);
         if let Some(toast) = &self.toast {
@@ -905,6 +1021,7 @@ impl CahierApp {
 
     fn shortcuts(&mut self, ctx: &Context) {
         let mut new_note = false;
+        let mut open_file = false;
         let mut undo = false;
         let mut redo = false;
         let mut save = false;
@@ -936,6 +1053,9 @@ impl CahierApp {
             }
             if c && i.key_pressed(Key::N) {
                 new_note = true;
+            }
+            if c && i.key_pressed(Key::O) {
+                open_file = true;
             }
             if c && i.key_pressed(Key::Z) && !sh {
                 undo = true;
@@ -1042,6 +1162,9 @@ impl CahierApp {
 
         if new_note {
             self.new_note();
+        }
+        if open_file {
+            self.pending_open = true;
         }
         if close {
             match &self.scene {
@@ -1243,6 +1366,7 @@ impl CahierApp {
     }
 
     fn ui_shelf(&mut self, ctx: &Context) {
+        self.handle_drops_and_paste(ctx);
         // Shelf shortcuts (selection / trash)
         if self.emoji_pick.is_none() && self.rename_id.is_none() && self.lib.index.fiche_pliee {
             self.shelf_keys(ctx);
@@ -1470,6 +1594,19 @@ impl CahierApp {
         if !self.shelf_trash && self.bin_panel_height == 0.0 {
             self.wastebasket(ctx);
         }
+
+        Area::new(Id::new("shelf-top-left"))
+            .anchor(Align2::LEFT_TOP, vec2(16.0, 10.0))
+            .order(Order::Foreground)
+            .show(ctx, |ui| {
+                let open = self.open_signet(ui);
+                open.widget_info(|| {
+                    WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Open file")
+                });
+                if open.clicked() {
+                    self.pending_open = true;
+                }
+            });
 
         Area::new(Id::new("shelf-search"))
             .anchor(
@@ -2353,6 +2490,20 @@ impl CahierApp {
         resp.on_hover_cursor(CursorIcon::PointingHand)
     }
 
+    fn open_signet(&self, ui: &mut Ui) -> Response {
+        let size = 56.0;
+        let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+        let p = ui.painter();
+        let well = if resp.hovered() {
+            self.look.desk_edge
+        } else {
+            self.look.desk_deep
+        };
+        let (face, fg) = self.paint_note_surface(ui, rect.shrink(3.0), &resp, well, 25);
+        paint_open_icon(p, face.center(), fg);
+        resp.on_hover_cursor(CursorIcon::PointingHand)
+    }
+
     fn quit_signet(&self, ui: &mut Ui) -> Response {
         let size = 56.0;
         let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
@@ -2446,6 +2597,7 @@ impl CahierApp {
         let keys: &[(&str, &str)] = &[
             ("New", "N"),
             ("Open", "double-click"),
+            ("Open file", "Ctrl+O"),
             ("Select", "click"),
             ("Place", "drag"),
             ("Wheel", "right-click"),
@@ -4112,6 +4264,10 @@ impl CahierApp {
                                     .max_height((ctx.screen_rect().height() - 84.0).max(88.0))
                                     .auto_shrink([false, true])
                                     .show(ui, |ui| {
+                                        if self.menu_row(ui, "Open…", "Ctrl+O", false, false) {
+                                            act = Some(MoreAct::Open);
+                                        }
+                                        self.menu_sep(ui);
                                         if compact {
                                             if self.menu_row(ui, "Fit page", "0", false, false) {
                                                 act = Some(MoreAct::Fit);
@@ -4151,6 +4307,7 @@ impl CahierApp {
                                     });
                             });
                         match act {
+                            Some(MoreAct::Open) => self.pending_open = true,
                             Some(MoreAct::Linked) => self.set_sheet_join(SheetJoin::Linked),
                             Some(MoreAct::Separate) => self.set_sheet_join(SheetJoin::Separate),
                             Some(MoreAct::Download) => self.save_for_download(ctx),
@@ -5911,11 +6068,20 @@ impl CahierApp {
     fn pick_image(&mut self, page: usize, local: Pos2) {
         let Some(path) = rfd::FileDialog::new()
             .set_title("Place an image")
-            .add_filter("Images", &["png", "jpg", "jpeg", "webp", "gif", "bmp"])
+            .add_filter(
+                "Images",
+                &["png", "jpg", "jpeg", "webp", "gif", "bmp", "svg"],
+            )
             .pick_file()
         else {
             return;
         };
+        if crate::import::is_placeable_image(&path) {
+            if let Ok(png) = crate::import::load_placed_image(&path) {
+                self.insert_image_bytes(&png, page, local);
+            }
+            return;
+        }
         let Ok(bytes) = std::fs::read(&path) else {
             return;
         };
@@ -5952,23 +6118,45 @@ impl CahierApp {
     }
 
     fn handle_drops_and_paste(&mut self, ctx: &Context) {
-        let dropped: Vec<Vec<u8>> = ctx.input(|i| {
+        let dropped: Vec<(Option<PathBuf>, Vec<u8>)> = ctx.input(|i| {
             i.raw
                 .dropped_files
                 .iter()
                 .filter_map(|f| {
-                    if let Some(p) = &f.path {
-                        std::fs::read(p).ok()
+                    if let Some(path) = &f.path {
+                        Some((Some(path.clone()), Vec::new()))
                     } else {
-                        f.bytes.as_ref().map(|b| b.to_vec())
+                        f.bytes.as_ref().map(|bytes| (None, bytes.to_vec()))
                     }
                 })
                 .collect()
         });
         if !dropped.is_empty() {
+            let mut paths = Vec::new();
+            let mut loose = Vec::new();
+            for (path, bytes) in dropped {
+                if let Some(path) = path {
+                    paths.push(path);
+                } else if bytes.starts_with(b"%PDF") {
+                    let path =
+                        std::env::temp_dir().join(format!("cahier-drop-{}.pdf", Uuid::new_v4()));
+                    if std::fs::write(&path, &bytes).is_ok() {
+                        paths.push(path);
+                    }
+                } else if matches!(self.scene, Scene::Desk) {
+                    loose.push(bytes);
+                }
+            }
+            if !paths.is_empty() {
+                if let Some(msg) = self.open_paths(&paths) {
+                    self.toast(msg, ctx.input(|i| i.time));
+                }
+            }
             if let Scene::Desk = self.scene {
-                for b in dropped {
-                    self.insert_image_bytes(&b, 0, pos2(80.0, 80.0));
+                for (i, bytes) in loose.iter().enumerate() {
+                    let (page, local) = self.drop_spot();
+                    let local = local + vec2(i as f32 * 24.0, i as f32 * 24.0);
+                    self.insert_image_bytes(bytes, page, local);
                 }
             }
         }
@@ -6083,7 +6271,7 @@ impl CahierApp {
         // Finish every opaque sheet before drawing grain, ruling or user content.
         // A later page must never paint over its neighbour's grid or ink.
         let mut surfaces = Vec::with_capacity(tiles.len());
-        for &(_, _, _, paper, n_left, n_right, n_top, n_bot) in &tiles {
+        for &(_, page, _, paper, n_left, n_right, n_top, n_bot) in &tiles {
             if !paper.expand(bleed).intersects(rect) {
                 continue;
             }
@@ -6114,10 +6302,10 @@ impl CahierApp {
                 }
             }
             painter.rect_filled(body, sheet_r, fill);
-            surfaces.push((paper, body, sheet_r));
+            surfaces.push((page.background.is_some(), paper, body, sheet_r));
         }
 
-        for (paper, body, sheet_r) in surfaces {
+        for (has_bg, paper, body, sheet_r) in surfaces {
             // Adjacent cells share exactly the same physical-pixel scissor edge.
             // Extended geometry supplies coverage without blending twice at seams.
             let surface_clip = if fused {
@@ -6126,6 +6314,9 @@ impl CahierApp {
                 paper
             };
             let surface_painter = painter.with_clip_rect(surface_clip.intersect(rect));
+            if has_bg {
+                continue;
+            }
             if let Some(tex) = &canson {
                 // World-space grain stays attached to the paper while panning and zooming.
                 let a = cam.to_paper(body.min, rect);
@@ -6152,11 +6343,36 @@ impl CahierApp {
         }
 
         for &(pi, page, origin, paper, _, n_right, n_top, _) in &tiles {
-            if note.paper == PaperKind::Lined && page.col == min_col {
+            let has_bg = page.background.is_some();
+            if !has_bg && note.paper == PaperKind::Lined && page.col == min_col {
                 self.paint_punches(painter, paper, cam.zoom);
             }
-            if note.paper != PaperKind::Slate && !n_right && !n_top && !note.can_tear_unit() {
+            if !has_bg
+                && note.paper != PaperKind::Slate
+                && !n_right
+                && !n_top
+                && !note.can_tear_unit()
+            {
                 paint_page_fold(painter, paper, cam.zoom, self.look.paper_rule_strong);
+            }
+            if has_bg && paper.expand(bleed).intersects(rect) {
+                if let Some(bg) = page.background.as_ref() {
+                    let [x, y, w, h] = bg.fit(note.page_w, note.page_h);
+                    let r = Rect::from_min_size(
+                        map(pos2(origin.x + x, origin.y + y)),
+                        vec2(w * cam.zoom, h * cam.zoom),
+                    );
+                    if let Some(tex) =
+                        self.background_tex(painter.ctx(), note.id, bg, cam.zoom, pixels_per_point)
+                    {
+                        painter.image(
+                            tex.id(),
+                            r,
+                            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                    }
+                }
             }
 
             for im in &page.images {
@@ -6204,7 +6420,7 @@ impl CahierApp {
                 painter.galley(pos, galley, tx.color32());
             }
 
-            if !fused {
+            if !fused && page.background.is_none() {
                 painter.text(
                     pos2(paper.center().x, paper.max.y - 14.0 * cam.zoom.min(1.2)),
                     Align2::CENTER_BOTTOM,
@@ -6961,6 +7177,83 @@ impl CahierApp {
         }
     }
 
+    fn background_tex(
+        &mut self,
+        ctx: &Context,
+        note_id: Uuid,
+        bg: &PageBackground,
+        zoom: f32,
+        pixels_per_point: f32,
+    ) -> Option<TextureHandle> {
+        let scale = if bg.pdf_page.is_some() {
+            crate::pdf::render_scale(zoom, pixels_per_point)
+        } else {
+            1.0
+        };
+        let key = format!(
+            "{note_id}:{}:{}:{scale:.1}",
+            bg.file,
+            bg.pdf_page.unwrap_or(u32::MAX)
+        );
+        if self.bg_textures.contains_key(&key) {
+            if let Some(pos) = self.bg_order.iter().position(|(k, _)| k == &key) {
+                if let Some(entry) = self.bg_order.remove(pos) {
+                    self.bg_order.push_back(entry);
+                }
+            }
+            return self.bg_textures.get(&key).cloned();
+        }
+        if self.bg_failed.contains(&key) {
+            return None;
+        }
+        let path = self.lib.note_dir(note_id).join(&bg.file);
+        let rendered = if let Some(page) = bg.pdf_page {
+            crate::pdf::render_pdf_file(&path, page, scale).ok()
+        } else {
+            image::open(&path).ok().and_then(|img| {
+                let img = img.into_rgba8();
+                let width = img.width();
+                let height = img.height();
+                if width == 0 || height == 0 {
+                    None
+                } else {
+                    Some(crate::pdf::Rendered {
+                        width,
+                        height,
+                        rgba: img.into_raw(),
+                    })
+                }
+            })
+        };
+        let Some(rendered) = rendered else {
+            self.bg_failed.insert(key);
+            return None;
+        };
+        if rendered.width == 0 || rendered.height == 0 || rendered.rgba.is_empty() {
+            self.bg_failed.insert(key);
+            return None;
+        }
+        let bytes = rendered.rgba.len();
+        let image = ColorImage::from_rgba_unmultiplied(
+            [rendered.width as usize, rendered.height as usize],
+            &rendered.rgba,
+        );
+        let tex = ctx.load_texture(key.clone(), image, TextureOptions::LINEAR);
+        self.bg_bytes += bytes;
+        self.bg_order.push_back((key.clone(), bytes));
+        self.bg_textures.insert(key, tex.clone());
+        const BUDGET: usize = 96 * 1024 * 1024;
+        while self.bg_bytes > BUDGET {
+            let Some((old, old_bytes)) = self.bg_order.pop_front() else {
+                break;
+            };
+            if self.bg_textures.remove(&old).is_some() {
+                self.bg_bytes = self.bg_bytes.saturating_sub(old_bytes);
+            }
+        }
+        Some(tex)
+    }
+
     fn texture_for(&mut self, ctx: &Context, note_id: &Uuid, file: &str) -> Option<TextureHandle> {
         if let Some(t) = self.textures.get(file) {
             return Some(t.clone());
@@ -6992,7 +7285,16 @@ impl CahierApp {
         else {
             return;
         };
-        if let Some(pm) = export::raster_page(&note, 0, &self.look, 2.0, &media) {
+        let note_dir = self.lib.note_dir(note.id);
+        if let Some(pm) = export::raster_page(
+            &note,
+            0,
+            &self.look,
+            2.0,
+            &media,
+            &note_dir,
+            export::RasterMode::Full,
+        ) {
             if let Some(png) = export::pixmap_png(&pm) {
                 if std::fs::write(&path, png).is_ok() {
                     let t = ctx.input(|i| i.time);
@@ -7006,8 +7308,9 @@ impl CahierApp {
         let Some(note) = self.note.clone() else {
             return;
         };
+        let note_dir = self.lib.note_dir(note.id);
         let media = MediaLoader {
-            root: self.lib.note_dir(note.id).join("media"),
+            root: note_dir.join("media"),
         };
         let Some(path) = rfd::FileDialog::new()
             .set_file_name(format!("{}.pdf", slug(&note.title)))
@@ -7015,7 +7318,7 @@ impl CahierApp {
         else {
             return;
         };
-        if let Some(pdf) = export::pages_pdf(&note, &self.look, &media) {
+        if let Some(pdf) = export::pages_pdf(&note, &self.look, &media, &note_dir) {
             if std::fs::write(&path, pdf).is_ok() {
                 let t = ctx.input(|i| i.time);
                 self.toast("Exported", t);
@@ -7470,6 +7773,22 @@ fn paint_sheet_tab(p: &Painter, rect: Rect, wash: Color32, plus: Color32) {
         thick * 0.5,
         plus,
     );
+}
+
+fn paint_open_icon(p: &Painter, c: Pos2, fg: Color32) {
+    let st = Stroke::new(1.7, fg);
+    let page = Rect::from_center_size(c + vec2(-1.0, 1.0), vec2(14.0, 16.0));
+    p.rect_stroke(page, 2.0, st, StrokeKind::Inside);
+    p.line_segment(
+        [
+            pos2(page.max.x - 5.0, page.min.y),
+            pos2(page.max.x, page.min.y + 5.0),
+        ],
+        st,
+    );
+    p.line_segment([pos2(c.x + 2.0, c.y + 6.5), pos2(c.x + 8.5, c.y + 1.0)], st);
+    p.line_segment([pos2(c.x + 4.5, c.y + 1.0), pos2(c.x + 8.5, c.y + 1.0)], st);
+    p.line_segment([pos2(c.x + 8.5, c.y + 1.0), pos2(c.x + 8.5, c.y + 5.0)], st);
 }
 
 fn paint_plus(p: &egui::Painter, c: Pos2, fg: Color32) {

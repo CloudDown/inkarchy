@@ -77,9 +77,10 @@ install_desktop() {
       'Type=Application' \
       'Name=Cahier' \
       'Comment=Stylus notes on an Omarchy lectern' \
-      "Exec=${bin_path}" \
+      "Exec=\"${bin_path}\" %F" \
       "Icon=${APP_ID}" \
       'Terminal=false' \
+      'MimeType=application/pdf;image/png;image/jpeg;image/webp;image/svg+xml;' \
       'Categories=Office;Education;' \
       "StartupWMClass=${APP_ID}"
   } > "$desktop_path"
@@ -105,6 +106,7 @@ if [[ "$mode" == "uninstall" ]]; then
   exit 0
 fi
 
+# PDF pages are rendered by hayro, compiled into the binary. No Poppler, MuPDF, or PDFium package.
 runtime_packages=(wayland libxkbcommon libx11 libxcursor libxrandr libxi fontconfig)
 build_packages=(base-devel pkgconf rust "${runtime_packages[@]}")
 if [[ "$mode" == "source" ]]; then
@@ -143,6 +145,25 @@ install_binary() {
     printf 'Add it to your PATH if needed: export PATH="%s:$PATH"\n' "$install_dir"
   fi
   printf 'Run it with: cahier\n'
+  offer_pdf_default
+}
+
+# Ask before changing the PDF handler. A non-interactive install only prints the command.
+offer_pdf_default() {
+  if ! command -v xdg-mime >/dev/null 2>&1; then
+    return
+  fi
+  local cmd="xdg-mime default ${APP_ID}.desktop application/pdf"
+  if [[ -t 0 ]]; then
+    printf 'Open PDF files with Cahier by default? [y/N] '
+    local answer=""
+    read -r answer || answer=""
+    if [[ "$answer" =~ ^[Yy]$ ]]; then
+      xdg-mime default "${APP_ID}.desktop" application/pdf || true
+    fi
+  else
+    printf 'To open PDFs with Cahier by default, run:\n  %s\n' "$cmd"
+  fi
 }
 
 if [[ "$mode" == "source" ]]; then

@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use crate::document::{Note, PaperKind};
+use crate::document::{Note, PageBackground, PaperKind};
 use crate::ink::{ribbon_outline, InkStroke};
 use crate::look::Look;
 use flate2::write::ZlibEncoder;
@@ -8,26 +8,44 @@ use flate2::Compression;
 use fontdue::{Font, FontSettings};
 use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, Pixmap, Stroke as SkStroke, Transform};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RasterMode {
+    /// Paper, background, and ink.
+    Full,
+    /// Ink, text, and placed images on a transparent page.
+    Annotations,
+}
+
 pub fn raster_page(
     note: &Note,
     page_i: usize,
     look: &Look,
     scale: f32,
     media: &MediaLoader,
+    note_dir: &std::path::Path,
+    mode: RasterMode,
 ) -> Option<Pixmap> {
     let page = note.pages.get(page_i)?;
     let (page_w, page_h) = note.page_size();
-    let w = (page_w * scale).round() as u32;
-    let h = (page_h * scale).round() as u32;
+    let w = (page_w * scale).round().max(1.0) as u32;
+    let h = (page_h * scale).round().max(1.0) as u32;
     let mut pm = Pixmap::new(w, h)?;
-    let paper = if note.paper == PaperKind::Slate {
-        rgb(look.desk_deep)
-    } else {
-        rgb(look.paper)
-    };
-    pm.fill(paper);
     let t = Transform::from_scale(scale, scale);
-    draw_template(&mut pm, note.paper, look, t, page_w, page_h);
+    if mode == RasterMode::Full {
+        let paper = if note.paper == PaperKind::Slate {
+            rgb(look.desk_deep)
+        } else {
+            rgb(look.paper)
+        };
+        pm.fill(paper);
+        let drew_bg = page
+            .background
+            .as_ref()
+            .is_some_and(|bg| draw_background(&mut pm, note, bg, scale, note_dir));
+        if !drew_bg {
+            draw_template(&mut pm, note.paper, look, t, page_w, page_h);
+        }
+    }
     for im in &page.images {
         if let Some((iw, ih, rgba)) = media.rgba(&im.file) {
             blit(
@@ -76,13 +94,69 @@ pub fn pixmap_png(pm: &Pixmap) -> Option<Vec<u8>> {
     Some(out)
 }
 
-pub fn pages_pdf(note: &Note, look: &Look, media: &MediaLoader) -> Option<Vec<u8>> {
+pub fn pages_pdf(
+    note: &Note,
+    look: &Look,
+    media: &MediaLoader,
+    note_dir: &std::path::Path,
+) -> Option<Vec<u8>> {
+    if note_has_pdf_background(note) {
+        if let Some(bytes) = stamp_original_pdf(note, look, media, note_dir) {
+            return Some(bytes);
+        }
+    }
     let mut images = Vec::new();
     for i in 0..note.pages.len() {
-        let pm = raster_page(note, i, look, 1.6, media)?;
+        let pm = raster_page(note, i, look, 1.6, media, note_dir, RasterMode::Full)?;
         images.push((pm.width(), pm.height(), rgb_from_rgba(pm.data())));
     }
     Some(simple_pdf(&images))
+}
+
+fn note_has_pdf_background(note: &Note) -> bool {
+    note.pages.iter().any(|page| {
+        page.background
+            .as_ref()
+            .is_some_and(|bg| bg.pdf_page.is_some())
+    })
+}
+
+fn draw_background(
+    pm: &mut Pixmap,
+    note: &Note,
+    bg: &PageBackground,
+    scale: f32,
+    note_dir: &std::path::Path,
+) -> bool {
+    let (page_w, page_h) = note.page_size();
+    let [x, y, w, h] = bg.fit(page_w, page_h);
+    let loaded = if let Some(pdf_page) = bg.pdf_page {
+        let pt = bg.source_size.unwrap_or([page_w, page_h]);
+        let hayro_scale = ((w * scale) / pt[0].max(1.0)).clamp(0.25, 4.0);
+        crate::pdf::render_pdf_file(&note_dir.join(&bg.file), pdf_page, hayro_scale)
+            .ok()
+            .map(|rendered| (rendered.width, rendered.height, rendered.rgba))
+    } else {
+        image::open(note_dir.join(&bg.file)).ok().map(|img| {
+            let img = img.into_rgba8();
+            let (iw, ih) = img.dimensions();
+            (iw, ih, img.into_raw())
+        })
+    };
+    let Some((iw, ih, rgba)) = loaded else {
+        return false;
+    };
+    blit(
+        pm,
+        x * scale,
+        y * scale,
+        w * scale,
+        h * scale,
+        iw,
+        ih,
+        &rgba,
+    );
+    true
 }
 
 pub struct MediaLoader {
@@ -455,4 +529,497 @@ fn simple_pdf(pages: &[(u32, u32, Vec<u8>)]) -> Vec<u8> {
         .as_bytes(),
     );
     body
+}
+
+fn stamp_original_pdf(
+    note: &Note,
+    look: &Look,
+    media: &MediaLoader,
+    note_dir: &std::path::Path,
+) -> Option<Vec<u8>> {
+    let source = note.pages.iter().find_map(|page| {
+        page.background.as_ref().and_then(|bg| {
+            bg.pdf_page?;
+            Some(bg.file.clone())
+        })
+    })?;
+    let bytes = std::fs::read(note_dir.join(&source)).ok()?;
+    let mut doc = lopdf::Document::load_mem(&bytes).ok()?;
+    let original: Vec<lopdf::ObjectId> = doc.page_iter().collect();
+    let pages_id = doc
+        .catalog()
+        .ok()?
+        .get(b"Pages")
+        .and_then(lopdf::Object::as_reference)
+        .ok()?;
+    let mut out_ids = Vec::new();
+    let mut used = std::collections::HashSet::new();
+    for (i, page) in note.pages.iter().enumerate() {
+        let pdf_slot =
+            page.background.as_ref().and_then(
+                |bg| {
+                    if bg.file == source {
+                        bg.pdf_page
+                    } else {
+                        None
+                    }
+                },
+            );
+        if let Some(index) = pdf_slot {
+            if let Some(&id) = original.get(index as usize) {
+                if used.insert(id) {
+                    if page_has_marks(page) {
+                        if let Some(layer) = annotation_layer(note, i, look, media, note_dir) {
+                            let _ = stamp_page(&mut doc, id, &layer);
+                        }
+                    }
+                    out_ids.push(id);
+                    continue;
+                }
+            }
+        }
+        let pm = raster_page(note, i, look, 1.6, media, note_dir, RasterMode::Full)?;
+        let (page_w, page_h) = note.page_size();
+        let id = push_raster_page(
+            &mut doc,
+            pages_id,
+            pm.width(),
+            pm.height(),
+            &straight_rgba(pm.data()),
+            page_w * 72.0 / 96.0,
+            page_h * 72.0 / 96.0,
+        )?;
+        out_ids.push(id);
+    }
+    if out_ids.is_empty() {
+        return None;
+    }
+    set_page_list(&mut doc, pages_id, &out_ids).ok()?;
+    let mut out = Vec::new();
+    doc.save_to(&mut out).ok()?;
+    Some(out)
+}
+
+fn page_has_marks(page: &crate::document::Page) -> bool {
+    !page.strokes.is_empty() || !page.texts.is_empty() || !page.images.is_empty()
+}
+
+struct RgbaLayer {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+}
+
+fn annotation_layer(
+    note: &Note,
+    page_i: usize,
+    look: &Look,
+    media: &MediaLoader,
+    note_dir: &std::path::Path,
+) -> Option<RgbaLayer> {
+    let page = note.pages.get(page_i)?;
+    let bg = page.background.as_ref()?;
+    let pm = raster_page(
+        note,
+        page_i,
+        look,
+        2.0,
+        media,
+        note_dir,
+        RasterMode::Annotations,
+    )?;
+    let (page_w, page_h) = note.page_size();
+    let [x, y, w, h] = bg.fit(page_w, page_h);
+    let scale = 2.0;
+    let cropped = crop_rgba(
+        pm.data(),
+        pm.width(),
+        pm.height(),
+        (x * scale).round().max(0.0) as u32,
+        (y * scale).round().max(0.0) as u32,
+        (w * scale).round().max(1.0) as u32,
+        (h * scale).round().max(1.0) as u32,
+    )?;
+    if !cropped.rgba.chunks_exact(4).any(|px| px[3] > 8) {
+        return None;
+    }
+    Some(cropped)
+}
+
+fn crop_rgba(src: &[u8], sw: u32, sh: u32, x: u32, y: u32, w: u32, h: u32) -> Option<RgbaLayer> {
+    if sw == 0 || sh == 0 {
+        return None;
+    }
+    let x = x.min(sw.saturating_sub(1));
+    let y = y.min(sh.saturating_sub(1));
+    let w = w.min(sw - x).max(1);
+    let h = h.min(sh - y).max(1);
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for row in y..y + h {
+        let start = ((row * sw + x) * 4) as usize;
+        let end = start + (w * 4) as usize;
+        rgba.extend_from_slice(&src[start..end]);
+    }
+    Some(RgbaLayer {
+        width: w,
+        height: h,
+        rgba: straight_rgba(&rgba),
+    })
+}
+
+fn straight_rgba(src: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(src.len());
+    for px in src.chunks_exact(4) {
+        let a = px[3];
+        if a == 0 || a == 255 {
+            out.extend_from_slice(px);
+        } else {
+            out.push(((u16::from(px[0]) * 255) / u16::from(a)) as u8);
+            out.push(((u16::from(px[1]) * 255) / u16::from(a)) as u8);
+            out.push(((u16::from(px[2]) * 255) / u16::from(a)) as u8);
+            out.push(a);
+        }
+    }
+    out
+}
+
+fn stamp_page(
+    doc: &mut lopdf::Document,
+    page_id: lopdf::ObjectId,
+    layer: &RgbaLayer,
+) -> lopdf::Result<()> {
+    let (llx, lly, urx, ury, rotate) =
+        page_box(doc, page_id).unwrap_or((0.0, 0.0, 595.0, 842.0, 0));
+    let image_id = add_rgba_image(doc, layer)?;
+    let name = insert_xobject(doc, page_id, image_id)?;
+    let [a, b, c, d, e, f] = image_matrix(rotate, llx, lly, urx, ury);
+    let ops = format!("q\n{a:.3} {b:.3} {c:.3} {d:.3} {e:.3} {f:.3} cm\n/{name} Do\nQ\n");
+    doc.add_page_contents(page_id, ops.into_bytes())
+}
+
+fn image_matrix(rotate: i32, llx: f32, lly: f32, urx: f32, ury: f32) -> [f32; 6] {
+    let w = urx - llx;
+    let h = ury - lly;
+    match rotate.rem_euclid(360) {
+        90 => [0.0, h, -w, 0.0, llx + w, lly],
+        180 => [-w, 0.0, 0.0, -h, llx + w, lly + h],
+        270 => [0.0, -h, w, 0.0, llx, lly + h],
+        _ => [w, 0.0, 0.0, h, llx, lly],
+    }
+}
+
+fn page_box(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> Option<(f32, f32, f32, f32, i32)> {
+    let mut current = page_id;
+    let mut media = None;
+    let mut crop = None;
+    let mut rotate = 0i32;
+    for _ in 0..16 {
+        let dict = doc.get_dictionary(current).ok()?.clone();
+        if media.is_none() {
+            media = dict.get(b"MediaBox").ok().and_then(|obj| rect_of(doc, obj));
+        }
+        if crop.is_none() {
+            crop = dict.get(b"CropBox").ok().and_then(|obj| rect_of(doc, obj));
+        }
+        if rotate == 0 {
+            if let Ok(value) = dict.get(b"Rotate") {
+                rotate = number(value).unwrap_or(0.0) as i32;
+            }
+        }
+        let Ok(parent) = dict.get(b"Parent").and_then(lopdf::Object::as_reference) else {
+            break;
+        };
+        current = parent;
+    }
+    let [llx, lly, urx, ury] = crop.or(media)?;
+    Some((llx, lly, urx, ury, rotate))
+}
+
+fn rect_of(doc: &lopdf::Document, obj: &lopdf::Object) -> Option<[f32; 4]> {
+    let obj = match obj {
+        lopdf::Object::Reference(id) => doc.get_object(*id).ok()?,
+        other => other,
+    };
+    let arr = obj.as_array().ok()?;
+    if arr.len() != 4 {
+        return None;
+    }
+    Some([
+        number(&arr[0])?,
+        number(&arr[1])?,
+        number(&arr[2])?,
+        number(&arr[3])?,
+    ])
+}
+
+fn number(obj: &lopdf::Object) -> Option<f32> {
+    match obj {
+        lopdf::Object::Integer(n) => Some(*n as f32),
+        lopdf::Object::Real(n) => Some(*n),
+        _ => None,
+    }
+}
+
+fn add_rgba_image(doc: &mut lopdf::Document, layer: &RgbaLayer) -> lopdf::Result<lopdf::ObjectId> {
+    let mut rgb = Vec::with_capacity((layer.width * layer.height * 3) as usize);
+    let mut alpha = Vec::with_capacity((layer.width * layer.height) as usize);
+    for px in layer.rgba.chunks_exact(4) {
+        rgb.extend_from_slice(&px[..3]);
+        alpha.push(px[3]);
+    }
+    let mask = flate_stream(layer.width, layer.height, b"DeviceGray", &alpha, None);
+    let mask_id = doc.add_object(lopdf::Object::Stream(mask));
+    let image = flate_stream(layer.width, layer.height, b"DeviceRGB", &rgb, Some(mask_id));
+    Ok(doc.add_object(lopdf::Object::Stream(image)))
+}
+
+fn flate_stream(
+    width: u32,
+    height: u32,
+    color: &[u8],
+    samples: &[u8],
+    mask: Option<lopdf::ObjectId>,
+) -> lopdf::Stream {
+    let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+    let _ = enc.write_all(samples);
+    let compressed = enc.finish().unwrap_or_default();
+    let mut dict = lopdf::Dictionary::new();
+    dict.set("Type", lopdf::Object::Name(b"XObject".to_vec()));
+    dict.set("Subtype", lopdf::Object::Name(b"Image".to_vec()));
+    dict.set("Width", width as i64);
+    dict.set("Height", height as i64);
+    dict.set("ColorSpace", lopdf::Object::Name(color.to_vec()));
+    dict.set("BitsPerComponent", 8_i64);
+    dict.set("Filter", lopdf::Object::Name(b"FlateDecode".to_vec()));
+    if let Some(mask) = mask {
+        dict.set("SMask", lopdf::Object::Reference(mask));
+    }
+    let mut stream = lopdf::Stream::new(dict, compressed);
+    stream.allows_compression = false;
+    stream
+}
+
+fn insert_xobject(
+    doc: &mut lopdf::Document,
+    page_id: lopdf::ObjectId,
+    image_id: lopdf::ObjectId,
+) -> lopdf::Result<String> {
+    let mut resources = nearest_resources(doc, page_id).unwrap_or_default();
+    let mut xobjects = match resources.get(b"XObject") {
+        Ok(lopdf::Object::Dictionary(dict)) => dict.clone(),
+        Ok(lopdf::Object::Reference(id)) => doc
+            .get_dictionary(*id)
+            .ok()
+            .cloned()
+            .unwrap_or_else(lopdf::Dictionary::new),
+        _ => lopdf::Dictionary::new(),
+    };
+    let mut name = "CahierInk".to_string();
+    let mut n = 0u32;
+    while xobjects.has(name.as_bytes()) {
+        n += 1;
+        name = format!("CahierInk{n}");
+    }
+    xobjects.set(name.as_str(), lopdf::Object::Reference(image_id));
+    resources.set("XObject", xobjects);
+    let page = doc.get_object_mut(page_id)?.as_dict_mut()?;
+    page.set("Resources", resources);
+    Ok(name)
+}
+
+fn nearest_resources(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> Option<lopdf::Dictionary> {
+    let mut current = page_id;
+    for _ in 0..16 {
+        let dict = doc.get_dictionary(current).ok()?.clone();
+        if let Ok(obj) = dict.get(b"Resources") {
+            if let Some(resolved) = resolve_dict(doc, obj) {
+                return Some(resolved);
+            }
+        }
+        let Ok(parent) = dict.get(b"Parent").and_then(lopdf::Object::as_reference) else {
+            break;
+        };
+        current = parent;
+    }
+    None
+}
+
+fn resolve_dict(doc: &lopdf::Document, obj: &lopdf::Object) -> Option<lopdf::Dictionary> {
+    match obj {
+        lopdf::Object::Dictionary(dict) => Some(dict.clone()),
+        lopdf::Object::Reference(id) => doc.get_dictionary(*id).ok().cloned(),
+        _ => None,
+    }
+}
+
+fn set_page_list(
+    doc: &mut lopdf::Document,
+    pages_id: lopdf::ObjectId,
+    ids: &[lopdf::ObjectId],
+) -> lopdf::Result<()> {
+    for id in ids {
+        if let Ok(page) = doc.get_object_mut(*id).and_then(lopdf::Object::as_dict_mut) {
+            page.set("Parent", lopdf::Object::Reference(pages_id));
+        }
+    }
+    let kids: Vec<lopdf::Object> = ids.iter().copied().map(lopdf::Object::Reference).collect();
+    let pages = doc.get_object_mut(pages_id)?.as_dict_mut()?;
+    pages.set("Kids", kids);
+    pages.set("Count", ids.len() as i64);
+    Ok(())
+}
+
+fn push_raster_page(
+    doc: &mut lopdf::Document,
+    pages_id: lopdf::ObjectId,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    media_w: f32,
+    media_h: f32,
+) -> Option<lopdf::ObjectId> {
+    let layer = RgbaLayer {
+        width,
+        height,
+        rgba: rgba.to_vec(),
+    };
+    let image_id = add_rgba_image(doc, &layer).ok()?;
+    let mut resources = lopdf::Dictionary::new();
+    let mut xobjects = lopdf::Dictionary::new();
+    xobjects.set("Im0", lopdf::Object::Reference(image_id));
+    resources.set("XObject", xobjects);
+    let content = format!("q\n{media_w:.2} 0 0 {media_h:.2} 0 0 cm\n/Im0 Do\nQ\n");
+    let stream = lopdf::Stream::new(lopdf::Dictionary::new(), content.into_bytes());
+    let content_id = doc.add_object(lopdf::Object::Stream(stream));
+    let mut page = lopdf::Dictionary::new();
+    page.set("Type", lopdf::Object::Name(b"Page".to_vec()));
+    page.set("Parent", lopdf::Object::Reference(pages_id));
+    page.set(
+        "MediaBox",
+        vec![
+            lopdf::Object::Real(0.0),
+            lopdf::Object::Real(0.0),
+            lopdf::Object::Real(media_w),
+            lopdf::Object::Real(media_h),
+        ],
+    );
+    page.set("Resources", resources);
+    page.set("Contents", lopdf::Object::Reference(content_id));
+    Some(doc.add_object(lopdf::Object::Dictionary(page)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::{Note, PageBackground, PaperKind};
+    use crate::ink::{InkPoint, InkStroke, Nib};
+    use crate::look::Look;
+    use crate::pdf::{marked_pdf, MarkedPage};
+    use egui::{Color32, Pos2};
+
+    fn mark(x: f32, y: f32) -> InkStroke {
+        let mut stroke = InkStroke::new(Nib::Fineliner, Color32::from_rgb(220, 30, 30), 4.0);
+        stroke.points.push(InkPoint::new(Pos2::new(x, y), 1.0));
+        stroke
+            .points
+            .push(InkPoint::new(Pos2::new(x + 40.0, y + 10.0), 1.0));
+        stroke
+    }
+
+    #[test]
+    fn annotated_pdf_keeps_the_original_page_and_adds_ink() {
+        let bytes = marked_pdf(&[MarkedPage {
+            width: 200.0,
+            height: 100.0,
+            rotate: 0,
+            marker: "KEEP-ORIGINAL",
+        }]);
+        let dir = std::env::temp_dir().join(format!("cahier-stamp-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("source.pdf"), &bytes).unwrap();
+        let mut note = Note::blank("lecture", 0);
+        note.paper = PaperKind::Blank;
+        let (w, h) = crate::pdf::logical_size(200.0, 100.0);
+        note.page_w = w;
+        note.page_h = h;
+        note.pages[0].background = Some(PageBackground {
+            file: "source.pdf".into(),
+            pdf_page: Some(0),
+            source_size: Some([200.0, 100.0]),
+        });
+        note.pages[0].strokes.push(mark(30.0, 20.0));
+        let look = Look::load();
+        let media = MediaLoader {
+            root: dir.join("media"),
+        };
+        let pdf = pages_pdf(&note, &look, &media, &dir).expect("export");
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(
+            text.contains("KEEP-ORIGINAL"),
+            "original page content was dropped"
+        );
+        assert!(
+            text.contains("CahierInk"),
+            "annotations were not added on top"
+        );
+        let doc = lopdf::Document::load_mem(&pdf).unwrap();
+        assert_eq!(doc.get_pages().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rotated_page_uses_a_counter_rotation() {
+        let bytes = marked_pdf(&[MarkedPage {
+            width: 200.0,
+            height: 100.0,
+            rotate: 90,
+            marker: "ROT",
+        }]);
+        let [a, b, c, d, e, f] = image_matrix(90, 0.0, 0.0, 200.0, 100.0);
+        assert_eq!([a, b, c, d, e, f], [0.0, 100.0, -200.0, 0.0, 200.0, 0.0]);
+        let dir = std::env::temp_dir().join(format!("cahier-rot-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("source.pdf"), &bytes).unwrap();
+        let mut note = Note::blank("rot", 0);
+        note.paper = PaperKind::Blank;
+        let (w, h) = crate::pdf::logical_size(100.0, 200.0);
+        note.page_w = w;
+        note.page_h = h;
+        note.pages[0].background = Some(PageBackground {
+            file: "source.pdf".into(),
+            pdf_page: Some(0),
+            source_size: Some([100.0, 200.0]),
+        });
+        note.pages[0].strokes.push(mark(12.0, 18.0));
+        let pdf = pages_pdf(
+            &note,
+            &Look::load(),
+            &MediaLoader {
+                root: dir.join("media"),
+            },
+            &dir,
+        )
+        .unwrap();
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(text.contains("ROT"));
+        assert!(text.contains("100.000 -200.000"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plain_note_still_exports() {
+        let note = Note::blank("plain", 0);
+        let dir = std::env::temp_dir();
+        let pdf = pages_pdf(
+            &note,
+            &Look::load(),
+            &MediaLoader {
+                root: dir.to_path_buf(),
+            },
+            &dir,
+        )
+        .unwrap();
+        assert!(pdf.starts_with(b"%PDF"));
+    }
 }

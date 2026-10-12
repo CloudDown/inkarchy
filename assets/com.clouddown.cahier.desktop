@@ -2,8 +2,9 @@
 Type=Application
 Name=Cahier
 Comment=Stylus notes on an Omarchy lectern
-Exec=cahier
+Exec=cahier %F
 Icon=com.clouddown.cahier
 Terminal=false
+MimeType=application/pdf;image/png;image/jpeg;image/webp;image/svg+xml;
 Categories=Office;Education;
 StartupWMClass=com.clouddown.cahier

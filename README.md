@@ -82,6 +82,39 @@ CAHIER_OPEN=Mindset cahier   # open a notebook by title
 
 Theme read from `omarchy theme current` / `colors.toml`.
 
+## Open a file
+
+Cahier opens a PDF, an image, or a short text file as a notebook.
+
+```bash
+cahier ~/Downloads/x.pdf
+cahier notes.png diagram.svg readme.md
+```
+
+Each PDF page becomes a page. The rendered page stays put as the background, and ink goes on top. Downloading the notebook as PDF keeps the original page and draws the annotations over it. The original file is copied into the notebook folder.
+
+PNG, JPEG, WEBP, and SVG become a page background when you open them from the shelf or the command line. If a notebook is already open, the same image is placed on the current page. A short `.txt` or `.md` file (up to 64 KiB of text) becomes one text block.
+
+Open… is the button on the left of the shelf, and a row in the notebook menu. `Ctrl+O` opens the same dialog.
+
+PDF rendering uses [hayro](https://crates.io/crates/hayro), linked into the `cahier` binary. Install does not add Poppler, MuPDF, or PDFium.
+
+### Open with Cahier
+
+`install.sh` writes a desktop entry with `Exec` passing every selected file (`%F`) and:
+
+```
+MimeType=application/pdf;image/png;image/jpeg;image/webp;image/svg+xml;
+```
+
+On Omarchy, in Nautilus, right-click a PDF and choose **Open with Cahier**. The same path from a terminal is `cahier ~/Downloads/x.pdf`. If Cahier is already running, that command opens the file in the existing window.
+
+The installer asks before making Cahier the default PDF application, and only when you are at a terminal. To do it yourself:
+
+```bash
+xdg-mime default com.clouddown.cahier.desktop application/pdf
+```
+
 ### Hyprland
 
 Optional keybinding in `~/.config/hypr/hyprland.conf`:
