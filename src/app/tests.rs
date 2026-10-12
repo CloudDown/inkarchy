@@ -1,4 +1,98 @@
 use super::*;
+mod gestures;
+
+#[test]
+fn object_selection_moves_resizes_and_offers_actions_with_mouse_and_touch() {
+    for touch in [false, true] {
+        let mut fixture = Fixture::new();
+        let id = fixture.notebook("Manipulation");
+        let app = &mut fixture.app;
+        app.open_note(id);
+        let mut text = TextBox::new(pos2(180.0, 180.0), Color32::BLACK);
+        text.text = "Move me".into();
+        text.size = [160.0, 100.0];
+        let text_id = text.id;
+        app.note.as_mut().unwrap().pages[0].texts.push(text);
+        app.tool = Tool::Lasso;
+        let mut frames = Frames::new(app);
+        frames.settle(app);
+        app.camera = Camera { pan: vec2(30.0, 30.0), zoom: 1.0 };
+        app.fitted_cell = None;
+        frames.settle(app);
+        let canvas = app.canvas_rect;
+        let start = app.camera.to_screen(pos2(240.0, 225.0), canvas);
+        let end = start + vec2(55.0, 35.0);
+        let camera = app.camera;
+        if touch {
+            frames.touch(app, TouchPhase::Start, start);
+            frames.touch(app, TouchPhase::Move, end);
+            frames.touch(app, TouchPhase::End, end);
+        } else { frames.drag(app, start, end); }
+        frames.settle(app);
+        assert_eq!(app.sel.len(), 1);
+        assert_eq!(app.sel[0].id, text_id);
+        let text = &app.note.as_ref().unwrap().pages[0].texts[0];
+        assert!(text.min().distance(pos2(235.0, 215.0)) < 0.1);
+        assert_eq!(app.camera.pan, camera.pan, "object dragging must not pan the page");
+        let original = text.clone();
+        let from = app.camera.to_screen(text.rect().max, canvas);
+        let to = from + vec2(80.0, 50.0);
+        if touch {
+            frames.touch(app, TouchPhase::Start, from);
+            frames.touch(app, TouchPhase::Move, to);
+            frames.touch(app, TouchPhase::End, to);
+        } else { frames.drag(app, from, to); }
+        frames.settle(app);
+        let text = &app.note.as_ref().unwrap().pages[0].texts[0];
+        assert!((text.size[0] - 240.0).abs() < 0.1);
+        assert!((text.size_pt - original.size_pt * 1.5).abs() < 0.1);
+        assert_eq!(text.pos, original.pos);
+        assert!(app.undo.undo(app.note.as_mut().unwrap()));
+        assert_eq!(app.note.as_ref().unwrap().pages[0].texts[0].size, original.size);
+        frames.settle(app);
+        frames.snapshot(if touch { "selection-touch" } else { "selection-mouse" });
+        let duplicate = frames.text_center("Duplicate");
+        frames.drag(app, duplicate, duplicate);
+        frames.settle(app);
+        assert_eq!(app.note.as_ref().unwrap().pages[0].texts.len(), 2);
+        let delete = frames.text_center("Delete");
+        frames.drag(app, delete, delete);
+        frames.settle(app);
+        assert_eq!(app.note.as_ref().unwrap().pages[0].texts.len(), 1);
+        assert_eq!(app.note.as_ref().unwrap().pages[0].texts[0].id, text_id);
+    }
+}
+
+#[test]
+fn selection_scale_preserves_group_offsets_across_linked_pages() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Group");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut stroke = InkStroke::new(Nib::Fineliner, Color32::BLACK, 2.0);
+    stroke.push(InkPoint::new(pos2(100.0, 100.0), 0.5));
+    stroke.push(InkPoint::new(pos2(150.0, 150.0), 0.8));
+    stroke.tessellate();
+    let stroke_id = stroke.id;
+    let image_id = Uuid::new_v4();
+    let note = app.note.as_mut().unwrap();
+    note.pages[0].strokes.push(stroke);
+    let mut page = crate::document::Page::at(1, 0);
+    page.images.push(ImageObj { id: image_id, pos: [10.0, 100.0], size: [80.0, 60.0], file: "fixture.png".into() });
+    note.pages.push(page);
+    app.sel = vec![Sel { page: 0, id: stroke_id, kind: SelKind::Stroke },
+        Sel { page: 1, id: image_id, kind: SelKind::Image }];
+    app.push_snapshot();
+    app.scale_selection(pos2(100.0, 100.0), 2.0);
+    let note = app.note.as_ref().unwrap();
+    assert_eq!(note.pages[0].strokes[0].points[1].pos(), pos2(200.0, 200.0));
+    assert!(note.pages[0].strokes[0].mesh.is_none());
+    assert_eq!(note.pages[0].strokes[0].width, 4.0);
+    assert_eq!(note.pages[1].images[0].size, [160.0, 120.0]);
+    assert_eq!(note.pages[1].images[0].pos, [PAGE_W - 80.0, 100.0]);
+    assert!(app.undo.undo(app.note.as_mut().unwrap()));
+    assert_eq!(app.note.as_ref().unwrap().pages[1].images[0].pos, [10.0, 100.0]);
+}
 
 struct Fixture {
     app: CahierApp,
@@ -671,7 +765,7 @@ fn home_return_button_saves_and_accepts_mouse_touch_and_keyboard() {
             0 => frames.drag(app, button.center(), button.center()),
             1 => {
                 frames.touch(app, TouchPhase::Start, button.center());
-                frames.touch(app, TouchPhase::End, button.center());
+                assert!(matches!(app.scene, Scene::Shelf { .. }), "a finger press returns home immediately");
             }
             2 => frames.key(app, Key::Enter),
             _ => frames.key(app, Key::Space),

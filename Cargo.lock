@@ -2166,6 +2166,7 @@ dependencies = [
  "flate2",
  "fontdue",
  "image",
+ "pollster",
  "raw-window-handle",
  "rfd",
  "serde",
