@@ -2,7 +2,7 @@
 name = "omacourses"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.89"
 authors = ["CloudDown"]
 description = "Cahier — stylus notes on an Omarchy lectern"
 license = "MIT"

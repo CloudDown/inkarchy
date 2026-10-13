@@ -8,7 +8,7 @@ Cahier : app native Rust (egui/eframe) de notes manuscrites au stylet, dans l'es
 ## Plateforme cible
 - Linux, Wayland d'abord (Hyprland / Omarchy, Arch). X11 supporté par eframe.
 - Écran tactile + stylet (tablet Wayland) **et** clavier/souris.
-- Binaire `cahier`, app id `com.clouddown.cahier`, Rust ≥ 1.88.
+- Binaire `cahier`, app id `com.clouddown.cahier`, Rust ≥ 1.89.
 - Thème lu depuis `~/.local/state/omarchy/current/theme/` (`colors.toml`), police UI via `fc-match monospace`.
 
 ## Fonctionnalités

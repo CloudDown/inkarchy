@@ -21,7 +21,7 @@
 ### Changed
 - The window title is Cahier.
 - Notebook and shelf saves are atomic: write a temp file in the same directory, fsync, then rename.
-- Version is 0.2.0. The crate now requires Rust 1.88, which the locked dependencies already need.
+- Version is 0.2.0. The crate now requires Rust 1.89, which the locked dependencies already need.
 
 ### Fixed
 - Empty strokes no longer panic while the ribbon is built or a shape is snapped.
