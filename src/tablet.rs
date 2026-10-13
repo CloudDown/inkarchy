@@ -279,11 +279,9 @@ impl Dispatch<WlRegistry, ()> for TabletState {
                         state.bind_tablet_seats(qh);
                     }
                 }
-                "zwp_pointer_gestures_v1" => {
-                    if state.gestures.is_none() {
-                        state.gestures = Some(registry.bind(name, version.min(1), qh, ()));
-                        state.bind_pinches(qh);
-                    }
+                "zwp_pointer_gestures_v1" if state.gestures.is_none() => {
+                    state.gestures = Some(registry.bind(name, version.min(1), qh, ()));
+                    state.bind_pinches(qh);
                 }
                 _ => {}
             }

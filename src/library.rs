@@ -69,6 +69,9 @@ pub struct Index {
     /// `true` = tutorial folded away (button only).
     #[serde(default = "default_true")]
     pub fiche_pliee: bool,
+    /// Opt-in finger drawing; one finger otherwise navigates and handles objects.
+    #[serde(default)]
+    pub finger_draw: bool,
     /// Column count used when `slot` was written. Missing field = the old 5-wide shelf.
     #[serde(default = "default_old_shelf_cols")]
     pub shelf_cols: u32,
@@ -91,6 +94,7 @@ impl Default for Index {
             dock: DockEdge::default(),
             mode: NoteMode::default(),
             fiche_pliee: true,
+            finger_draw: false,
             shelf_cols: SHELF_COLS,
         }
     }
@@ -554,14 +558,25 @@ pub fn data_dir() -> PathBuf {
 }
 
 pub fn ensure_png(bytes: &[u8]) -> Option<Vec<u8>> {
-    let img = image::load_from_memory(bytes).ok()?;
+    // Decode only a bounded source image. The saved canvas is capped further
+    // below, but limiting the decoder itself keeps a malformed or enormous
+    // upload from exhausting the application's memory before it is resized.
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(8192);
+    limits.max_image_height = Some(8192);
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    reader.limits(limits);
+    let img = reader.decode().ok()?;
     let img = img.into_rgba8();
     let (mut w, mut h) = img.dimensions();
     let max = 2048u32;
     let rgba = if w > max || h > max {
         let s = (max as f32 / w.max(h) as f32).min(1.0);
-        w = (w as f32 * s) as u32;
-        h = (h as f32 * s) as u32;
+        w = ((w as f32 * s) as u32).max(1);
+        h = ((h as f32 * s) as u32).max(1);
         image::imageops::resize(&img, w, h, image::imageops::FilterType::Triangle)
     } else {
         img
@@ -575,8 +590,8 @@ pub fn ensure_png(bytes: &[u8]) -> Option<Vec<u8>> {
 }
 
 pub fn image_size(path: &Path) -> Option<(f32, f32)> {
-    let img = image::open(path).ok()?;
-    Some((img.width() as f32, img.height() as f32))
+    let (w, h) = image::image_dimensions(path).ok()?;
+    Some((w as f32, h as f32))
 }
 
 #[cfg(test)]
@@ -687,5 +702,32 @@ mod tests {
                 let _ = fs::set_permissions(self.0, perms);
             }
         }
+    }
+
+    #[test]
+    fn imported_images_are_normalized_and_decoder_is_bounded() {
+        let small = image::RgbaImage::from_pixel(3000, 2, image::Rgba([8, 16, 24, 255]));
+        let mut encoded = Vec::new();
+        image::DynamicImage::ImageRgba8(small)
+            .write_to(
+                &mut std::io::Cursor::new(&mut encoded),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        let normalized = ensure_png(&encoded).expect("normal-sized import accepted");
+        let normalized = image::load_from_memory(&normalized).unwrap();
+        assert_eq!((normalized.width(), normalized.height()), (2048, 1));
+
+        // A tiny PNG file can claim an enormous width. Reject it before the
+        // decoder tries to reserve an equally enormous pixel buffer.
+        let too_wide = image::RgbaImage::from_pixel(8193, 1, image::Rgba([0, 0, 0, 0]));
+        let mut encoded = Vec::new();
+        image::DynamicImage::ImageRgba8(too_wide)
+            .write_to(
+                &mut std::io::Cursor::new(&mut encoded),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        assert!(ensure_png(&encoded).is_none());
     }
 }

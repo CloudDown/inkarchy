@@ -133,6 +133,10 @@ windowrule = float, class:^(com\.clouddown\.cahier)$
 
 The lectern follows the stylus: in range, the hand pans and the nib writes. Put it down, the mouse writes again.
 
+On a touch screen, drag an image or a text box directly with one finger, then use its corner handles to resize it. A short hold on a handwritten stroke selects it; the selection offers labelled editing, duplication and deletion actions. Images are selected as soon as they are inserted, and **Replace** changes an image without losing its placement.
+
+A finger on empty paper pans the canvas; two fingers pan and zoom even when something is selected. Choose **Draw with finger** in the notebook menu to use the pens by touch. The erasers and lasso work with a finger directly. Tap text to select it and choose **Edit text** (or double-tap it) to type. Hold a pen/eraser button to open its colour and thickness settings; tapping the active pen opens these settings too.
+
 | | Mouse | Stylus in range |
 |---|---|---|
 | Writes | mouse | stylus |

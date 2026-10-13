@@ -1,6 +1,6 @@
 [package]
 name = "omacourses"
-version = "0.3.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.88"
 authors = ["CloudDown"]
@@ -22,6 +22,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde", "clock"] }
 directories = "6"
 rfd = "0.15"
+pollster = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 tiny-skia = "0.11"
 fontdue = "0.9"

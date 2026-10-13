@@ -1,6 +1,6 @@
 //! Vector ink: points, pressure, ribbon, shapes.
 
-use egui::{epaint::Vertex, Color32, Mesh, Pos2, Stroke as EStroke, TextureId, Vec2};
+use egui::{epaint::Vertex, Color32, Mesh, Pos2, TextureId, Vec2};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -874,16 +874,6 @@ pub fn erase_area(stroke: &InkStroke, center: Pos2, radius: f32) -> Vec<InkStrok
     }
     flush(&mut cur, &mut fragments, stroke);
     fragments
-}
-
-pub fn draw_ants(painter: &egui::Painter, min: Pos2, max: Pos2, color: Color32) {
-    let rect = egui::Rect::from_min_max(min, max).expand(4.0);
-    painter.rect_stroke(
-        rect,
-        0.0,
-        EStroke::new(1.0_f32, color.gamma_multiply(0.85)),
-        egui::StrokeKind::Outside,
-    );
 }
 
 pub fn default_width(nib: Nib) -> f32 {
