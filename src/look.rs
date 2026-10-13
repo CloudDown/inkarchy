@@ -194,6 +194,16 @@ impl Look {
     pub fn green(&self) -> Color32 {
         self.inks.get(5).copied().unwrap_or(self.accent)
     }
+
+    /// Theme orange (Omarchy `orange`). Warm ochre for Open.
+    pub fn orange(&self) -> Color32 {
+        self.inks.get(3).copied().unwrap_or(self.accent)
+    }
+
+    /// Theme yellow (Omarchy `yellow`). Default sticky paper.
+    pub fn yellow(&self) -> Color32 {
+        self.inks.get(4).copied().unwrap_or(self.accent)
+    }
 }
 
 pub fn current_dir() -> PathBuf {

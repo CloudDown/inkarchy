@@ -25,11 +25,15 @@ Use the `+` tabs to add a page along any free edge.
 
 ### Paper for every idea
 
-Choose lined, grid, dotted, graph, or blank paper. Canson paper adds a subtle texture to notes and sketches.
+Choose lined, Cornell, grid, dotted, graph, or blank paper. Canson paper adds a subtle texture to notes and sketches. Cycle paper with `M`.
 
 <p align="center">
   <img src="docs/screens/millimetre.png" alt="Graph paper and drawing tools" width="80%">
 </p>
+
+### Lectern objects
+
+A pin on the shelf is a ribbon on the spine. Drag the sticky pad onto the page; hold the pad for color.
 
 ### A shelf and a bin
 
@@ -95,7 +99,7 @@ Each PDF page becomes a page. The rendered page stays put as the background, and
 
 PNG, JPEG, WEBP, and SVG become a page background when you open them from the shelf or the command line. If a notebook is already open, the same image is placed on the current page. A short `.txt` or `.md` file (up to 64 KiB of text) becomes one text block.
 
-Open… is the button on the left of the shelf, and a row in the notebook menu. `Ctrl+O` opens the same dialog.
+Open is the sheet button at the top right of the shelf, and a row in the notebook menu. `Ctrl+O` opens the same dialog.
 
 PDF rendering uses [hayro](https://crates.io/crates/hayro), linked into the `cahier` binary. Install does not add Poppler, MuPDF, or PDFium.
 

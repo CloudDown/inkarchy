@@ -160,6 +160,49 @@ impl Drop for Fixture {
     }
 }
 
+#[test]
+fn many_pdf_pages_do_not_block_the_first_frames() {
+    let mut fixture = Fixture::new();
+    let pages: Vec<_> = (0..40)
+        .map(|_| crate::pdf::MarkedPage {
+            width: 200.0,
+            height: 280.0,
+            rotate: 0,
+            marker: "P",
+        })
+        .collect();
+    let bytes = crate::pdf::marked_pdf(&pages);
+    let mut note = Note::blank("Talk", 0);
+    note.paper = PaperKind::Blank;
+    note.sheet_join = SheetJoin::Separate;
+    let id = note.id;
+    note.pages = (0..40)
+        .map(|i| {
+            let mut page = crate::document::Page::at(0, i);
+            page.background = Some(PageBackground {
+                file: "source.pdf".into(),
+                pdf_page: Some(i as u32),
+                source_size: Some([200.0, 280.0]),
+            });
+            page
+        })
+        .collect();
+    fixture.app.lib.insert_new(&note).expect("save notebook");
+    let dir = fixture.app.lib.note_dir(id);
+    std::fs::create_dir_all(dir.join("media")).unwrap();
+    std::fs::write(dir.join("source.pdf"), bytes).unwrap();
+    fixture.app.open_note(id);
+    let started = std::time::Instant::now();
+    let mut frames = Frames::new(&fixture.app);
+    frames.settle(&mut fixture.app);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_millis(1500),
+        "opening 40 PDF pages blocked the UI for {elapsed:?}"
+    );
+    assert!(matches!(fixture.app.scene, Scene::Desk));
+}
+
 struct Frames {
     ctx: Context,
     time: f64,
@@ -192,6 +235,7 @@ impl Frames {
         };
         let output = self.ctx.run(input, |ctx| {
             app.shortcuts(ctx);
+            app.ingest_pdf_rasters(ctx);
             match app.scene {
                 Scene::Shelf { .. } => app.ui_shelf(ctx),
                 Scene::Desk => app.ui_desk(ctx),
@@ -687,6 +731,29 @@ fn compact_controls_keep_drag_selection_and_wheel_actions_accessible() {
     frames.touch(app, TouchPhase::Start, cancel);
     frames.touch(app, TouchPhase::End, cancel);
     assert!(app.page_delete.is_none());
+}
+
+#[test]
+fn sticky_pad_drags_a_yellow_note_onto_the_page() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Stickies");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let pad = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("sticky-pad-rect")))
+        .expect("sticky pad");
+    let canvas = app.canvas_rect;
+    let drop = canvas.center();
+    frames.drag(app, pad.center(), drop);
+    frames.settle(app);
+    let texts = &app.note.as_ref().unwrap().pages[0].texts;
+    assert_eq!(texts.len(), 1);
+    assert!(texts[0].sticky);
+    assert_eq!(texts[0].color32(), app.look.yellow());
+    assert_eq!(app.editing_text.map(|(p, _)| p), Some(0));
 }
 
 #[test]

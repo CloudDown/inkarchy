@@ -105,6 +105,31 @@ impl InkStroke {
         }
     }
 
+    /// Snap a mostly-horizontal highlighter onto one ruled line.
+    pub fn cling_to_line(&mut self, y: f32) {
+        if self.nib != Nib::Highlighter || self.points.len() < 2 {
+            return;
+        }
+        let mut min_x = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut min_y = f32::MAX;
+        let mut max_y = f32::MIN;
+        for p in &self.points {
+            min_x = min_x.min(p.x);
+            max_x = max_x.max(p.x);
+            min_y = min_y.min(p.y);
+            max_y = max_y.max(p.y);
+        }
+        if max_x - min_x < 18.0 || (max_x - min_x) < (max_y - min_y) * 1.2 {
+            return;
+        }
+        self.points = vec![
+            InkPoint::new(Pos2::new(min_x, y), 1.0),
+            InkPoint::new(Pos2::new(max_x, y), 1.0),
+        ];
+        self.mesh = None;
+    }
+
     pub fn color32(&self) -> Color32 {
         Color32::from_rgba_unmultiplied(self.color[0], self.color[1], self.color[2], self.color[3])
     }
@@ -920,5 +945,17 @@ mod tests {
         let mesh = ribbon_mesh(&points, 3.0, Nib::Fineliner, Color32::BLACK);
         assert!(!mesh.vertices.is_empty());
         assert!(!mesh.indices.is_empty());
+    }
+
+    #[test]
+    fn highlighter_clings_to_a_rule() {
+        let mut s = InkStroke::new(Nib::Highlighter, Color32::YELLOW, 8.0);
+        s.push(InkPoint::new(pos2(40.0, 90.0), 1.0));
+        s.push(InkPoint::new(pos2(200.0, 98.0), 1.0));
+        s.cling_to_line(88.0);
+        assert_eq!(s.points.len(), 2);
+        assert!((s.points[0].y - 88.0).abs() < 0.01);
+        assert!((s.points[1].y - 88.0).abs() < 0.01);
+        assert!(s.points[1].x > s.points[0].x);
     }
 }

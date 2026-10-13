@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use crate::document::{Note, PageBackground, PaperKind};
+use crate::document::{Note, PageBackground, PaperKind, CORNELL_CUE, CORNELL_SUMMARY};
 use crate::ink::{ribbon_outline, InkStroke};
 use crate::look::Look;
 use flate2::write::ZlibEncoder;
@@ -70,6 +70,17 @@ pub fn raster_page(
             rgb(look.ink)
         };
         for tx in &page.texts {
+            if tx.sticky {
+                fill_rect(
+                    &mut pm,
+                    tx.pos[0] * scale,
+                    tx.pos[1] * scale,
+                    tx.size[0] * scale,
+                    tx.size[1] * scale,
+                    tx.color32(),
+                    t,
+                );
+            }
             draw_text(
                 &mut pm,
                 &font,
@@ -78,7 +89,7 @@ pub fn raster_page(
                 tx.pos[1] * scale,
                 tx.size[0] * scale,
                 tx.size_pt * scale,
-                ink,
+                if tx.sticky { rgb(look.ink) } else { ink },
             );
         }
     }
@@ -223,8 +234,56 @@ fn draw_template(
                 line(pm, 56.0, y, page_w - 24.0, y, &paint, &stroke, t);
                 y += 28.0;
             }
-            paint.set_color(rgb(look.accent));
+            let red = look.rust();
+            let paper = look.paper;
+            paint.set_color(Color::from_rgba8(
+                (paper.r() as f32 * 0.62 + red.r() as f32 * 0.38) as u8,
+                (paper.g() as f32 * 0.62 + red.g() as f32 * 0.38) as u8,
+                (paper.b() as f32 * 0.62 + red.b() as f32 * 0.38) as u8,
+                255,
+            ));
             line(pm, 64.0, 24.0, 64.0, page_h - 24.0, &paint, &stroke, t);
+        }
+        PaperKind::Cornell => {
+            paint.set_color(rgb(look.paper_rule_strong));
+            stroke.width = 1.0;
+            line(
+                pm,
+                CORNELL_CUE,
+                24.0,
+                CORNELL_CUE,
+                page_h - CORNELL_SUMMARY,
+                &paint,
+                &stroke,
+                t,
+            );
+            line(
+                pm,
+                24.0,
+                page_h - CORNELL_SUMMARY,
+                page_w - 24.0,
+                page_h - CORNELL_SUMMARY,
+                &paint,
+                &stroke,
+                t,
+            );
+            paint.set_color(rgb(look.paper_rule));
+            stroke.width = 0.8;
+            let mut y = 88.0;
+            let last = page_h - CORNELL_SUMMARY - 8.0;
+            while y < last {
+                line(
+                    pm,
+                    CORNELL_CUE + 12.0,
+                    y,
+                    page_w - 24.0,
+                    y,
+                    &paint,
+                    &stroke,
+                    t,
+                );
+                y += 28.0;
+            }
         }
         PaperKind::Grid => {
             paint.set_color(rgb(look.paper_rule));
@@ -309,6 +368,22 @@ fn line(
 
 fn rgb(c: egui::Color32) -> Color {
     Color::from_rgba8(c.r(), c.g(), c.b(), 255)
+}
+
+fn fill_rect(pm: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, color: egui::Color32, t: Transform) {
+    let mut pb = PathBuilder::new();
+    pb.push_rect(
+        tiny_skia::Rect::from_xywh(x, y, w.max(1.0), h.max(1.0))
+            .unwrap_or(tiny_skia::Rect::from_xywh(0.0, 0.0, 1.0, 1.0).unwrap()),
+    );
+    if let Some(path) = pb.finish() {
+        let mut paint = Paint {
+            anti_alias: true,
+            ..Paint::default()
+        };
+        paint.set_color(rgb(color));
+        pm.fill_path(&path, &paint, FillRule::Winding, t, None);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

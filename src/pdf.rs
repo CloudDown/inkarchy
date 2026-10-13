@@ -3,8 +3,11 @@
 //! hayro is pure Rust and is linked into the binary. Cahier does not need
 //! Poppler, MuPDF, or PDFium on the system.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
+use std::thread;
 
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::{LoadPdfError, Pdf, PdfData};
@@ -24,6 +27,7 @@ pub struct Rendered {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+    pub scale: f32,
 }
 
 /// Logical page size for a PDF page, clamped so a poster still fits the lectern.
@@ -41,14 +45,112 @@ pub fn logical_size(width_pt: f32, height_pt: f32) -> (f32, f32) {
 }
 
 /// Hayro scale (pixels per PDF point) for the current zoom, in a few steps.
+#[cfg(test)]
 pub fn render_scale(zoom: f32, pixels_per_point: f32) -> f32 {
-    let want = (zoom.max(0.05) * pixels_per_point.max(0.5) * PAPER_PER_PT).clamp(0.75, 4.0);
-    const STEPS: [f32; 4] = [1.5, 2.0, 3.0, 4.0];
+    snap_scale(zoom.max(0.02) * pixels_per_point.max(0.5) * PAPER_PER_PT)
+}
+
+/// Scale from the on-screen rectangle. Tiny sheets still get a thumbnail.
+pub fn raster_scale(
+    screen_w: f32,
+    screen_h: f32,
+    src_w_pt: f32,
+    src_h_pt: f32,
+    pixels_per_point: f32,
+) -> f32 {
+    let ppp = pixels_per_point.max(0.5);
+    let sx = (screen_w.max(1.0) * ppp) / src_w_pt.max(1.0);
+    let sy = (screen_h.max(1.0) * ppp) / src_h_pt.max(1.0);
+    snap_scale(sx.max(sy))
+}
+
+fn snap_scale(want: f32) -> f32 {
+    let want = want.clamp(0.25, 8.0);
+    const STEPS: [f32; 9] = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 8.0];
     STEPS
         .iter()
         .copied()
-        .find(|step| *step + 0.05 >= want)
-        .unwrap_or(4.0)
+        .find(|step| *step + 0.08 >= want)
+        .unwrap_or(8.0)
+}
+
+/// One PDF page to raster off the UI thread.
+pub struct RasterJob {
+    pub key: String,
+    pub path: PathBuf,
+    pub page: u32,
+    pub scale: f32,
+}
+
+/// Background hayro worker. Keeps the last opened PDF so turning pages does not re-parse.
+pub struct RasterHub {
+    tx: Sender<RasterJob>,
+    rx: Receiver<(String, Result<Rendered, String>)>,
+}
+
+impl RasterHub {
+    pub fn new() -> Self {
+        let (job_tx, job_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let _ = thread::Builder::new()
+            .name("cahier-pdf".into())
+            .spawn(move || raster_loop(job_rx, done_tx));
+        Self {
+            tx: job_tx,
+            rx: done_rx,
+        }
+    }
+
+    pub fn request(&self, job: RasterJob) -> bool {
+        self.tx.send(job).is_ok()
+    }
+
+    pub fn take_ready(&self) -> Vec<(String, Result<Rendered, String>)> {
+        let mut out = Vec::new();
+        while let Ok(item) = self.rx.try_recv() {
+            out.push(item);
+        }
+        out
+    }
+}
+
+fn raster_loop(rx: Receiver<RasterJob>, tx: Sender<(String, Result<Rendered, String>)>) {
+    let mut cached: Option<(PathBuf, Pdf)> = None;
+    while let Ok(first) = rx.recv() {
+        let mut latest: HashMap<(PathBuf, u32), RasterJob> = HashMap::new();
+        latest.insert((first.path.clone(), first.page), first);
+        while let Ok(job) = rx.try_recv() {
+            latest.insert((job.path.clone(), job.page), job);
+        }
+        for job in latest.into_values() {
+            if cached.as_ref().is_none_or(|(path, _)| path != &job.path) {
+                cached = match std::fs::read(&job.path) {
+                    Ok(bytes) => match open_pdf(bytes) {
+                        Ok(pdf) => Some((job.path.clone(), pdf)),
+                        Err(err) => {
+                            if tx.send((job.key, Err(err))).is_err() {
+                                return;
+                            }
+                            continue;
+                        }
+                    },
+                    Err(err) => {
+                        if tx.send((job.key, Err(err.to_string()))).is_err() {
+                            return;
+                        }
+                        continue;
+                    }
+                };
+            }
+            let result = cached
+                .as_ref()
+                .map(|(_, pdf)| render_opened(pdf, job.page, job.scale))
+                .unwrap_or_else(|| Err("This PDF could not be read.".into()));
+            if tx.send((job.key, result)).is_err() {
+                return;
+            }
+        }
+    }
 }
 
 pub fn inspect_pdf(bytes: &[u8]) -> Result<Vec<PdfPageSpec>, String> {
@@ -75,7 +177,10 @@ pub fn render_pdf_file(path: &Path, page: u32, scale: f32) -> Result<Rendered, S
 }
 
 pub fn render_pdf_bytes(bytes: &[u8], page: u32, scale: f32) -> Result<Rendered, String> {
-    let pdf = open_pdf(bytes.to_vec())?;
+    render_opened(&open_pdf(bytes.to_vec())?, page, scale)
+}
+
+fn render_opened(pdf: &Pdf, page: u32, scale: f32) -> Result<Rendered, String> {
     let pdf_page = pdf
         .pages()
         .get(page as usize)
@@ -101,17 +206,113 @@ pub fn render_pdf_bytes(bytes: &[u8], page: u32, scale: f32) -> Result<Rendered,
         width,
         height,
         rgba: straight_rgba(pixmap.data_as_u8_slice()),
+        scale,
     })
 }
 
-fn clamp_scale(pt_w: f32, pt_h: f32, scale: f32) -> f32 {
-    let scale = scale.clamp(0.25, 4.0);
+pub fn clamp_scale(pt_w: f32, pt_h: f32, scale: f32) -> f32 {
+    let scale = scale.clamp(0.25, 8.0);
     let long = pt_w.max(pt_h).max(1.0) * scale;
-    if long > 4096.0 {
-        (scale * (4096.0 / long)).max(0.25)
+    const MAX: f32 = 4096.0;
+    if long > MAX {
+        (scale * (MAX / long)).max(0.25)
     } else {
         scale
     }
+}
+
+/// Text baselines in PDF points, origin top-left of the page.
+pub fn text_baselines(path: &Path, page: u32) -> Vec<f32> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    let Ok(pdf) = open_pdf(bytes) else {
+        return Vec::new();
+    };
+    let Some(pdf_page) = pdf.pages().get(page as usize) else {
+        return Vec::new();
+    };
+    let (w, h) = pdf_page.render_dimensions();
+    let settings = InterpreterSettings::default();
+    let mut context = hayro::hayro_interpret::Context::new(
+        kurbo::Affine::IDENTITY,
+        kurbo::Rect::new(0.0, 0.0, w as f64, h as f64),
+        pdf.xref(),
+        settings,
+    );
+    let mut extractor = LineExtractor {
+        height: h as f64,
+        ys: Vec::new(),
+    };
+    hayro::hayro_interpret::interpret_page(pdf_page, &mut context, &mut extractor);
+    cluster_baselines(&mut extractor.ys)
+}
+
+struct LineExtractor {
+    height: f64,
+    ys: Vec<f32>,
+}
+
+impl hayro::hayro_interpret::Device<'_> for LineExtractor {
+    fn set_soft_mask(&mut self, _: Option<hayro::hayro_interpret::SoftMask<'_>>) {}
+    fn set_blend_mode(&mut self, _: hayro::hayro_interpret::BlendMode) {}
+    fn draw_path(
+        &mut self,
+        _: &kurbo::BezPath,
+        _: kurbo::Affine,
+        _: &hayro::hayro_interpret::Paint<'_>,
+        _: &hayro::hayro_interpret::PathDrawMode,
+    ) {
+    }
+    fn push_clip_path(&mut self, _: &hayro::hayro_interpret::ClipPath) {}
+    fn push_transparency_group(
+        &mut self,
+        _: f32,
+        _: Option<hayro::hayro_interpret::SoftMask<'_>>,
+        _: hayro::hayro_interpret::BlendMode,
+    ) {
+    }
+    fn draw_glyph(
+        &mut self,
+        glyph: &hayro::hayro_interpret::font::Glyph<'_>,
+        transform: kurbo::Affine,
+        glyph_transform: kurbo::Affine,
+        _: &hayro::hayro_interpret::Paint<'_>,
+        _: &hayro::hayro_interpret::GlyphDrawMode,
+    ) {
+        if glyph.as_unicode().is_none() {
+            return;
+        }
+        let flip = kurbo::Affine::translate((0.0, self.height))
+            * kurbo::Affine::scale_non_uniform(1.0, -1.0);
+        let p = flip * transform * glyph_transform * kurbo::Point::new(0.0, 0.0);
+        self.ys.push(p.y as f32);
+    }
+    fn draw_image(&mut self, _: hayro::hayro_interpret::Image<'_, '_>, _: kurbo::Affine) {}
+    fn pop_clip_path(&mut self) {}
+    fn pop_transparency_group(&mut self) {}
+}
+
+fn cluster_baselines(ys: &mut [f32]) -> Vec<f32> {
+    if ys.is_empty() {
+        return Vec::new();
+    }
+    ys.sort_by(|a, b| a.total_cmp(b));
+    let mut out = Vec::new();
+    let mut acc = ys[0];
+    let mut n = 1u32;
+    for &y in &ys[1..] {
+        if (y - acc / n as f32).abs() < 2.4 {
+            acc += y;
+            n += 1;
+        } else {
+            out.push(acc / n as f32);
+            acc = y;
+            n = 1;
+        }
+    }
+    out.push(acc / n as f32);
+    out
 }
 
 fn open_pdf(bytes: Vec<u8>) -> Result<Pdf, String> {
@@ -272,7 +473,66 @@ mod tests {
 
     #[test]
     fn render_scale_steps_up_with_zoom() {
-        assert_eq!(render_scale(0.5, 1.0), 1.5);
-        assert!(render_scale(3.0, 1.0) >= 3.0);
+        assert_eq!(render_scale(0.5, 1.0), 0.75);
+        assert_eq!(render_scale(1.0, 1.0), 1.5);
+        assert!(render_scale(3.0, 1.0) >= 4.0);
+        assert_eq!(render_scale(0.05, 1.0), 0.25);
+    }
+
+    #[test]
+    fn tiny_on_screen_pages_still_get_a_thumbnail() {
+        assert_eq!(raster_scale(20.0, 20.0, 600.0, 800.0, 1.0), 0.25);
+        let scale = raster_scale(800.0, 600.0, 600.0, 450.0, 1.0);
+        assert!((1.0..=2.0).contains(&scale));
+    }
+
+    #[test]
+    fn raster_hub_keeps_page_index_off_the_ui_thread() {
+        let dir = std::env::temp_dir().join(format!(
+            "cahier-pdf-hub-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("talk.pdf");
+        let bytes = marked_pdf(&[
+            MarkedPage {
+                width: 120.0,
+                height: 80.0,
+                rotate: 0,
+                marker: "A",
+            },
+            MarkedPage {
+                width: 80.0,
+                height: 120.0,
+                rotate: 0,
+                marker: "B",
+            },
+        ]);
+        std::fs::write(&path, bytes).unwrap();
+        let hub = RasterHub::new();
+        assert!(hub.request(RasterJob {
+            key: "p1".into(),
+            path: path.clone(),
+            page: 1,
+            scale: 1.0,
+        }));
+        let mut got = None;
+        for _ in 0..200 {
+            if let Some(item) = hub.take_ready().into_iter().next() {
+                got = Some(item);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let (key, rendered) = got.expect("worker result");
+        assert_eq!(key, "p1");
+        let page = rendered.expect("page 2");
+        assert!(page.height >= page.width);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

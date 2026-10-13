@@ -235,6 +235,7 @@ impl Library {
         let s = fs::read_to_string(path).ok()?;
         let mut note: Note = serde_json::from_str(&s).ok()?;
         note.normalize_page_grid();
+        note.sync_pdf_sheet_size();
         Some(note)
     }
 

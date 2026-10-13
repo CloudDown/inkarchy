@@ -10,6 +10,8 @@ use uuid::Uuid;
 pub const PAGE_W: f32 = 1123.0;
 pub const PAGE_H: f32 = 794.0;
 pub const PAGE_GAP: f32 = 56.0;
+pub const CORNELL_CUE: f32 = 220.0;
+pub const CORNELL_SUMMARY: f32 = 120.0;
 
 fn default_page_w() -> f32 {
     PAGE_W
@@ -57,9 +59,20 @@ pub enum PaperKind {
     #[default]
     Millimetre,
     Slate,
+    Cornell,
 }
 
 impl PaperKind {
+    pub const ALL: [PaperKind; 7] = [
+        PaperKind::Blank,
+        PaperKind::Lined,
+        PaperKind::Grid,
+        PaperKind::Dots,
+        PaperKind::Millimetre,
+        PaperKind::Slate,
+        PaperKind::Cornell,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             PaperKind::Blank => "Blank",
@@ -68,6 +81,7 @@ impl PaperKind {
             PaperKind::Dots => "Dots",
             PaperKind::Millimetre => "Millimeter",
             PaperKind::Slate => "Slate",
+            PaperKind::Cornell => "Cornell",
         }
     }
 
@@ -78,8 +92,117 @@ impl PaperKind {
             PaperKind::Grid => PaperKind::Dots,
             PaperKind::Dots => PaperKind::Millimetre,
             PaperKind::Millimetre => PaperKind::Slate,
-            PaperKind::Slate => PaperKind::Blank,
+            PaperKind::Slate => PaperKind::Cornell,
+            PaperKind::Cornell => PaperKind::Blank,
         }
+    }
+
+    /// Horizontal rules the highlighter can cling to: `(first_y, step, last_y)`.
+    pub fn highlight_rules(self, page_h: f32) -> Option<(f32, f32, f32)> {
+        match self {
+            PaperKind::Lined => Some((88.0, 28.0, page_h - 24.0)),
+            PaperKind::Cornell => Some((88.0, 28.0, page_h - CORNELL_SUMMARY - 8.0)),
+            PaperKind::Grid => Some((24.0, 24.0, page_h - 24.0)),
+            PaperKind::Millimetre => Some((40.0, 8.0, page_h - 20.0)),
+            PaperKind::Blank | PaperKind::Dots | PaperKind::Slate => None,
+        }
+    }
+
+    pub fn has_margin_punches(self) -> bool {
+        matches!(self, PaperKind::Lined | PaperKind::Cornell)
+    }
+}
+
+/// Closest ruled y, or `y` if the paper has no rules.
+/// Row that owns a rule at paper `y`. A line on the shared edge stays on the page above.
+pub fn rule_row(y: f32, page_h: f32) -> i32 {
+    let h = page_h.max(1.0);
+    let row = (y / h).floor() as i32;
+    let into = y - row as f32 * h;
+    if into <= 0.05 && y.abs() > 0.05 {
+        row - 1
+    } else {
+        row
+    }
+}
+
+/// Inclusive column runs on `row`, left to right.
+pub fn col_runs_on_row(cells: &[(i32, i32)], row: i32) -> Vec<(i32, i32)> {
+    let mut cols: Vec<i32> = cells
+        .iter()
+        .filter(|(_, r)| *r == row)
+        .map(|(c, _)| *c)
+        .collect();
+    cols.sort_unstable();
+    cols.dedup();
+    let mut runs = Vec::new();
+    let mut i = 0;
+    while i < cols.len() {
+        let start = cols[i];
+        let mut end = start;
+        i += 1;
+        while i < cols.len() && cols[i] == end + 1 {
+            end = cols[i];
+            i += 1;
+        }
+        runs.push((start, end));
+    }
+    runs
+}
+
+/// Inclusive row runs on `col`, top to bottom.
+pub fn row_runs_on_col(cells: &[(i32, i32)], col: i32) -> Vec<(i32, i32)> {
+    let mut rows: Vec<i32> = cells
+        .iter()
+        .filter(|(c, _)| *c == col)
+        .map(|(_, r)| *r)
+        .collect();
+    rows.sort_unstable();
+    rows.dedup();
+    let mut runs = Vec::new();
+    let mut i = 0;
+    while i < rows.len() {
+        let start = rows[i];
+        let mut end = start;
+        i += 1;
+        while i < rows.len() && rows[i] == end + 1 {
+            end = rows[i];
+            i += 1;
+        }
+        runs.push((start, end));
+    }
+    runs
+}
+
+pub fn snap_rule_y(kind: PaperKind, page_h: f32, y: f32, extra: &[f32]) -> f32 {
+    let mut best = y;
+    let mut best_d = f32::MAX;
+    let consider = |candidate: f32, best: &mut f32, best_d: &mut f32| {
+        let d = (candidate - y).abs();
+        if d < *best_d {
+            *best_d = d;
+            *best = candidate;
+        }
+    };
+    if let Some((y0, step, last)) = kind.highlight_rules(page_h) {
+        if step > 0.5 {
+            let mut line = y0 + ((y - y0) / step).round() * step;
+            if line < y0 {
+                line = y0;
+            }
+            if line > last {
+                line = last;
+            }
+            consider(line, &mut best, &mut best_d);
+        }
+    }
+    for &line in extra {
+        consider(line, &mut best, &mut best_d);
+    }
+    if (extra.is_empty() && best_d > 22.0) || best_d > 28.0 {
+        y
+    } else {
+        best
     }
 }
 
@@ -91,6 +214,8 @@ pub struct TextBox {
     pub text: String,
     pub size_pt: f32,
     pub color: [u8; 4],
+    #[serde(default)]
+    pub sticky: bool,
 }
 
 impl TextBox {
@@ -102,6 +227,16 @@ impl TextBox {
             text: String::new(),
             size_pt: 18.0,
             color: [color.r(), color.g(), color.b(), color.a()],
+            sticky: false,
+        }
+    }
+
+    pub fn sticky(pos: Pos2, color: Color32) -> Self {
+        Self {
+            size: [168.0, 168.0],
+            size_pt: 16.0,
+            sticky: true,
+            ..Self::new(pos, color)
         }
     }
 
@@ -261,20 +396,19 @@ impl Note {
         self.pages.iter().any(|p| p.col == col && p.row == row)
     }
 
-    /// Unit A4 cells covered by the notebook, including a grown linked sheet.
+    /// Unit cells covered by the notebook, including a grown linked A4 sheet.
     pub fn unit_cells(&self) -> Vec<(i32, i32)> {
-        if let [p] = self.pages.as_slice() {
+        if self.is_grown_single() {
+            let p = &self.pages[0];
             let cols = tiles_along(self.page_w, PAGE_W);
             let rows = tiles_along(self.page_h, PAGE_H);
-            if cols > 1 || rows > 1 {
-                let mut cells = Vec::with_capacity((cols * rows) as usize);
-                for r in 0..rows {
-                    for c in 0..cols {
-                        cells.push((p.col + c, p.row + r));
-                    }
+            let mut cells = Vec::with_capacity((cols * rows) as usize);
+            for r in 0..rows {
+                for c in 0..cols {
+                    cells.push((p.col + c, p.row + r));
                 }
-                return cells;
             }
+            return cells;
         }
         self.pages.iter().map(|p| (p.col, p.row)).collect()
     }
@@ -330,8 +464,14 @@ impl Note {
     }
 
     pub fn is_grown_single(&self) -> bool {
-        self.pages.len() == 1
-            && (tiles_along(self.page_w, PAGE_W) > 1 || tiles_along(self.page_h, PAGE_H) > 1)
+        if self.pages.len() != 1 {
+            return false;
+        }
+        // A PDF or image sheet is one page, not a mosaic of A4 units.
+        if self.pages[0].background.is_some() {
+            return false;
+        }
+        tiles_along(self.page_w, PAGE_W) > 1 || tiles_along(self.page_h, PAGE_H) > 1
     }
 
     /// Splits a grown linked sheet into unit pages, keeping `sheet_join`.
@@ -366,8 +506,6 @@ impl Note {
         if self.pages.is_empty() {
             self.pages.push(Page::default());
         }
-        self.page_w = PAGE_W;
-        self.page_h = PAGE_H;
         true
     }
 
@@ -385,6 +523,7 @@ impl Note {
 
     /// Linked keeps the same cells (holes stay holes) and only changes the join.
     /// A grown rectangle is split into unit pages when switching to Separate.
+    /// Custom sheet size (PDF pages) stays put.
     pub fn apply_sheet_join(&mut self, to: SheetJoin) {
         if self.pages.is_empty() {
             self.pages.push(Page::default());
@@ -393,10 +532,50 @@ impl Note {
             self.split_grown_to_unit_pages();
         }
         self.sheet_join = to;
-        if !self.is_grown_single() {
-            self.page_w = PAGE_W;
-            self.page_h = PAGE_H;
+    }
+
+    /// Size the sheet to the PDF pages. Restores notes whose size was reset to A4.
+    pub fn sync_pdf_sheet_size(&mut self) -> bool {
+        let mut max_w = 0.0f32;
+        let mut max_h = 0.0f32;
+        let mut any = false;
+        for page in &self.pages {
+            let Some(bg) = page.background.as_ref() else {
+                continue;
+            };
+            if bg.pdf_page.is_none() {
+                continue;
+            }
+            let Some([w, h]) = bg.source_size else {
+                continue;
+            };
+            let (lw, lh) = crate::pdf::logical_size(w, h);
+            max_w = max_w.max(lw);
+            max_h = max_h.max(lh);
+            any = true;
         }
+        if !any {
+            return false;
+        }
+        if (self.page_w - max_w).abs() < 1.0 && (self.page_h - max_h).abs() < 1.0 {
+            return false;
+        }
+        let old_w = self.page_w;
+        let old_h = self.page_h;
+        for page in &mut self.pages {
+            let Some(bg) = page.background.clone() else {
+                continue;
+            };
+            if bg.pdf_page.is_none() {
+                continue;
+            }
+            let from = bg.fit(old_w, old_h);
+            let to = bg.fit(max_w, max_h);
+            remap_page_content(page, from, to);
+        }
+        self.page_w = max_w;
+        self.page_h = max_h;
+        true
     }
 
     fn split_grown_to_unit_pages(&mut self) {
@@ -467,6 +646,47 @@ impl Note {
         self.page_w = tw;
         self.page_h = th;
         self.pages = tiles.into_values().collect();
+    }
+}
+
+fn remap_page_content(page: &mut Page, from: [f32; 4], to: [f32; 4]) {
+    let [fx, fy, fw, fh] = from;
+    let [tx, ty, tw, th] = to;
+    if fw < 1.0 || fh < 1.0 {
+        return;
+    }
+    let sx = tw / fw;
+    let sy = th / fh;
+    if (sx - 1.0).abs() < 0.001
+        && (sy - 1.0).abs() < 0.001
+        && (fx - tx).abs() < 0.5
+        && (fy - ty).abs() < 0.5
+    {
+        return;
+    }
+    let map = |x: f32, y: f32| (tx + (x - fx) * sx, ty + (y - fy) * sy);
+    let avg = (sx + sy) * 0.5;
+    for stroke in &mut page.strokes {
+        for point in &mut stroke.points {
+            let (x, y) = map(point.x, point.y);
+            point.x = x;
+            point.y = y;
+        }
+        stroke.width *= avg;
+        stroke.mesh = None;
+    }
+    for text in &mut page.texts {
+        let (x, y) = map(text.pos[0], text.pos[1]);
+        text.pos = [x, y];
+        text.size[0] *= sx;
+        text.size[1] *= sy;
+        text.size_pt *= avg;
+    }
+    for image in &mut page.images {
+        let (x, y) = map(image.pos[0], image.pos[1]);
+        image.pos = [x, y];
+        image.size[0] *= sx;
+        image.size[1] *= sy;
     }
 }
 
@@ -790,5 +1010,95 @@ mod tests {
         assert_eq!(n.pages.len(), 1);
         assert_eq!(n.pages[0].col, 0);
         assert_eq!(n.pages[0].strokes[0].points[0].x, 10.0);
+    }
+
+    fn pdf_page(w_pt: f32, h_pt: f32, page: u32) -> Page {
+        let mut p = Page::at(0, page as i32);
+        p.background = Some(PageBackground {
+            file: "source.pdf".into(),
+            pdf_page: Some(page),
+            source_size: Some([w_pt, h_pt]),
+        });
+        p
+    }
+
+    #[test]
+    fn pdf_sheet_is_not_a_grown_a4_mosaic() {
+        let mut n = Note::blank("talk", 0);
+        let (w, h) = crate::pdf::logical_size(603.0, 783.0);
+        n.page_w = w;
+        n.page_h = h;
+        n.pages = vec![pdf_page(603.0, 783.0, 0)];
+        assert!(!n.is_grown_single());
+        assert_eq!(n.unit_cells(), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn joining_pdf_pages_keeps_their_size() {
+        let mut n = Note::blank("talk", 0);
+        let (w, h) = crate::pdf::logical_size(603.0, 783.0);
+        n.page_w = w;
+        n.page_h = h;
+        n.sheet_join = SheetJoin::Separate;
+        n.pages = vec![pdf_page(603.0, 783.0, 0), pdf_page(603.0, 783.0, 1)];
+        n.apply_sheet_join(SheetJoin::Linked);
+        assert!((n.page_w - w).abs() < 0.5);
+        assert!((n.page_h - h).abs() < 0.5);
+        n.remove_unit(0, 1);
+        assert!((n.page_w - w).abs() < 0.5);
+        assert!((n.page_h - h).abs() < 0.5);
+    }
+
+    #[test]
+    fn sync_pdf_sheet_size_restores_portrait_from_a4() {
+        let mut n = Note::blank("talk", 0);
+        n.pages = vec![pdf_page(603.0, 783.0, 0), pdf_page(603.0, 783.0, 1)];
+        assert!(n.sync_pdf_sheet_size());
+        let (w, h) = crate::pdf::logical_size(603.0, 783.0);
+        assert!((n.page_w - w).abs() < 0.5);
+        assert!((n.page_h - h).abs() < 0.5);
+        assert!(!n.sync_pdf_sheet_size());
+    }
+
+    #[test]
+    fn paper_cycle_includes_cornell() {
+        let mut k = PaperKind::Slate;
+        k = k.cycle();
+        assert_eq!(k, PaperKind::Cornell);
+        assert_eq!(k.cycle(), PaperKind::Blank);
+        assert_eq!(k.label(), "Cornell");
+    }
+
+    #[test]
+    fn sticky_survives_json() {
+        let mut n = Note::blank("t", 0);
+        n.pages[0]
+            .texts
+            .push(TextBox::sticky(Pos2::new(12.0, 20.0), Color32::YELLOW));
+        let s = serde_json::to_string(&n).unwrap();
+        let back: Note = serde_json::from_str(&s).unwrap();
+        assert!(back.pages[0].texts[0].sticky);
+        let old: Note = serde_json::from_str(
+            r#"{"id":"00000000-0000-0000-0000-000000000000","title":"t","paper":"Blank","cover":0,"created":"2020-01-01T00:00:00Z","updated":"2020-01-01T00:00:00Z","pinned":false,"pages":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(old.paper, PaperKind::Blank);
+    }
+
+    #[test]
+    fn linked_rules_merge_adjacent_cells_and_keep_holes() {
+        let cells = [(0, 0), (1, 0), (3, 0), (0, 1)];
+        assert_eq!(col_runs_on_row(&cells, 0), vec![(0, 1), (3, 3)]);
+        assert_eq!(col_runs_on_row(&cells, 1), vec![(0, 0)]);
+        assert_eq!(row_runs_on_col(&cells, 0), vec![(0, 1)]);
+        assert_eq!(rule_row(88.0, PAGE_H), 0);
+        assert_eq!(rule_row(PAGE_H, PAGE_H), 0);
+        assert_eq!(rule_row(PAGE_H + 10.0, PAGE_H), 1);
+    }
+
+    #[test]
+    fn snap_rule_hits_lined_paper() {
+        let y = snap_rule_y(PaperKind::Lined, PAGE_H, 88.0 + 13.0, &[]);
+        assert!((y - 88.0).abs() < 0.1 || (y - 116.0).abs() < 0.1);
     }
 }

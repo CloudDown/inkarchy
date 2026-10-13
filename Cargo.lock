@@ -2723,6 +2723,7 @@ dependencies = [
  "fontdue",
  "hayro",
  "image",
+ "kurbo 0.12.0",
  "lopdf",
  "pollster",
  "raw-window-handle",

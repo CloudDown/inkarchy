@@ -53,6 +53,7 @@ Gestures (inside a notebook):
   2nd button = lasso (hold)
   drag the pencil-case handle → top / bottom / sides
   hold the pen still ~1s ≈ line, arrow, triangle, square, diamond, ellipse, circle
+  drag the sticky pad onto the page   hold the pad = color
   ctrl+z/y   ctrl+s save   ctrl+e png   ctrl+shift+e pdf
   ctrl+o open a PDF, image, or short text file
 

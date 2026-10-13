@@ -89,7 +89,10 @@ fn import_pdf(lib: &mut Library, path: &Path) -> Result<Note, ImportError> {
     if specs.len() > 1 {
         note.sheet_join = SheetJoin::Separate;
     }
-    let (page_w, page_h) = logical_size(specs[0].width_pt, specs[0].height_pt);
+    let (page_w, page_h) = specs.iter().fold((1.0f32, 1.0f32), |(aw, ah), spec| {
+        let (w, h) = logical_size(spec.width_pt, spec.height_pt);
+        (aw.max(w), ah.max(h))
+    });
     note.page_w = page_w;
     note.page_h = page_h;
     note.pages = specs
@@ -159,6 +162,7 @@ fn import_text(lib: &mut Library, path: &Path) -> Result<Note, ImportError> {
         text,
         size_pt: 16.0,
         color: [36, 32, 28, 255],
+        sticky: false,
     });
     lib.save_note(&note)
         .map_err(|err| ImportError::Message(err.to_string()))?;
@@ -297,6 +301,37 @@ mod tests {
         let loaded = lib.load_note(note.id).unwrap();
         assert_eq!(loaded.pages.len(), 2);
         assert_eq!(loaded.title, "lecture");
+        let (w, h) = logical_size(200.0, 100.0);
+        assert!((note.page_w - w).abs() < 0.5);
+        assert!((note.page_h - h).abs() < 0.5);
+        assert!(note.page_w > note.page_h);
+    }
+
+    #[test]
+    fn pdf_import_uses_the_largest_page() {
+        let (_tmp, mut lib) = lib();
+        let bytes = marked_pdf(&[
+            MarkedPage {
+                width: 200.0,
+                height: 100.0,
+                rotate: 0,
+                marker: "P1",
+            },
+            MarkedPage {
+                width: 100.0,
+                height: 400.0,
+                rotate: 0,
+                marker: "P2",
+            },
+        ]);
+        let src = lib.root.join("mix.pdf");
+        fs::create_dir_all(&lib.root).unwrap();
+        fs::write(&src, &bytes).unwrap();
+        let note = import_new_note(&mut lib, &src).expect("import pdf");
+        let (w1, h1) = logical_size(200.0, 100.0);
+        let (w2, h2) = logical_size(100.0, 400.0);
+        assert!((note.page_w - w1.max(w2)).abs() < 0.5);
+        assert!((note.page_h - h1.max(h2)).abs() < 0.5);
     }
 
     #[test]
