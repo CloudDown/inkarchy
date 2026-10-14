@@ -35,12 +35,9 @@ resvg = "0.45"
 usvg = "0.45"
 kurbo = "0.12"
 
-# One codegen unit and thin LTO make the release smaller and faster.
-# Symbols are stripped. Panics still unwind so a file-dialog failure can be caught.
+# Strip symbols only. LTO and codegen-units = 1 saved about 5 Mo
+# and made every release build rebuild the whole dependency graph.
 [profile.release]
-lto = "thin"
-codegen-units = 1
-opt-level = 3
 strip = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

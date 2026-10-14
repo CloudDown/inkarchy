@@ -425,6 +425,24 @@ impl Note {
         self.pages.iter().any(|p| p.col == col && p.row == row)
     }
 
+    /// Typed text and stickies, for the shelf search (not ink, not images).
+    pub fn search_body(&self) -> String {
+        let mut out = String::new();
+        for page in &self.pages {
+            for box_ in &page.texts {
+                let t = box_.text.trim();
+                if t.is_empty() {
+                    continue;
+                }
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(t);
+            }
+        }
+        out
+    }
+
     /// Unit cells covered by the notebook, including a grown linked A4 sheet.
     pub fn unit_cells(&self) -> Vec<(i32, i32)> {
         if self.is_grown_single() {
@@ -1006,6 +1024,18 @@ mod tests {
         assert!(!n.can_tear_unit());
         assert!(!n.remove_unit(0, 0));
         assert_eq!(n.pages.len(), 1);
+    }
+
+    #[test]
+    fn search_body_joins_typed_text_and_stickies() {
+        let mut n = Note::blank("Mindset", 0);
+        let mut typed = TextBox::new(Pos2::new(10.0, 10.0), Color32::BLACK);
+        typed.text = "Fourier series".into();
+        let mut sticky = TextBox::sticky(Pos2::new(40.0, 40.0), Color32::YELLOW);
+        sticky.text = "  exam  ".into();
+        n.pages[0].texts.push(typed);
+        n.pages[0].texts.push(sticky);
+        assert_eq!(n.search_body(), "Fourier series\nexam");
     }
 
     #[test]

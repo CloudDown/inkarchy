@@ -41,6 +41,8 @@ const DOS_H: f32 = 156.0;
 const DOS_PAD: f32 = 10.0;
 const PAPER_PEEK: f32 = 18.0;
 const TITLE_ROW: f32 = 44.0;
+/// Extra line under the spine title when Search shows an inner hit.
+const SNIPPET_ROW: f32 = 18.0;
 const SHELF_GAP: f32 = 8.0;
 const TOSS_DURATION: f64 = 0.30;
 const TOSS_STAGGER: f64 = 0.035;
@@ -63,15 +65,53 @@ const DOCK_TURN: f32 = 0.35;
 /// is still open, so the clamp never piles it into the frame and then rotates.
 const DOCK_TURN_AIR: f32 = 72.0;
 const QUARTER_DISK_CENTROID: f32 = 4.0 / (3.0 * std::f32::consts::PI);
-/// Width and painted radius for the five toolbar nib sizes.
-const PEN_SIZES: [(f32, f32); 5] = [(1.6, 2.2), (2.2, 3.0), (3.4, 4.0), (6.5, 5.4), (16.0, 7.2)];
-const TIN_RING: f32 = 28.0;
-const TIN_RING_GAP: f32 = 8.0;
+/// Watercolor saucer: a thin pigment rim around the wash.
+const TIN_RING: f32 = 14.0;
+const TIN_RING_GAP: f32 = 4.0;
+const TIN_SIDE: f32 = 168.0;
+const NIB_MIN: f32 = 0.9;
+const NIB_MAX: f32 = 18.0;
 
 #[derive(Clone)]
 enum Scene {
     Shelf { query: String },
     Desk,
+}
+
+struct ShelfHit {
+    updated: chrono::DateTime<chrono::Utc>,
+    title: String,
+    body: String,
+    pdf_keys: Vec<String>,
+}
+
+fn search_snippet(hay: &str, q: &str) -> Option<String> {
+    let i = hay.find(q)?;
+    let mut start = i;
+    let mut taken = 0;
+    for (idx, _) in hay[..i].char_indices().rev() {
+        start = idx;
+        taken += 1;
+        if taken >= 10 {
+            break;
+        }
+    }
+    let chars: Vec<char> = hay[start..]
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .take(22)
+        .collect();
+    let more = hay[start..].chars().count() > chars.len();
+    let s = chars.iter().collect::<String>().trim().to_string();
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.push_str(&s);
+    if more {
+        out.push('…');
+    }
+    Some(out)
 }
 
 #[derive(Clone, Copy)]
@@ -129,19 +169,6 @@ struct Sel {
     page: usize,
     id: Uuid,
     kind: SelKind,
-}
-
-/// A page the Pages-mode checklist can mark.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DeleteTarget {
-    Page(i32, i32),
-}
-
-/// One row in the delete checklist. `on` is the mark.
-#[derive(Clone, Copy)]
-struct DeletePick {
-    target: DeleteTarget,
-    on: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -219,21 +246,15 @@ pub struct InkarchyApp {
     lib: Library,
     scene: Scene,
     note: Option<Note>,
-    /// Delete picker: objects and pages chosen on the sheet, listed on the right.
-    object_delete: Option<Vec<DeletePick>>,
-    /// Screen-space zone, drawn like the shelf band.
-    delete_band: Option<Pos2>,
-    delete_band_now: Option<Pos2>,
-    delete_band_armed: bool,
-    /// Checklist at the press, so the zone can add and then let go.
-    delete_band_base: Vec<DeletePick>,
     tool: Tool,
     color_i: usize,
     /// Current ink (theme swatch or a free tint).
     ink: Color32,
     color_custom: bool,
-    /// Watercolor tin (large palette) is open.
+    /// Watercolor saucer is open.
     tin_open: bool,
+    /// One-slot nib ribbon is open.
+    nib_open: bool,
     tin_hue: f32,
     width: f32,
     last_ink: Tool,
@@ -292,6 +313,8 @@ pub struct InkarchyApp {
     canvas_rect: Rect,
     /// Click held on a sheet ear: do not lay ink.
     tab_held: bool,
+    /// This press began on a page `+` or `−`. Pages mode owns it until lift.
+    page_press_owned: bool,
     tablet: TabletBridge,
     live_from_pen: bool,
     /// Mouse cursor hidden (stylus in proximity).
@@ -364,6 +387,11 @@ pub struct InkarchyApp {
     /// Long-press radial menu on a spine.
     spine_wheel: Option<SpineWheel>,
     shelf_hold_t0: Option<f64>,
+    /// Title + typed text + PDF unicode, rebuilt when a notebook is saved.
+    shelf_hits: HashMap<Uuid, ShelfHit>,
+    pdf_text: HashMap<String, String>,
+    pdf_text_pending: HashSet<String>,
+    pdf_text_hub: Option<crate::pdf::TextHub>,
     pdf_lines: HashMap<(Uuid, usize), Vec<f32>>,
     /// Paper color of the next sticky peeled from the pad.
     sticky_color: Color32,
@@ -377,8 +405,26 @@ pub struct InkarchyApp {
     sticky_sheet: Option<(usize, Uuid)>,
     /// Corner drag that changes one sticky's width and height.
     sticky_resize: Option<StickyResize>,
-    /// Page-edge + tabs, shown while Pages mode is open.
+    /// Page `+` and center `−` marks, shown while the Pages button is on.
     sheet_tabs_on: bool,
+    /// Marks ignore the pointer until it has lifted after Pages mode opened.
+    pages_marks_ready: bool,
+    /// Press on a `+` or `−` that commits only if the finger lifts in place.
+    page_mark: Option<PageMarkPress>,
+}
+
+/// A page mark under the pointer. `travel` is how far the press has moved.
+struct PageMarkPress {
+    kind: PageMark,
+    origin: Pos2,
+    travel: f32,
+}
+
+#[derive(Clone, Copy)]
+enum PageMark {
+    Add(i32, i32),
+    Tear(i32, i32),
+    TearSticky(usize, Uuid),
 }
 
 /// One-finger resize of a sticky. The top-left stays put.
@@ -436,16 +482,12 @@ impl InkarchyApp {
                 query: String::new(),
             },
             note: None,
-            object_delete: None,
-            delete_band: None,
-            delete_band_now: None,
-            delete_band_armed: false,
-            delete_band_base: Vec::new(),
             tool: Tool::Fineliner,
             color_i: 0,
             ink: ink0,
             color_custom: false,
             tin_open: false,
+            nib_open: false,
             tin_hue: 0.0,
             width,
             last_ink: Tool::Fineliner,
@@ -492,6 +534,7 @@ impl InkarchyApp {
             dock_fold_vel: 0.0,
             canvas_rect: Rect::ZERO,
             tab_held: false,
+            page_press_owned: false,
             tablet: TabletBridge::new(),
             live_from_pen: false,
             cursor_off: false,
@@ -541,6 +584,10 @@ impl InkarchyApp {
             shelf_fed: false,
             spine_wheel: None,
             shelf_hold_t0: None,
+            shelf_hits: HashMap::new(),
+            pdf_text: HashMap::new(),
+            pdf_text_pending: HashSet::new(),
+            pdf_text_hub: None,
             pdf_lines: HashMap::new(),
             sticky_color,
             sticky_drag: None,
@@ -549,6 +596,8 @@ impl InkarchyApp {
             sticky_sheet: None,
             sticky_resize: None,
             sheet_tabs_on: false,
+            pages_marks_ready: false,
+            page_mark: None,
         }
     }
 
@@ -781,8 +830,10 @@ impl InkarchyApp {
         self.reset_canvas_gesture();
         self.image_import = None;
         self.pending_image = None;
-        self.object_delete = None;
-        self.clear_delete_band();
+        self.sheet_tabs_on = false;
+        self.pages_marks_ready = false;
+        self.page_mark = None;
+        self.page_press_owned = false;
         self.autosave();
         if let Some(n) = self.lib.load_note(id) {
             self.title_buf = n.title.clone();
@@ -821,8 +872,10 @@ impl InkarchyApp {
         self.reset_canvas_gesture();
         self.image_import = None;
         self.pending_image = None;
-        self.object_delete = None;
-        self.clear_delete_band();
+        self.sheet_tabs_on = false;
+        self.pages_marks_ready = false;
+        self.page_mark = None;
+        self.page_press_owned = false;
         // Save exactly once on the way out. Calling autosave first could
         // serialize a large notebook twice before the shelf became visible.
         if let Some(n) = self.note.take() {
@@ -1507,12 +1560,12 @@ impl InkarchyApp {
                         ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
                     } else if self.export_picker_open {
                         self.export_picker_open = false;
-                    } else if self.tin_open {
-                        self.tin_open = false;
+                    } else if self.ink_panel_open() {
+                        self.set_ink_panel(false);
                     } else if self.sticky_wheel.is_some() {
                         self.sticky_wheel = None;
-                    } else if self.object_delete.is_some() {
-                        self.cancel_object_delete();
+                    } else if self.sheet_tabs_on {
+                        self.leave_pages_mode();
                     } else if self.editing_text.is_some() {
                         self.finish_text_edit();
                     } else if !self.sel.is_empty() {
@@ -1534,7 +1587,7 @@ impl InkarchyApp {
         }
         if let Scene::Desk = self.scene {
             if remove_page {
-                self.start_object_delete();
+                self.toggle_pages_mode();
             }
             if undo {
                 if let Some(n) = &mut self.note {
@@ -1569,11 +1622,7 @@ impl InkarchyApp {
                 self.zoom_out();
             }
             if delete_sel {
-                if self.object_delete.is_some() {
-                    self.commit_object_delete();
-                } else {
-                    self.delete_selection();
-                }
+                self.delete_selection();
             }
             if dup {
                 self.duplicate_selection();
@@ -1703,8 +1752,142 @@ impl InkarchyApp {
         self.mark_dirty();
     }
 
+    fn ingest_pdf_text(&mut self, ctx: &Context) {
+        let Some(hub) = self.pdf_text_hub.as_ref() else {
+            return;
+        };
+        let ready = hub.take_ready();
+        if ready.is_empty() {
+            return;
+        }
+        for (key, text) in ready {
+            self.pdf_text_pending.remove(&key);
+            self.pdf_text.insert(key, text.to_lowercase());
+        }
+        ctx.request_repaint();
+    }
+
+    fn refresh_shelf_search(&mut self) {
+        let live: HashSet<Uuid> = self.lib.index.notes.iter().map(|m| m.id).collect();
+        self.shelf_hits.retain(|id, _| live.contains(id));
+        let metas: Vec<crate::library::NoteMeta> = self.lib.index.notes.clone();
+        for meta in metas {
+            let stale = self
+                .shelf_hits
+                .get(&meta.id)
+                .map(|hit| hit.updated != meta.updated)
+                .unwrap_or(true);
+            if stale {
+                self.index_shelf_note(&meta);
+            }
+            self.request_shelf_pdf(meta.id);
+        }
+    }
+
+    fn index_shelf_note(&mut self, meta: &crate::library::NoteMeta) {
+        if let Some(old) = self.shelf_hits.remove(&meta.id) {
+            for key in old.pdf_keys {
+                self.pdf_text.remove(&key);
+                self.pdf_text_pending.remove(&key);
+            }
+        }
+        let Some(note) = self.lib.load_note(meta.id) else {
+            return;
+        };
+        let pdf_keys = note
+            .pages
+            .iter()
+            .filter_map(|page| {
+                let bg = page.background.as_ref()?;
+                let pdf_page = bg.pdf_page?;
+                Some(format!("{}:{}:{pdf_page}", note.id, bg.file))
+            })
+            .collect();
+        self.shelf_hits.insert(
+            meta.id,
+            ShelfHit {
+                updated: meta.updated,
+                title: meta.title.to_lowercase(),
+                body: note.search_body().to_lowercase(),
+                pdf_keys,
+            },
+        );
+    }
+
+    fn request_shelf_pdf(&mut self, id: Uuid) {
+        let Some(keys) = self.shelf_hits.get(&id).map(|hit| hit.pdf_keys.clone()) else {
+            return;
+        };
+        for key in keys {
+            if self.pdf_text.contains_key(&key) || self.pdf_text_pending.contains(&key) {
+                continue;
+            }
+            let Some((note_file, page_s)) = key.rsplit_once(':') else {
+                continue;
+            };
+            let Some((_, file)) = note_file.split_once(':') else {
+                continue;
+            };
+            let Ok(page) = page_s.parse::<u32>() else {
+                continue;
+            };
+            let path = self.lib.note_dir(id).join(file);
+            let hub = self
+                .pdf_text_hub
+                .get_or_insert_with(crate::pdf::TextHub::new);
+            if hub.request(crate::pdf::TextJob {
+                key: key.clone(),
+                path,
+                page,
+            }) {
+                self.pdf_text_pending.insert(key);
+            }
+        }
+    }
+
+    fn shelf_hit_matches(&self, id: Uuid, query: &str) -> bool {
+        if query.is_empty() {
+            return true;
+        }
+        let Some(hit) = self.shelf_hits.get(&id) else {
+            return self
+                .lib
+                .index
+                .notes
+                .iter()
+                .any(|m| m.id == id && m.title.to_lowercase().contains(query));
+        };
+        if hit.title.contains(query) || hit.body.contains(query) {
+            return true;
+        }
+        hit.pdf_keys.iter().any(|key| {
+            self.pdf_text
+                .get(key)
+                .is_some_and(|text| text.contains(query))
+        })
+    }
+
+    fn shelf_hit_snippet(&self, id: Uuid, query: &str) -> Option<String> {
+        if query.is_empty() {
+            return None;
+        }
+        let hit = self.shelf_hits.get(&id)?;
+        if hit.title.contains(query) {
+            return None;
+        }
+        search_snippet(&hit.body, query).or_else(|| {
+            hit.pdf_keys.iter().find_map(|key| {
+                self.pdf_text
+                    .get(key)
+                    .and_then(|text| search_snippet(text, query))
+            })
+        })
+    }
+
     fn ui_shelf(&mut self, ctx: &Context) {
         self.handle_drops_and_paste(ctx);
+        self.ingest_pdf_text(ctx);
+        self.refresh_shelf_search();
         // Shelf shortcuts (selection / trash)
         if self.emoji_pick.is_none() && self.rename_id.is_none() && self.lib.index.fiche_pliee {
             self.shelf_keys(ctx);
@@ -1743,10 +1926,10 @@ impl InkarchyApp {
                     .lib
                     .index
                     .notes
-                    .iter()
-                    .filter(|m| query.is_empty() || m.title.to_lowercase().contains(&query))
+                    .clone()
+                    .into_iter()
+                    .filter(|m| query.is_empty() || self.shelf_hit_matches(m.id, &query))
                     .filter(|m| !self.shelf_toss.iter().any(|t| t.id == m.id))
-                    .cloned()
                     .collect();
 
                 ui.add_space(if ctx.screen_rect().width() < 700.0 {
@@ -1787,6 +1970,8 @@ impl InkarchyApp {
                         let compact_cards = ctx.screen_rect().height() < 520.0;
                         let slot = if compact_cards {
                             vec2(216.0, (shelf_height - 4.0).clamp(44.0, 64.0))
+                        } else if querying {
+                            Self::shelf_slot() + vec2(0.0, SNIPPET_ROW)
                         } else {
                             Self::shelf_slot()
                         };
@@ -1834,10 +2019,28 @@ impl InkarchyApp {
                             if let Some(meta) = meta.filter(|_| !lifted) {
                                 ui.scope_builder(UiBuilder::new().max_rect(cell), |ui| {
                                     let selected = self.shelf_sel.contains(&meta.id);
-                                    let action = if compact_cards {
-                                        self.compact_dos(ui, &meta, selected, false, slot)
+                                    let snippet = if querying {
+                                        self.shelf_hit_snippet(meta.id, &query)
                                     } else {
-                                        self.notebook_cover(ui, &meta, selected, false)
+                                        None
+                                    };
+                                    let action = if compact_cards {
+                                        self.compact_dos(
+                                            ui,
+                                            &meta,
+                                            selected,
+                                            false,
+                                            slot,
+                                            snippet.as_deref(),
+                                        )
+                                    } else {
+                                        self.notebook_cover(
+                                            ui,
+                                            &meta,
+                                            selected,
+                                            false,
+                                            snippet.as_deref(),
+                                        )
                                     };
                                     match action {
                                         Some(DosAct::Open) => open = Some(meta.id),
@@ -3316,9 +3519,9 @@ impl InkarchyApp {
                                     ui.scope_builder(UiBuilder::new().max_rect(cell), |ui| {
                                         let selected = self.shelf_sel.contains(&meta.id);
                                         let action = if compact {
-                                            self.compact_dos(ui, &meta, selected, true, slot)
+                                            self.compact_dos(ui, &meta, selected, true, slot, None)
                                         } else {
-                                            self.notebook_cover(ui, &meta, selected, true)
+                                            self.notebook_cover(ui, &meta, selected, true, None)
                                         };
                                         match action {
                                             Some(DosAct::Open) => *open = Some(meta.id),
@@ -3611,6 +3814,7 @@ impl InkarchyApp {
         self.paint_sel_wash(&ui.painter_at(cell), face.expand(5.0), hot);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compact_dos(
         &mut self,
         ui: &mut Ui,
@@ -3618,6 +3822,7 @@ impl InkarchyApp {
         selected: bool,
         in_bin: bool,
         size: Vec2,
+        snippet: Option<&str>,
     ) -> Option<DosAct> {
         let (rect, response) = ui.allocate_exact_size(size, Sense::click());
         self.shelf_slots
@@ -3649,11 +3854,26 @@ impl InkarchyApp {
         job.wrap.max_rows = 1;
         job.wrap.break_anywhere = true;
         let galley = p.layout_job(job);
-        p.galley(
-            pos2(title.left(), title.center().y - galley.size().y * 0.5),
-            galley,
-            self.look.fg,
-        );
+        let mut y = if snippet.is_some() {
+            title.top()
+        } else {
+            title.center().y - galley.size().y * 0.5
+        };
+        let title_h = galley.size().y;
+        p.galley(pos2(title.left(), y), galley, self.look.fg);
+        if let Some(snippet) = snippet {
+            y += title_h + 2.0;
+            let mut snip = egui::text::LayoutJob::simple_singleline(
+                snippet.to_string(),
+                self.look.mono(11.0),
+                self.look.muted,
+            );
+            snip.wrap.max_width = title.width();
+            snip.wrap.max_rows = 1;
+            snip.wrap.break_anywhere = true;
+            let galley = p.layout_job(snip);
+            p.galley(pos2(title.left(), y), galley, self.look.muted);
+        }
         if meta.pinned {
             p.circle_filled(rect.min + vec2(44.0, 10.0), 3.0, self.look.paper);
         }
@@ -3685,16 +3905,19 @@ impl InkarchyApp {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn notebook_cover(
         &mut self,
         ui: &mut Ui,
         meta: &crate::library::NoteMeta,
         selected: bool,
         in_bin: bool,
+        snippet: Option<&str>,
     ) -> Option<DosAct> {
+        let extra = if snippet.is_some() { SNIPPET_ROW } else { 0.0 };
         let slot = vec2(
             DOS_W + DOS_PAD * 2.0,
-            DOS_PAD + PAPER_PEEK + DOS_H + TITLE_ROW,
+            DOS_PAD + PAPER_PEEK + DOS_H + TITLE_ROW + extra,
         );
         let (slot_rect, resp) = ui.allocate_exact_size(slot, Sense::click());
         let id = Id::new("notebook-cover").with(meta.id);
@@ -3724,7 +3947,7 @@ impl InkarchyApp {
             vec2(DOS_W, DOS_H),
         );
         let painter = ui.painter_at(slot_rect);
-        let hit = Rect::from_min_max(face.min, pos2(face.max.x, face.max.y + TITLE_ROW));
+        let hit = Rect::from_min_max(face.min, pos2(face.max.x, face.max.y + TITLE_ROW + extra));
         self.shelf_slots
             .push((meta.id, hit.intersect(ui.clip_rect())));
         let lifted = self.shelf_haul_armed && self.shelf_haul_ids.contains(&meta.id);
@@ -3885,6 +4108,15 @@ impl InkarchyApp {
                 self.look.serif(21.0),
                 self.look.fg,
             );
+            if let Some(snippet) = snippet {
+                painter.text(
+                    pos2(title_rect.center().x, title_rect.max.y + 2.0),
+                    Align2::CENTER_TOP,
+                    snippet,
+                    self.look.mono(11.0),
+                    self.look.muted,
+                );
+            }
             if !in_bin {
                 let title_resp = ui.interact(title_rect, id.with("title"), Sense::click());
                 if title_resp.clicked() {
@@ -4754,12 +4986,20 @@ impl InkarchyApp {
         resp.on_hover_cursor(CursorIcon::PointingHand).clicked()
     }
 
-    fn menu_sep(&self, ui: &mut Ui) {
-        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 8.0), Sense::hover());
+    /// Small section name, with the group rule directly under it.
+    fn menu_head(&self, ui: &mut Ui, title: &str) {
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
+        ui.painter().text(
+            pos2(rect.min.x + 12.0, rect.top() + 9.0),
+            Align2::LEFT_CENTER,
+            title,
+            self.look.mono(11.0),
+            self.look.fg.gamma_multiply(0.62),
+        );
         ui.painter().hline(
             rect.x_range().shrink(10.0),
-            rect.center().y,
-            Stroke::new(1.0_f32, self.look.paper.gamma_multiply(0.16)),
+            rect.bottom() - 1.0,
+            Stroke::new(1.0_f32, self.look.fg.gamma_multiply(0.28)),
         );
     }
 
@@ -4945,15 +5185,13 @@ impl InkarchyApp {
     fn ui_desk(&mut self, ctx: &Context) {
         self.sync_sticky_wheel_rect(ctx);
         let compact = ctx.screen_rect().width() < 760.0;
-        let narrow_selection = self.object_delete.is_some() && ctx.screen_rect().width() < 540.0;
-        self.drop_dead_picks();
-        if self.object_delete.is_none() {
+        if !self.sheet_tabs_on {
             self.poll_image_import(ctx);
             self.handle_drops_and_paste(ctx);
         }
 
         TopBottomPanel::top("rule")
-            .exact_height(if narrow_selection { 78.0 } else { 52.0 })
+            .exact_height(52.0)
             .show_separator_line(false)
             .frame(Frame::NONE.fill(self.look.desk))
             .show(ctx, |ui| {
@@ -4964,37 +5202,6 @@ impl InkarchyApp {
                     bar.max.y - 0.5,
                     Stroke::new(1.0_f32, self.look.desk_deep),
                 );
-                if let Some(picks) = &self.object_delete {
-                    let count = self
-                        .note
-                        .as_ref()
-                        .map(|note| Self::checked_delete(note, picks).len())
-                        .unwrap_or(0);
-                    let message = "Add or tap a page";
-                    if narrow_selection {
-                        ui.label(RichText::new(message).font(self.look.mono(13.0)));
-                    }
-                    ui.horizontal_centered(|ui| {
-                        if self.note_action(ui, "Cancel", 90.0, false).clicked() {
-                            self.cancel_object_delete();
-                        }
-                        if !narrow_selection {
-                            ui.label(RichText::new(message).font(self.look.mono(13.0)));
-                        }
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let clicked = ui
-                                .add_enabled_ui(count > 0, |ui| {
-                                    self.note_action(ui, &format!("Delete ({count})"), 120.0, true)
-                                        .clicked()
-                                })
-                                .inner;
-                            if clicked {
-                                self.commit_object_delete();
-                            }
-                        });
-                    });
-                    return;
-                }
                 ui.horizontal_centered(|ui| {
                     ui.add_space(6.0);
                     let exit = self.shelf_exit_btn(ui);
@@ -5019,13 +5226,6 @@ impl InkarchyApp {
                     let chrome = self.chrome_btn();
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.add_space(8.0);
-                        let pages = self.round_well(ui, chrome, self.look.paper, paint_pages_icon);
-                        pages.widget_info(|| {
-                            WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Pages")
-                        });
-                        if pages.clicked() {
-                            self.start_object_delete();
-                        }
                         let more = self.round_well(ui, chrome, self.look.paper, paint_more);
                         more.widget_info(|| {
                             WidgetInfo::labeled(
@@ -5034,6 +5234,18 @@ impl InkarchyApp {
                                 "Notebook menu",
                             )
                         });
+                        let pages_fill = mix_col(
+                            self.look.paper,
+                            self.look.accent,
+                            if self.sheet_tabs_on { 1.0 } else { 0.62 },
+                        );
+                        let pages = self.round_well(ui, chrome, pages_fill, paint_pages_icon);
+                        pages.widget_info(|| {
+                            WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Pages")
+                        });
+                        if pages.clicked() {
+                            self.toggle_pages_mode();
+                        }
                         let join = self
                             .note
                             .as_ref()
@@ -5053,57 +5265,15 @@ impl InkarchyApp {
                                     .max_height((ctx.screen_rect().height() - 84.0).max(88.0))
                                     .auto_shrink([false, true])
                                     .show(ui, |ui| {
+                                        self.menu_head(ui, "File");
                                         if self.menu_row(ui, "Open…", "Ctrl+O", false, false) {
                                             act = Some(MoreAct::Open);
                                         }
-                                        self.menu_sep(ui);
-                                        if compact {
-                                            if self.menu_row(ui, "Fit page", "0", false, false) {
-                                                act = Some(MoreAct::Fit);
-                                            }
-                                            let current = self.note.as_ref().map(|n| n.paper);
-                                            for kind in PaperKind::ALL {
-                                                if self.menu_row(
-                                                    ui,
-                                                    kind.label(),
-                                                    "",
-                                                    current == Some(kind),
-                                                    false,
-                                                ) {
-                                                    picked_paper = Some(kind);
-                                                }
-                                            }
-                                            self.menu_sep(ui);
+                                        if self.menu_row(ui, "Download…", "Ctrl+S", false, false)
+                                        {
+                                            act = Some(MoreAct::Download);
                                         }
-                                        if self.menu_row(
-                                            ui,
-                                            "Draw with finger",
-                                            "",
-                                            self.lib.index.finger_draw,
-                                            false,
-                                        ) {
-                                            act = Some(MoreAct::FingerDraw);
-                                        }
-                                        self.menu_sep(ui);
-                                        if self.menu_row(
-                                            ui,
-                                            "Stroke eraser",
-                                            "",
-                                            self.last_eraser == Tool::EraserStroke,
-                                            false,
-                                        ) {
-                                            act = Some(MoreAct::EraseStroke);
-                                        }
-                                        if self.menu_row(
-                                            ui,
-                                            "Area eraser",
-                                            "",
-                                            self.last_eraser == Tool::EraserArea,
-                                            false,
-                                        ) {
-                                            act = Some(MoreAct::EraseArea);
-                                        }
-                                        self.menu_sep(ui);
+                                        self.menu_head(ui, "Pages");
                                         if self.menu_row(
                                             ui,
                                             "Linked pages",
@@ -5122,12 +5292,54 @@ impl InkarchyApp {
                                         ) {
                                             act = Some(MoreAct::Separate);
                                         }
-                                        self.menu_sep(ui);
-                                        if self.menu_row(ui, "Download…", "Ctrl+S", false, false)
-                                        {
-                                            act = Some(MoreAct::Download);
+                                        if compact {
+                                            self.menu_head(ui, "View");
+                                            if self.menu_row(ui, "Fit page", "0", false, false) {
+                                                act = Some(MoreAct::Fit);
+                                            }
+                                            self.menu_head(ui, "Paper");
+                                            let current = self.note.as_ref().map(|n| n.paper);
+                                            for kind in PaperKind::ALL {
+                                                if self.menu_row(
+                                                    ui,
+                                                    kind.label(),
+                                                    "",
+                                                    current == Some(kind),
+                                                    false,
+                                                ) {
+                                                    picked_paper = Some(kind);
+                                                }
+                                            }
                                         }
-                                        self.menu_sep(ui);
+                                        self.menu_head(ui, "Tools");
+                                        if self.menu_row(
+                                            ui,
+                                            "Draw with finger",
+                                            "",
+                                            self.lib.index.finger_draw,
+                                            false,
+                                        ) {
+                                            act = Some(MoreAct::FingerDraw);
+                                        }
+                                        if self.menu_row(
+                                            ui,
+                                            "Stroke eraser",
+                                            "",
+                                            self.last_eraser == Tool::EraserStroke,
+                                            false,
+                                        ) {
+                                            act = Some(MoreAct::EraseStroke);
+                                        }
+                                        if self.menu_row(
+                                            ui,
+                                            "Area eraser",
+                                            "",
+                                            self.last_eraser == Tool::EraserArea,
+                                            false,
+                                        ) {
+                                            act = Some(MoreAct::EraseArea);
+                                        }
+                                        self.menu_head(ui, "Notebook");
                                         if self.menu_row(ui, "Move to trash", "", false, true) {
                                             act = Some(MoreAct::Trash);
                                         }
@@ -5207,13 +5419,12 @@ impl InkarchyApp {
                 self.ui_canvas(ui);
             });
 
-        if self.object_delete.is_none() {
+        if !self.sheet_tabs_on {
             self.ui_floating_dock(ctx);
             self.ui_sticky_pad(ctx);
-            self.ui_ink_tin(ctx);
+            self.ui_ink_panel(ctx);
         }
         self.ui_selection_actions(ctx);
-        self.ui_delete_list(ctx);
         self.sticky_wheel_tick(ctx);
         self.paint_sticky_wheel(ctx);
         self.ui_sticky_sheet(ctx);
@@ -5589,10 +5800,28 @@ impl InkarchyApp {
         }
     }
 
-    fn ui_ink_tin(&mut self, ctx: &Context) {
-        if !self.tin_open || self.dock_case_closed() {
-            ctx.data_mut(|d| d.remove::<Rect>(Id::new("tin-rect")));
-            ctx.data_mut(|d| d.remove::<Rect>(Id::new("tin-wheel")));
+    fn ink_panel_open(&self) -> bool {
+        self.tin_open || self.nib_open
+    }
+
+    fn set_ink_panel(&mut self, open: bool) {
+        self.tin_open = open;
+        self.nib_open = open;
+    }
+
+    fn clear_ink_panel_rects(ctx: &Context) {
+        ctx.data_mut(|d| {
+            d.remove::<Rect>(Id::new("tin-rect"));
+            d.remove::<Rect>(Id::new("tin-wheel"));
+            d.remove::<Rect>(Id::new("nib-rect"));
+            d.remove::<Rect>(Id::new("nib-track"));
+        });
+    }
+
+    /// Colour saucer and nib taper, opened together from the one ink well.
+    fn ui_ink_panel(&mut self, ctx: &Context) {
+        if !self.ink_panel_open() || self.dock_case_closed() {
+            Self::clear_ink_panel_rects(ctx);
             return;
         }
         let screen = ctx.screen_rect();
@@ -5600,96 +5829,157 @@ impl InkarchyApp {
             .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
             .unwrap_or(Rect::from_center_size(screen.center(), vec2(48.0, 48.0)));
         let bounds = note_controls_bounds(ctx);
-        let wanted = vec2(300.0, 300.0);
-        let place = accessory_rect(
-            bounds,
-            &[dock],
-            wanted,
-            vec2(140.0, 140.0),
-            self.dock_layout_edge(),
-        );
-        let side = place.width().min(place.height());
+        let edge = self.dock_layout_edge();
+        let gap = 8.0;
+        let slip_cross = 40.0;
+        let extra = gap + slip_cross;
+        let wanted = if edge.vertical() {
+            vec2(TIN_SIDE + extra, TIN_SIDE)
+        } else {
+            vec2(TIN_SIDE, TIN_SIDE + extra)
+        };
+        let place = accessory_rect(bounds, &[dock], wanted, vec2(112.0, 112.0), edge);
+        let room = if edge.vertical() {
+            (place.width() - extra).min(place.height())
+        } else {
+            (place.height() - extra).min(place.width())
+        };
+        let wheel_side = room.clamp(0.0, TIN_SIDE);
+        let slip_size = if edge.vertical() {
+            vec2(slip_cross, wheel_side)
+        } else {
+            vec2(wheel_side, slip_cross)
+        };
+        let content = if edge.vertical() {
+            vec2(wheel_side + extra, wheel_side)
+        } else {
+            vec2(wheel_side, wheel_side + extra)
+        };
         let inner = Area::new(Id::new("inkarchy-tin"))
             .order(Order::Foreground)
             .fixed_pos(place.min)
             .constrain_to(bounds)
             .show(ctx, |ui| {
-                Frame::NONE
-                    .fill(self.note_case_color())
-                    .stroke(Stroke::new(
-                        1.0,
-                        mix_col(self.note_case_color(), self.look.paper, 0.22),
-                    ))
-                    .corner_radius((side * 0.5) as u8)
-                    .shadow(egui::epaint::Shadow {
-                        offset: [0, 4],
-                        blur: 8,
-                        spread: 0,
-                        color: self.look.shadow.gamma_multiply(0.65),
-                    })
-                    .inner_margin(Margin::same(14))
-                    .show(ui, |ui| {
-                        let wheel_side = (side - 28.0).max(80.0);
-                        let (wheel, resp) = ui.allocate_exact_size(
-                            vec2(wheel_side, wheel_side),
-                            Sense::click_and_drag(),
-                        );
-                        resp.widget_info(|| {
-                            WidgetInfo::labeled(WidgetType::Slider, ui.is_enabled(), "Ink color")
-                        });
-                        ui.ctx()
-                            .data_mut(|d| d.insert_temp(Id::new("tin-wheel"), wheel));
-                        let geom = ink_wheel_geom(wheel);
-                        let p = ui.painter();
-                        p.circle_filled(geom.center, geom.ring_outer + 1.5, self.look.paper);
-                        paint_hue_ring(p, geom.center, geom.ring_inner, geom.ring_outer);
-                        p.circle_filled(geom.center, geom.ring_inner - 1.0, self.look.paper);
-                        paint_sv_disk(p, geom.center, geom.sv_r, self.tin_hue);
-                        let (_, s0, v0) = rgb_to_hsv(self.ink);
-                        let mut cur = geom.sv_pos(s0, v0);
-                        let d = cur.distance(geom.center);
-                        if d > geom.sv_r && d > 0.5 {
-                            cur = geom.center + (cur - geom.center) * (geom.sv_r / d);
-                        }
-                        p.circle_stroke(cur, 7.0, Stroke::new(2.0_f32, self.look.paper));
-                        p.circle_stroke(cur, 5.0, Stroke::new(1.0_f32, self.look.ink));
-                        let handle = geom.hue_pos(self.tin_hue);
-                        p.circle_filled(handle, 8.0, hsv_to_rgb(self.tin_hue, 1.0, 1.0));
-                        p.circle_stroke(handle, 8.0, Stroke::new(2.0, self.look.paper));
-                        p.circle_stroke(handle, 9.5, Stroke::new(1.0, self.look.ink));
-                        let zone_id = Id::new("tin-drag-zone");
-                        if let Some(pointer) = resp.interact_pointer_pos() {
-                            if resp.drag_started() || resp.clicked() {
-                                let dist = pointer.distance(geom.center);
-                                let zone = if dist <= geom.sv_r + 2.0 {
-                                    0_u8
-                                } else if dist <= geom.ring_outer + 10.0 {
-                                    1
-                                } else {
-                                    2
-                                };
-                                ui.ctx().data_mut(|d| d.insert_temp(zone_id, zone));
-                                self.apply_tin_pointer(&geom, pointer, zone);
-                            } else if resp.dragged() {
-                                let zone =
-                                    ui.ctx().data(|d| d.get_temp::<u8>(zone_id)).unwrap_or(2);
-                                self.apply_tin_pointer(&geom, pointer, zone);
-                            }
-                        }
-                        if resp.drag_stopped() {
-                            ui.ctx().data_mut(|d| d.remove::<u8>(zone_id));
-                        }
-                    });
+                let layout = if edge.vertical() {
+                    Layout::left_to_right(Align::Center)
+                } else {
+                    Layout::top_down(Align::Center)
+                };
+                ui.allocate_ui_with_layout(content, layout, |ui| {
+                    ui.spacing_mut().item_spacing = vec2(gap, gap);
+                    let wheel_first = matches!(edge, DockEdge::Left | DockEdge::Top);
+                    if wheel_first {
+                        self.ink_wheel_ui(ui, wheel_side);
+                        self.nib_slip_ui(ui, slip_size, edge.vertical());
+                    } else {
+                        self.nib_slip_ui(ui, slip_size, edge.vertical());
+                        self.ink_wheel_ui(ui, wheel_side);
+                    }
+                });
             });
         ctx.data_mut(|d| d.insert_temp(Id::new("tin-rect"), inner.response.rect));
         if ctx.input(|i| i.pointer.primary_pressed()) {
             if let Some(p) = ctx.pointer_latest_pos() {
-                let on_tin = inner.response.rect.expand(4.0).contains(p);
+                let on_panel = inner.response.rect.expand(4.0).contains(p);
                 let on_dock = dock.expand(6.0).contains(p);
-                if !on_tin && !on_dock {
-                    self.tin_open = false;
+                if !on_panel && !on_dock {
+                    self.set_ink_panel(false);
                 }
             }
+        }
+    }
+
+    fn ink_wheel_ui(&mut self, ui: &mut Ui, side: f32) {
+        let (wheel, resp) = ui.allocate_exact_size(vec2(side, side), Sense::click_and_drag());
+        resp.widget_info(|| WidgetInfo::labeled(WidgetType::Slider, ui.is_enabled(), "Ink color"));
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(Id::new("tin-wheel"), wheel));
+        let geom = ink_wheel_geom(wheel);
+        let p = ui.painter();
+        // The hue ring is the outer edge. No plate and no stroke around it.
+        paint_disc_shadow(p, geom.center, geom.ring_outer, self.look.shadow);
+        paint_hue_ring(p, geom.center, geom.ring_inner, geom.ring_outer);
+        p.circle_filled(geom.center, geom.ring_inner - 0.4, self.look.paper);
+        paint_sv_disk(p, geom.center, geom.sv_r, self.tin_hue);
+        p.circle_stroke(
+            geom.center,
+            geom.sv_r - 0.6,
+            Stroke::new(1.15, Color32::from_black_alpha(36)),
+        );
+        let (_, s0, v0) = rgb_to_hsv(self.ink);
+        let mut cur = geom.sv_pos(s0, v0);
+        let d = cur.distance(geom.center);
+        if d > geom.sv_r && d > 0.5 {
+            cur = geom.center + (cur - geom.center) * (geom.sv_r / d);
+        }
+        p.circle_filled(cur, 7.2, self.look.paper);
+        p.circle_filled(cur, 4.6, self.ink);
+        p.circle_stroke(cur, 7.2, Stroke::new(1.2, Color32::from_black_alpha(40)));
+        let handle = geom.hue_pos(self.tin_hue);
+        let hue = hsv_to_rgb(self.tin_hue, 1.0, 1.0);
+        p.circle_filled(handle, 7.4, self.look.paper);
+        p.circle_filled(handle, 5.0, hue);
+        let zone_id = Id::new("tin-drag-zone");
+        if let Some(pointer) = resp.interact_pointer_pos() {
+            if resp.drag_started() || resp.clicked() {
+                let dist = pointer.distance(geom.center);
+                let zone = if dist <= geom.sv_r + 2.0 {
+                    0_u8
+                } else if dist <= geom.ring_outer + 10.0 {
+                    1
+                } else {
+                    2
+                };
+                ui.ctx().data_mut(|d| d.insert_temp(zone_id, zone));
+                self.apply_tin_pointer(&geom, pointer, zone);
+            } else if resp.dragged() {
+                let zone = ui.ctx().data(|d| d.get_temp::<u8>(zone_id)).unwrap_or(2);
+                self.apply_tin_pointer(&geom, pointer, zone);
+            }
+        }
+        if resp.drag_stopped() {
+            ui.ctx().data_mut(|d| d.remove::<u8>(zone_id));
+        }
+    }
+
+    fn nib_slip_ui(&mut self, ui: &mut Ui, slip_size: Vec2, vertical: bool) {
+        let (slip, resp) = ui.allocate_exact_size(slip_size, Sense::click_and_drag());
+        resp.widget_info(|| WidgetInfo::labeled(WidgetType::Slider, ui.is_enabled(), "Nib"));
+        let track = slip.shrink(6.0);
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(Id::new("nib-track"), track));
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(Id::new("nib-rect"), slip));
+        let p = ui.painter();
+        p.rect_filled(
+            slip.translate(vec2(0.0, 3.0)),
+            16.0,
+            Color32::from_rgba_unmultiplied(
+                self.look.shadow.r(),
+                self.look.shadow.g(),
+                self.look.shadow.b(),
+                48,
+            ),
+        );
+        p.rect_filled(slip, 16.0, self.look.paper);
+        let ink = self.ink_color();
+        paint_nib_taper(p, track, ink, vertical);
+        let t = nib_t(self.width);
+        let handle = nib_handle_pos(track, t, vertical);
+        let radius = 3.2 + t * 7.0;
+        p.circle_filled(handle, radius + 2.2, self.look.paper);
+        p.circle_filled(handle, radius, ink);
+        if let Some(pointer) = resp.interact_pointer_pos() {
+            if resp.dragged() || resp.clicked() {
+                self.set_nib_width(width_from_nib_t(nib_track_t(track, pointer, vertical)));
+            }
+        }
+    }
+
+    fn set_nib_width(&mut self, width: f32) {
+        self.width = width.clamp(0.8, 48.0);
+        if self.tool.is_ink() {
+            self.last_ink_width = self.width;
         }
     }
 
@@ -5992,7 +6282,7 @@ impl InkarchyApp {
         }
     }
 
-    fn dock_inner(&mut self, ui: &mut Ui, vertical: bool) {
+    fn dock_inner(&mut self, ui: &mut Ui, _vertical: bool) {
         let slot = self.slot();
         for t in [
             Tool::Fineliner,
@@ -6003,7 +6293,7 @@ impl InkarchyApp {
             if self.tool_glyph(ui, t) {
                 self.finish_text_edit();
                 if self.tool == t {
-                    self.tin_open = !self.tin_open;
+                    self.set_ink_panel(!self.ink_panel_open());
                 } else {
                     self.sel.clear();
                     self.tool = t;
@@ -6041,25 +6331,9 @@ impl InkarchyApp {
             self.tool = Tool::Image;
             self.pending_image = Some(self.drop_spot());
         }
-        self.dock_gap(ui, vertical);
-        let current = Color32::from_rgb(self.ink.r(), self.ink.g(), self.ink.b());
-        if self
-            .palette_chip(ui, current, self.tin_open, vertical)
-            .clicked()
-        {
-            self.tin_open = !self.tin_open;
+        if self.ink_well(ui, self.ink_panel_open()).clicked() {
+            self.set_ink_panel(!self.ink_panel_open());
         }
-        let nearest = nearest_pen_size(self.width);
-        for &(w, r) in &PEN_SIZES {
-            let on = (nearest - w).abs() < 0.01;
-            if self.thick_dot(ui, r, on, pen_size_label(r)) {
-                self.width = w;
-                if self.tool.is_ink() {
-                    self.last_ink_width = self.width;
-                }
-            }
-        }
-        self.dock_gap(ui, vertical);
         if self
             .round_well(ui, slot, self.look.paper, paint_undo)
             .clicked()
@@ -6122,56 +6396,19 @@ impl InkarchyApp {
         resp.on_hover_cursor(cursor)
     }
 
-    fn dock_gap(&self, ui: &mut Ui, vertical: bool) {
+    /// Current ink at the current nib size. One well opens colour and thickness.
+    fn ink_well(&self, ui: &mut Ui, open: bool) -> Response {
         let s = self.slot();
-        if vertical {
-            ui.add_space(2.0);
-            let (rect, _) = ui.allocate_exact_size(vec2(s, 2.0), Sense::hover());
-            ui.painter().line_segment(
-                [
-                    pos2(rect.min.x + 1.0, rect.center().y),
-                    pos2(rect.max.x - 1.0, rect.center().y),
-                ],
-                Stroke::new(1.0_f32, self.look.muted.gamma_multiply(0.55)),
-            );
-            ui.add_space(2.0);
-        } else {
-            ui.add_space(2.0);
-            let (rect, _) = ui.allocate_exact_size(vec2(2.0, s), Sense::hover());
-            ui.painter().line_segment(
-                [
-                    pos2(rect.center().x, rect.min.y + 1.0),
-                    pos2(rect.center().x, rect.max.y - 1.0),
-                ],
-                Stroke::new(1.0_f32, self.look.muted.gamma_multiply(0.55)),
-            );
-            ui.add_space(2.0);
-        }
-    }
-
-    fn palette_chip(&self, ui: &mut Ui, color: Color32, open: bool, _vertical: bool) -> Response {
-        let s = self.slot();
-        let size = vec2(s, s);
-        let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(vec2(s, s), Sense::click());
         let c = rect.center();
+        let t = nib_t(self.width);
+        let r = 2.6 + t * 6.2;
         let p = ui.painter();
-        let r = 7.4;
-        if !open {
-            p.circle_filled(c + vec2(2.4, 2.1), r - 0.6, color.gamma_multiply(0.55));
-        }
-        p.circle_filled(c, r + 1.3, self.look.fg.gamma_multiply(0.55));
-        p.circle_filled(c, r, color);
-        p.circle_stroke(
-            c,
-            r,
-            Stroke::new(1.05_f32, self.look.fg.gamma_multiply(0.55)),
-        );
+        p.circle_filled(c, r, self.ink_color());
         if open {
-            p.circle_stroke(c, r + 3.4, Stroke::new(1.5_f32, self.look.fg));
+            p.circle_stroke(c, (r + 3.6).min(s * 0.42), Stroke::new(1.5, self.look.fg));
         }
-        resp.widget_info(|| {
-            WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), open, "Color")
-        });
+        resp.widget_info(|| WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), open, "Ink"));
         resp.on_hover_cursor(CursorIcon::PointingHand)
     }
 
@@ -6185,25 +6422,6 @@ impl InkarchyApp {
             p.circle_filled(c + offset, 4.8, color);
             p.circle_stroke(c + offset, 4.8, Stroke::new(1.0, fg.gamma_multiply(0.65)));
         }
-    }
-
-    fn thick_dot(&self, ui: &mut Ui, r: f32, on: bool, label: &str) -> bool {
-        let s = self.slot();
-        let size = vec2(s, s);
-        let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-        let c = rect.center();
-        let p = ui.painter();
-        let fill = if on {
-            self.ink_color()
-        } else {
-            self.look.fg.gamma_multiply(0.42)
-        };
-        p.circle_filled(c, r, fill);
-        if on {
-            p.circle_stroke(c, r + 5.0, Stroke::new(1.5, self.look.paper));
-        }
-        resp.widget_info(|| WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), on, label));
-        resp.on_hover_cursor(CursorIcon::PointingHand).clicked()
     }
 
     fn tool_glyph(&mut self, ui: &mut Ui, tool: Tool) -> bool {
@@ -6222,7 +6440,7 @@ impl InkarchyApp {
             self.tool = tool;
             self.last_ink = tool;
             self.last_ink_width = self.width;
-            self.tin_open = true;
+            self.set_ink_panel(true);
             false
         } else {
             click
@@ -6358,20 +6576,24 @@ impl InkarchyApp {
             return;
         }
 
+        if self.sheet_tabs_on {
+            self.arm_page_marks(ui);
+        }
         let touch_owned = self.handle_canvas_touch(ui, rect);
         self.handle_camera(ui, &resp, rect);
         let pen = self.tablet.snapshot();
-        if self.object_delete.is_some() {
+        if self.sheet_tabs_on {
             if !touch_owned || pen.down || pen.pressed || pen.released {
-                self.pick_or_pan(ui, &resp, rect);
+                self.pages_or_pan(ui, &resp, rect);
             }
         } else if !touch_owned || pen.down || pen.pressed || pen.released {
             self.handle_tool(ui, &resp, rect);
         }
         self.paint_world(&painter, rect);
         self.paint_sheet_tabs(ui, &painter, rect);
-        if self.object_delete.is_some() {
-            self.paint_delete_marks(&painter, rect);
+        if self.sheet_tabs_on {
+            self.paint_page_minuses(ui, &painter, rect);
+            self.paint_sticky_minuses(ui, &painter, rect);
             self.cursor_for_tool(ui, &resp);
             return;
         }
@@ -6631,13 +6853,13 @@ impl InkarchyApp {
                 || d.get_temp::<Rect>(Id::new("tin-rect"))
                     .map(|r| r.expand(2.0).contains(screen))
                     .unwrap_or(false)
+                || d.get_temp::<Rect>(Id::new("nib-rect"))
+                    .map(|r| r.expand(2.0).contains(screen))
+                    .unwrap_or(false)
                 || d.get_temp::<Rect>(Id::new("sticky-pad-rect"))
                     .map(|r| r.expand(4.0).contains(screen))
                     .unwrap_or(false)
                 || d.get_temp::<Rect>(Id::new("sticky-wheel-rect"))
-                    .map(|r| r.contains(screen))
-                    .unwrap_or(false)
-                || d.get_temp::<Rect>(Id::new("delete-list-rect"))
                     .map(|r| r.contains(screen))
                     .unwrap_or(false)
         }) {
@@ -6649,13 +6871,6 @@ impl InkarchyApp {
                 self.selection_resize = None;
             }
             return;
-        }
-        if primary_pressed {
-            if let Some((col, row)) = self.fold_at(screen, rect) {
-                self.tear_unit_at(col, row);
-                self.tab_held = true;
-                return;
-            }
         }
         if primary_pressed && self.tool != Tool::Lasso {
             if let Some((col, row)) = self.sheet_tab_at(screen, rect) {
@@ -6699,7 +6914,9 @@ impl InkarchyApp {
         }
         if primary_pressed && primary_released {
             if let Some((page, id)) = self.sticky_at(paper) {
-                self.open_sticky_sheet(page, id);
+                if ui.input(|i| i.pointer.button_double_clicked(PointerButton::Primary)) {
+                    self.open_sticky_sheet(page, id);
+                }
                 return;
             }
         }
@@ -7171,126 +7388,6 @@ impl InkarchyApp {
 
     fn ui_selection_actions(&mut self, ctx: &Context) {
         ctx.data_mut(|d| d.remove::<Rect>(Id::new("selection-actions")));
-        if self.editing_text.is_some()
-            || self.object_delete.is_some()
-            || self.export_picker_open
-            || self.drag_last.is_some()
-            || self.selection_resize.is_some()
-        {
-            return;
-        }
-        let Some(b) = self.selection_bounds() else {
-            return;
-        };
-        let bounds = note_controls_bounds(ctx);
-        let selection = Rect::from_min_max(
-            self.camera.to_screen(b.min, self.canvas_rect),
-            self.camera.to_screen(b.max, self.canvas_rect),
-        );
-        if !selection.intersects(bounds) {
-            return;
-        }
-        let mut blockers = Vec::new();
-        for key in ["dock-rect", "tin-rect"] {
-            if let Some(r) = ctx.data(|d| d.get_temp::<Rect>(Id::new(key))) {
-                blockers.push(r);
-            }
-        }
-        // Leave the entire 44-point corner hit areas free, not only their visible dots.
-        blockers.push(selection.expand(22.0));
-        let single = (self.sel.len() == 1).then(|| self.sel[0]);
-        let extra = single.filter(|s| s.kind != SelKind::Stroke);
-        let compact = bounds.width() < 354.0;
-        let wanted = if compact {
-            vec2(280.0, 132.0)
-        } else {
-            vec2(if extra.is_some() { 354.0 } else { 266.0 }, 84.0)
-        };
-        let minimum = vec2(wanted.x.min(bounds.width()), 84.0_f32.min(bounds.height()));
-        let mut place = accessory_rect(bounds, &blockers, wanted, minimum, DockEdge::Bottom);
-        if place.height() < wanted.y
-            || blockers[..blockers.len() - 1]
-                .iter()
-                .any(|r| r.intersects(place))
-        {
-            blockers.pop();
-            place = accessory_rect(bounds, &blockers, wanted, minimum, DockEdge::Bottom);
-        }
-        let label = match single.map(|s| s.kind) {
-            Some(SelKind::Image) => "Image · move / resize",
-            Some(SelKind::Text) => "Text · move / resize",
-            Some(SelKind::Stroke) => "Stroke · move / resize",
-            None => "Selection · move / resize",
-        };
-        let response = Area::new(Id::new("selection-actions-area"))
-            .order(Order::Foreground)
-            .fixed_pos(place.min)
-            .constrain_to(bounds)
-            .show(ctx, |ui| {
-                self.note_popup_frame().show(ui, |ui| {
-                    ui.set_width((place.width() - 18.0).max(92.0));
-                    ui.label(
-                        RichText::new(label)
-                            .font(self.look.mono(11.0))
-                            .color(self.look.paper),
-                    );
-                    ScrollArea::vertical()
-                        .id_salt("selection-actions-scroll")
-                        .max_height((place.height() - 36.0).max(44.0))
-                        .show(ui, |ui| {
-                            let column = (ui.available_width() - 4.0) * 0.5;
-                            Grid::new("selection-action-grid")
-                                .num_columns(if compact { 2 } else { 4 })
-                                .spacing(vec2(4.0, 4.0))
-                                .show(ui, |ui| {
-                                    let width = |w| if compact { column } else { w };
-                                    if let Some(sel) = extra {
-                                        if sel.kind == SelKind::Text {
-                                            if self
-                                                .note_action(ui, "Edit text", width(80.0), false)
-                                                .clicked()
-                                            {
-                                                self.edit_selected_text();
-                                            }
-                                        } else {
-                                            ui.add_enabled_ui(self.image_import.is_none(), |ui| {
-                                                if self
-                                                    .note_action(ui, "Replace", width(80.0), false)
-                                                    .clicked()
-                                                {
-                                                    self.pick_image(
-                                                        ctx,
-                                                        sel.page,
-                                                        Pos2::ZERO,
-                                                        Some(sel.id),
-                                                    );
-                                                }
-                                            });
-                                        }
-                                    }
-                                    if self
-                                        .note_action(ui, "Duplicate", width(92.0), false)
-                                        .clicked()
-                                    {
-                                        self.duplicate_selection();
-                                    }
-                                    if compact && extra.is_some() {
-                                        ui.end_row();
-                                    }
-                                    if self.note_action(ui, "Delete", width(80.0), true).clicked() {
-                                        self.delete_selection();
-                                    }
-                                    if compact && extra.is_none() {
-                                        ui.end_row();
-                                    }
-                                    if self.note_action(ui, "Done", width(62.0), false).clicked() {
-                                        self.sel.clear();
-                                    }
-                                });
-                        });
-                });
-            });
-        ctx.data_mut(|d| d.insert_temp(Id::new("selection-actions"), response.response.rect));
     }
 
     fn hits_lasso(&self) -> Vec<Sel> {
@@ -7748,14 +7845,10 @@ impl InkarchyApp {
             self.paint_fused_rules(painter, &note, cam, rect);
         }
 
-        for &(pi, page, origin, paper, _, n_right, n_top, _) in &tiles {
+        for &(pi, page, origin, paper, _, _, _, _) in &tiles {
             let has_bg = page.background.is_some();
             if !fused && !has_bg && note.paper.has_margin_punches() && page.col == min_col {
                 self.paint_punches(painter, paper, cam.zoom_min());
-            }
-            let outer_ear = !n_right && !n_top && note.paper != PaperKind::Slate;
-            if outer_ear && !has_bg && !note.can_tear_unit() {
-                paint_page_fold(painter, paper, cam.zoom_min(), self.look.paper_rule_strong);
             }
             if has_bg && paper.expand(bleed).intersects(rect) {
                 if let Some(bg) = page.background.as_ref() {
@@ -7776,23 +7869,6 @@ impl InkarchyApp {
                     }
                 }
             }
-            if outer_ear && note.can_tear_unit() {
-                let hot = painter
-                    .ctx()
-                    .input(|i| i.pointer.hover_pos())
-                    .is_some_and(|p| self.fold_contains(p, paper));
-                paint_page_fold(
-                    painter,
-                    paper,
-                    cam.zoom_min(),
-                    if hot {
-                        self.look.rust()
-                    } else {
-                        self.look.paper_rule_strong
-                    },
-                );
-            }
-
             for tx in &page.texts {
                 if !tx.sticky {
                     continue;
@@ -7801,29 +7877,7 @@ impl InkarchyApp {
                     map(tx.min() + origin),
                     vec2(tx.size[0] * cam.zoom, tx.size[1] * cam.zoom_y()),
                 );
-                painter.rect_filled(
-                    r.translate(vec2(2.0, 3.0)),
-                    3.0,
-                    self.look.shadow.gamma_multiply(0.28),
-                );
-                painter.rect_filled(
-                    r,
-                    3.0,
-                    Color32::from_rgb(tx.color32().r(), tx.color32().g(), tx.color32().b()),
-                );
-                painter.rect_stroke(
-                    r,
-                    3.0,
-                    Stroke::new(1.0, self.look.ink.gamma_multiply(0.18)),
-                    StrokeKind::Inside,
-                );
-                let ear = (r.width().min(r.height()) * 0.22).clamp(10.0, 16.0);
-                let tip = r.right_bottom();
-                painter.add(Shape::convex_polygon(
-                    vec![tip + vec2(-ear, 0.0), tip, tip + vec2(0.0, -ear)],
-                    self.look.ink.gamma_multiply(0.28),
-                    Stroke::NONE,
-                ));
+                paint_sticky_card(painter, r, tx.color32(), self.look.shadow);
             }
 
             for im in &page.images {
@@ -7928,41 +7982,6 @@ impl InkarchyApp {
         }
     }
 
-    fn fold_contains(&self, screen: Pos2, paper: Rect) -> bool {
-        let ear = (16.0 * self.camera.zoom_min()).max(36.0);
-        let dx = paper.max.x - screen.x;
-        let dy = screen.y - paper.min.y;
-        dx >= 0.0 && dy >= 0.0 && dx + dy <= ear
-    }
-
-    /// Outer top-right ear of a page that can be torn off.
-    fn fold_at(&self, screen: Pos2, canvas: Rect) -> Option<(i32, i32)> {
-        let note = self.note.as_ref()?;
-        if !note.can_tear_unit() || canvas.width() < 10.0 {
-            return None;
-        }
-        let fused =
-            note.sheet_join == SheetJoin::Linked && note.pages.len() > 1 && !note.is_grown_single();
-        let mut best: Option<(f32, i32, i32)> = None;
-        for page in &note.pages {
-            if fused
-                && (note.unit_occupied(page.col + 1, page.row)
-                    || note.unit_occupied(page.col, page.row - 1))
-            {
-                continue;
-            }
-            let paper = self.unit_screen_rect(canvas, page.col, page.row);
-            if !self.fold_contains(screen, paper) {
-                continue;
-            }
-            let distance = screen.distance(paper.right_top());
-            if best.is_none_or(|(best_d, _, _)| distance < best_d) {
-                best = Some((distance, page.col, page.row));
-            }
-        }
-        best.map(|(_, col, row)| (col, row))
-    }
-
     fn tear_unit_at(&mut self, col: i32, row: i32) {
         if !self
             .note
@@ -7980,8 +7999,8 @@ impl InkarchyApp {
         if let Some(note) = &mut self.note {
             note.remove_unit(col, row);
         }
+        // Stay at the current zoom. A cover-fit here jumps the sheet to the window.
         self.fitted_cell = None;
-        self.need_fit = true;
         self.mark_dirty();
     }
 
@@ -8068,7 +8087,7 @@ impl InkarchyApp {
             return;
         }
         let hover = ui.input(|i| i.pointer.hover_pos());
-        let (wash, plus, wash_hot, plus_hot) = sheet_tab_colors(self.look.desk, self.look.green());
+        let (fill, fill_hot, glyph) = sheet_mark_colors(self.look.green(), self.look.paper);
         for (_, _, hit) in self.sheet_tabs(canvas) {
             if !hit.is_positive() {
                 continue;
@@ -8077,14 +8096,32 @@ impl InkarchyApp {
             paint_sheet_tab(
                 painter,
                 hit,
-                if hot { wash_hot } else { wash },
-                if hot { plus_hot } else { plus },
+                if hot { fill_hot } else { fill },
+                glyph,
+                self.look.shadow,
+                false,
             );
         }
     }
 
-    fn start_object_delete(&mut self) {
-        if self.object_delete.is_some() || self.note.is_none() {
+    fn toggle_pages_mode(&mut self) {
+        if self.sheet_tabs_on {
+            self.leave_pages_mode();
+        } else {
+            self.enter_pages_mode();
+        }
+    }
+
+    fn leave_pages_mode(&mut self) {
+        self.tab_held = false;
+        self.page_press_owned = false;
+        self.page_mark = None;
+        self.pages_marks_ready = false;
+        self.sheet_tabs_on = false;
+    }
+
+    fn enter_pages_mode(&mut self) {
+        if self.sheet_tabs_on || self.note.is_none() {
             return;
         }
         self.finish_live();
@@ -8097,432 +8134,284 @@ impl InkarchyApp {
         self.sticky_resize = None;
         self.reset_canvas_gesture();
         self.tin_open = false;
-        self.object_delete = Some(Vec::new());
+        self.nib_open = false;
+        self.page_mark = None;
+        self.page_press_owned = false;
+        self.pages_marks_ready = false;
         self.sheet_tabs_on = true;
-        self.clear_delete_band();
     }
 
-    fn cancel_object_delete(&mut self) {
-        self.object_delete = None;
-        self.tab_held = false;
-        self.sheet_tabs_on = false;
-        self.clear_delete_band();
-    }
-
-    fn clear_delete_band(&mut self) {
-        self.delete_band = None;
-        self.delete_band_now = None;
-        self.delete_band_armed = false;
-        self.delete_band_base.clear();
-    }
-
-    fn remember_delete_band_base(&mut self) {
-        self.delete_band_base = self.object_delete.clone().unwrap_or_default();
-        self.delete_band_armed = false;
-    }
-
-    fn commit_object_delete(&mut self) {
-        let plan = self
-            .note
-            .as_ref()
-            .zip(self.object_delete.as_ref())
-            .map(|(note, picks)| Self::checked_delete(note, picks));
-        let Some(pages) = plan else {
-            return;
-        };
-        if pages.is_empty() {
+    /// The click that opened Pages mode cannot land on a mark that just appeared.
+    fn arm_page_marks(&mut self, ui: &Ui) {
+        if !self.sheet_tabs_on || self.pages_marks_ready {
             return;
         }
-        self.object_delete = None;
-        self.sheet_tabs_on = false;
-        self.clear_delete_band();
-        self.push_snapshot();
-        if let Some(note) = &mut self.note {
-            for (col, row) in pages {
-                note.remove_unit(col, row);
+        let pen = self.tablet.snapshot();
+        let (down, pressed) = ui.input(|i| (i.pointer.primary_down(), i.pointer.primary_pressed()));
+        if !down && !pressed && !pen.down && !pen.pressed {
+            self.pages_marks_ready = true;
+        }
+    }
+
+    fn pointer_at(&self, ui: &Ui) -> Option<Pos2> {
+        let pen = self.tablet.snapshot();
+        // A hovering stylus must not steal a finger or mouse tap.
+        if pen.down || pen.pressed || pen.released {
+            if let Some(pos) = pen.pos {
+                return Some(pos);
             }
         }
+        ui.input(|i| {
+            let mut pos = i.pointer.interact_pos().or(i.pointer.hover_pos());
+            for event in i.events.iter().rev() {
+                match event {
+                    Event::PointerMoved(p)
+                    | Event::PointerButton { pos: p, .. }
+                    | Event::Touch { pos: p, .. } => {
+                        pos = Some(*p);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            pos
+        })
+    }
+
+    fn page_minus_at(&self, screen: Pos2, canvas: Rect) -> Option<(i32, i32)> {
+        let note = self.note.as_ref()?;
+        if !self.sheet_tabs_on || !note.can_tear_unit() || canvas.width() < 10.0 {
+            return None;
+        }
+        let mut best: Option<(f32, i32, i32)> = None;
+        for page in &note.pages {
+            let paper = self.unit_screen_rect(canvas, page.col, page.row);
+            let band = page_minus_band(paper);
+            if !band.is_positive() || !band.contains(screen) {
+                continue;
+            }
+            let distance = screen.distance(band.center());
+            if best.is_none_or(|(best_d, _, _)| distance < best_d) {
+                best = Some((distance, page.col, page.row));
+            }
+        }
+        best.map(|(_, col, row)| (col, row))
+    }
+
+    fn paint_page_minuses(&self, ui: &Ui, painter: &Painter, canvas: Rect) {
+        let Some(note) = self.note.as_ref() else {
+            return;
+        };
+        if !note.can_tear_unit() || canvas.width() < 10.0 {
+            return;
+        }
+        let hover = ui.input(|i| i.pointer.hover_pos());
+        let (fill, fill_hot, glyph) = sheet_mark_colors(self.look.rust(), self.look.paper);
+        for page in &note.pages {
+            let paper = self.unit_screen_rect(canvas, page.col, page.row);
+            let band = page_minus_band(paper);
+            if !band.is_positive() {
+                continue;
+            }
+            let hot = hover.is_some_and(|p| band.contains(p));
+            paint_sheet_tab(
+                painter,
+                band,
+                if hot { fill_hot } else { fill },
+                glyph,
+                self.look.shadow,
+                true,
+            );
+        }
+    }
+
+    fn commit_page_mark(&mut self, mark: &PageMarkPress) {
+        match mark.kind {
+            PageMark::Add(col, row) => self.add_sheet_from_tab(col, row),
+            PageMark::Tear(col, row) => self.tear_unit_at(col, row),
+            PageMark::TearSticky(page, id) => self.delete_sticky(page, id),
+        }
+    }
+
+    fn delete_sticky(&mut self, page: usize, id: Uuid) {
+        let present = self.note.as_ref().is_some_and(|note| {
+            note.pages
+                .get(page)
+                .is_some_and(|p| p.texts.iter().any(|t| t.id == id && t.sticky))
+        });
+        if !present {
+            return;
+        }
+        self.finish_live();
+        self.finish_text_edit();
+        self.clear_shape_hold();
         self.sel.clear();
-        self.fitted_cell = None;
-        self.need_fit = true;
+        self.lasso.clear();
+        self.push_snapshot();
+        if let Some(note) = &mut self.note {
+            if let Some(pg) = note.pages.get_mut(page) {
+                pg.texts.retain(|t| t.id != id);
+            }
+        }
         self.mark_dirty();
     }
 
-    /// Checked pages that can actually leave (one sheet stays).
-    fn checked_delete(note: &Note, picks: &[DeletePick]) -> Vec<(i32, i32)> {
-        let wanted: Vec<(i32, i32)> = picks
-            .iter()
-            .filter_map(|pick| {
-                let DeleteTarget::Page(col, row) = pick.target;
-                (pick.on && note.unit_occupied(col, row)).then_some((col, row))
-            })
-            .collect();
-        Self::pages_to_remove(note, &wanted)
+    fn sticky_screen_rect(&self, canvas: Rect, page: usize, tx: &TextBox) -> Rect {
+        let origin = self.origin_of(page);
+        Rect::from_min_size(
+            self.camera.to_screen(tx.min() + origin, canvas),
+            vec2(
+                tx.size[0] * self.camera.zoom,
+                tx.size[1] * self.camera.zoom_y(),
+            ),
+        )
     }
 
-    fn pages_to_remove(note: &Note, wanted: &[(i32, i32)]) -> Vec<(i32, i32)> {
-        let cells = note.unit_cells();
-        if cells.len() <= 1 {
-            return Vec::new();
-        }
-        let mut remove: Vec<(i32, i32)> = wanted
-            .iter()
-            .copied()
-            .filter(|cell| cells.contains(cell))
-            .collect();
-        remove.sort();
-        remove.dedup();
-        if remove.len() >= cells.len() {
-            let keep = cells[0];
-            remove.retain(|cell| *cell != keep);
-        }
-        remove
-    }
-
-    fn drop_dead_picks(&mut self) {
-        let Some(note) = self.note.as_ref() else {
-            self.object_delete = None;
-            return;
-        };
-        let Some(picks) = &mut self.object_delete else {
-            return;
-        };
-        picks.retain(|pick| {
-            let DeleteTarget::Page(col, row) = pick.target;
-            note.unit_occupied(col, row)
-        });
-    }
-
-    fn toggle_delete_target(&mut self, target: DeleteTarget) {
-        let Some(picks) = &mut self.object_delete else {
-            return;
-        };
-        if let Some(pick) = picks.iter_mut().find(|pick| pick.target == target) {
-            pick.on = !pick.on;
-        } else {
-            picks.insert(0, DeletePick { target, on: true });
-        }
-    }
-
-    fn delete_pick_label(&self, target: DeleteTarget) -> String {
-        let pages = self.note.as_ref().map(|note| note.pages.len()).unwrap_or(0);
-        let index = self.note.as_ref().and_then(|note| {
-            note.pages
-                .iter()
-                .position(|page| DeleteTarget::Page(page.col, page.row) == target)
-        });
-        match index {
-            Some(index) if pages > 1 => format!("Page {}", index + 1),
-            _ => "Page".into(),
-        }
-    }
-
-    fn page_at_screen(&self, screen: Pos2, canvas: Rect) -> Option<(i32, i32)> {
+    fn sticky_minus_at(&self, screen: Pos2, canvas: Rect) -> Option<(usize, Uuid)> {
         let note = self.note.as_ref()?;
-        note.pages
-            .iter()
-            .rev()
-            .find(|page| {
-                self.unit_screen_rect(canvas, page.col, page.row)
-                    .contains(screen)
-            })
-            .map(|page| (page.col, page.row))
+        if !self.sheet_tabs_on || canvas.width() < 10.0 {
+            return None;
+        }
+        let mut best: Option<(f32, usize, Uuid)> = None;
+        for (page_index, page) in note.pages.iter().enumerate() {
+            for tx in page.texts.iter().rev() {
+                if !tx.sticky {
+                    continue;
+                }
+                let band = sticky_minus_band(self.sticky_screen_rect(canvas, page_index, tx));
+                if !band.is_positive() || !band.contains(screen) {
+                    continue;
+                }
+                let distance = screen.distance(band.center());
+                if best.is_none_or(|(best_d, _, _)| distance < best_d) {
+                    best = Some((distance, page_index, tx.id));
+                }
+            }
+        }
+        best.map(|(_, page, id)| (page, id))
     }
 
-    /// Pages whose center sits inside the zone.
-    fn targets_in_band(&self, canvas: Rect, band: Rect) -> Vec<DeleteTarget> {
-        let mut out = Vec::new();
+    fn paint_sticky_minuses(&self, ui: &Ui, painter: &Painter, canvas: Rect) {
         let Some(note) = self.note.as_ref() else {
-            return out;
+            return;
         };
-        for page in &note.pages {
-            let paper = self.unit_screen_rect(canvas, page.col, page.row);
-            if band.contains(paper.center()) {
-                out.push(DeleteTarget::Page(page.col, page.row));
-            }
+        if canvas.width() < 10.0 {
+            return;
         }
-        out
-    }
-
-    fn apply_delete_band(&mut self, canvas: Rect, band: Rect) {
-        let hits = self.targets_in_band(canvas, band);
-        let mut picks = self.delete_band_base.clone();
-        for target in hits.into_iter().rev() {
-            if let Some(pick) = picks.iter_mut().find(|pick| pick.target == target) {
-                pick.on = true;
-            } else {
-                picks.insert(0, DeletePick { target, on: true });
-            }
-        }
-        self.object_delete = Some(picks);
-    }
-
-    fn paint_delete_marks(&self, painter: &Painter, canvas: Rect) {
-        if let Some(picks) = &self.object_delete {
-            for pick in picks {
-                let DeleteTarget::Page(col, row) = pick.target;
-                let screen = self.unit_screen_rect(canvas, col, row);
-                let color = self.look.rust();
-                painter.rect_filled(
-                    screen,
-                    2.0,
-                    color.gamma_multiply(if pick.on { 0.16 } else { 0.05 }),
-                );
-                painter.rect_stroke(
-                    screen.shrink(1.0),
-                    CornerRadius::same(2),
-                    Stroke::new(if pick.on { 2.0 } else { 1.0 }, color),
-                    StrokeKind::Inside,
-                );
-            }
-        }
-        if let (Some(origin), Some(now)) = (self.delete_band, self.delete_band_now) {
-            if self.delete_band_armed || origin.distance(now) > 6.0 {
-                let band = Rect::from_two_pos(origin, now);
-                painter.rect_filled(band, 2.0, self.look.accent.gamma_multiply(0.16));
-                painter.rect_stroke(
+        let hover = ui.input(|i| i.pointer.hover_pos());
+        let (fill, fill_hot, glyph) = sheet_mark_colors(self.look.rust(), self.look.paper);
+        for (page_index, page) in note.pages.iter().enumerate() {
+            for tx in &page.texts {
+                if !tx.sticky {
+                    continue;
+                }
+                let band = sticky_minus_band(self.sticky_screen_rect(canvas, page_index, tx));
+                if !band.is_positive() {
+                    continue;
+                }
+                let hot = hover.is_some_and(|p| band.contains(p));
+                paint_sheet_tab(
+                    painter,
                     band,
-                    CornerRadius::same(2),
-                    Stroke::new(1.15, self.look.accent.gamma_multiply(0.85)),
-                    StrokeKind::Inside,
+                    if hot { fill_hot } else { fill },
+                    glyph,
+                    self.look.shadow,
+                    true,
                 );
             }
         }
     }
 
-    /// A click toggles a page. A drag draws a zone, the same way the shelf
-    /// selects notebooks.
-    fn pick_or_pan(&mut self, ui: &Ui, _resp: &Response, rect: Rect) {
+    /// Fold, or a tap on a `+` / `−`. A longer drag pans and does not add or delete.
+    fn pages_or_pan(&mut self, ui: &Ui, resp: &Response, rect: Rect) {
         if self.tab_held {
             let down = ui.input(|i| i.pointer.primary_down()) || self.tablet.snapshot().down;
             self.tab_held = false;
             if down {
                 self.tab_held = true;
+            } else {
+                self.page_press_owned = false;
             }
             return;
         }
         let pen = self.tablet.snapshot();
-        if pen.down || pen.pressed || pen.released {
-            self.pen_delete_band(ui.ctx(), rect, &pen);
-            return;
-        }
-        if ui.input(|i| i.key_down(Key::Space) || i.pointer.middle_down()) {
-            self.clear_delete_band();
-            return;
-        }
-        let released = ui.input(|i| i.pointer.primary_released());
-        let pressed = ui.input(|i| i.pointer.primary_pressed());
-        let Some(pos) = ui.input(|i| i.pointer.interact_pos().or(i.pointer.hover_pos())) else {
-            if released {
-                self.clear_delete_band();
-            }
-            return;
-        };
-        let chrome = Self::pen_over_chrome(ui.ctx(), pos);
-        if pressed && rect.contains(pos) && !chrome {
-            if let Some((col, row)) = self.sheet_tab_at(pos, rect) {
-                self.add_sheet_from_tab(col, row);
-                self.tab_held = true;
+        let pos = self.pointer_at(ui);
+        let chrome = pos.is_some_and(|p| Self::pen_over_chrome(ui.ctx(), p));
+        let pressed = pen.pressed || ui.input(|i| i.pointer.primary_pressed());
+        let released = pen.released || ui.input(|i| i.pointer.primary_released());
+        let down = pen.down || ui.input(|i| i.pointer.primary_down());
+        let pan = |app: &mut Self| {
+            if chrome {
                 return;
             }
-            self.remember_delete_band_base();
-            self.delete_band = Some(pos);
-            self.delete_band_now = Some(pos);
-        }
-        if ui.input(|i| i.pointer.primary_down()) {
-            if let Some(origin) = self.delete_band {
-                self.delete_band_now = Some(pos);
-                if origin.distance(pos) > 6.0 {
-                    self.delete_band_armed = true;
-                }
-                if self.delete_band_armed {
-                    self.apply_delete_band(rect, Rect::from_two_pos(origin, pos));
-                }
+            let delta = resp.drag_delta();
+            if delta != Vec2::ZERO {
+                app.camera.pan += delta;
+                app.fitted_cell = None;
             }
-        }
-        if released {
-            let armed = self.delete_band_armed;
-            self.clear_delete_band();
-            if armed {
+        };
+
+        if let Some(mut mark) = self.page_mark.take() {
+            if let Some(p) = pos {
+                mark.travel = mark.travel.max(p.distance(mark.origin));
+            }
+            if released || !down {
+                // A wobble still counts. Only a real drag gives up the mark.
+                if self.pages_marks_ready && mark.travel <= PAGE_MARK_SLOP {
+                    self.commit_page_mark(&mark);
+                } else if mark.travel > PAGE_MARK_SLOP {
+                    pan(self);
+                }
+                self.page_press_owned = false;
                 return;
             }
-        }
-        if chrome || !rect.contains(pos) {
-            return;
-        }
-        // `press_origin` is already cleared on the release frame. `primary_clicked`
-        // is the click that did not travel.
-        if ui.input(|i| i.pointer.primary_clicked()) {
-            self.toggle_delete_at(ui.ctx(), pos, rect);
-        }
-    }
-
-    fn pen_delete_band(&mut self, ctx: &Context, rect: Rect, pen: &PenSnapshot) {
-        let Some(pos) = pen.pos else {
-            if pen.released {
-                self.clear_delete_band();
+            if mark.travel > PAGE_MARK_SLOP {
+                pan(self);
+                self.page_press_owned = true;
+            } else {
+                self.page_mark = Some(mark);
             }
             return;
-        };
-        let chrome = Self::pen_over_chrome(ctx, pos);
-        if pen.pressed && rect.contains(pos) && !chrome {
-            if let Some((col, row)) = self.sheet_tab_at(pos, rect) {
-                self.add_sheet_from_tab(col, row);
-                self.tab_held = true;
-                return;
-            }
-            self.remember_delete_band_base();
-            self.delete_band = Some(pos);
-            self.delete_band_now = Some(pos);
         }
-        if pen.down {
-            if let Some(origin) = self.delete_band {
-                self.delete_band_now = Some(pos);
-                if origin.distance(pos) > 6.0 {
-                    self.delete_band_armed = true;
-                }
-                if self.delete_band_armed {
-                    self.apply_delete_band(rect, Rect::from_two_pos(origin, pos));
-                }
-            }
-        }
-        if pen.released {
-            let armed = self.delete_band_armed;
-            self.clear_delete_band();
-            if !armed {
-                self.toggle_delete_at(ctx, pos, rect);
-            }
-        }
-    }
 
-    fn toggle_delete_at(&mut self, ctx: &Context, screen: Pos2, rect: Rect) {
-        if !rect.contains(screen) || Self::pen_over_chrome(ctx, screen) {
-            return;
-        }
-        if let Some((col, row)) = self.page_at_screen(screen, rect) {
-            self.toggle_delete_target(DeleteTarget::Page(col, row));
-        }
-    }
-
-    fn delete_pick_row(&self, ui: &mut Ui, label: &str, on: bool) -> bool {
-        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::click());
-        resp.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, ui.is_enabled(), on, label));
-        let fill = if on {
-            mix_col(self.look.paper, self.look.rust(), 0.55)
-        } else {
-            self.look.paper
-        };
-        let (face, fg) = self.paint_note_surface(ui, rect.shrink(2.0), &resp, fill, 12);
-        let mark = pos2(face.min.x + 16.0, face.center().y);
-        ui.painter().rect_stroke(
-            Rect::from_center_size(mark, vec2(14.0, 14.0)),
-            3.0,
-            Stroke::new(1.4, fg),
-            StrokeKind::Inside,
-        );
-        if on {
-            paint_check(ui.painter(), mark, fg);
-        }
-        ui.painter().text(
-            pos2(face.min.x + 32.0, face.center().y),
-            Align2::LEFT_CENTER,
-            label,
-            self.look.mono(13.0),
-            fg,
-        );
-        resp.on_hover_cursor(CursorIcon::PointingHand).clicked()
-    }
-
-    fn ui_delete_list(&mut self, ctx: &Context) {
-        let Some(picks) = self.object_delete.clone() else {
-            ctx.data_mut(|d| d.remove::<Rect>(Id::new("delete-list-rect")));
-            return;
-        };
-        let screen = ctx.screen_rect();
-        let top = ctx
-            .data(|d| d.get_temp::<Rect>(Id::new("top-rect")))
-            .map(|r| r.bottom())
-            .unwrap_or(screen.top() + 52.0);
-        let width = (screen.width() * 0.34).clamp(200.0, 280.0);
-        let column = Rect::from_min_max(
-            pos2(screen.right() - width - 12.0, top),
-            pos2(screen.right() - 12.0, screen.bottom()),
-        );
-        let labels: Vec<String> = picks
-            .iter()
-            .map(|pick| self.delete_pick_label(pick.target))
-            .collect();
-        let mut toggle = None;
-        let frame = self.note_popup_frame();
-        // Height follows the rows already on the list, and stops at the column.
-        // Area remembers last frame's size, so a scroll region tied to that
-        // size would grow one row at a time.
-        let margin = frame.total_margin();
-        let gap = ctx.style().spacing.item_spacing.y;
-        let title_h = ctx.fonts(|fonts| fonts.row_height(&self.look.mono(13.0)));
-        let hint_h = ctx.fonts(|fonts| fonts.row_height(&self.look.mono(12.0)));
-        let rows = picks.len() as f32;
-        let body_h = if picks.is_empty() {
-            hint_h
-        } else {
-            rows * 44.0 + (rows - 1.0).max(0.0) * gap
-        };
-        let inner_h = (title_h + gap + body_h).min((column.height() - margin.sum().y).max(0.0));
-        let content = Rect::from_min_size(
-            column.min + vec2(margin.left, margin.top),
-            vec2((column.width() - margin.sum().x).max(0.0), inner_h),
-        );
-        let cloth = frame.widget_rect(content);
-        Area::new(Id::new("delete-list"))
-            .order(Order::Foreground)
-            .fixed_pos(cloth.min)
-            .default_size(cloth.size())
-            .constrain(false)
-            .fade_in(false)
-            .movable(false)
-            .show(ctx, |ui| {
-                let _ = ui.allocate_rect(cloth, Sense::hover());
-                ui.painter().add(frame.paint(content));
-                ui.scope_builder(UiBuilder::new().max_rect(content), |ui| {
-                    ui.label(
-                        RichText::new("To delete")
-                            .font(self.look.mono(13.0))
-                            .color(self.look.paper),
-                    );
-                    if picks.is_empty() {
-                        ui.label(
-                            RichText::new("Tap a page")
-                                .font(self.look.mono(12.0))
-                                .color(self.look.paper.gamma_multiply(0.72)),
-                        );
-                    } else {
-                        let list_h = (content.bottom() - ui.cursor().min.y).max(0.0);
-                        ScrollArea::vertical()
-                            .id_salt("delete-picks")
-                            .max_height(list_h)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                ui.set_min_width(content.width());
-                                for (index, pick) in picks.iter().enumerate() {
-                                    if self.delete_pick_row(ui, &labels[index], pick.on) {
-                                        toggle = Some(index);
-                                    }
-                                }
-                            });
-                    }
+        if self.pages_marks_ready && pressed && pos.is_some_and(|p| rect.contains(p)) && !chrome {
+            let p = pos.unwrap();
+            if let Some((page, id)) = self.sticky_minus_at(p, rect) {
+                self.page_mark = Some(PageMarkPress {
+                    kind: PageMark::TearSticky(page, id),
+                    origin: p,
+                    travel: 0.0,
                 });
-            });
-        ctx.data_mut(|d| d.insert_temp(Id::new("delete-list-rect"), cloth));
-        if let Some(index) = toggle {
-            if let Some(pick) = self
-                .object_delete
-                .as_mut()
-                .and_then(|picks| picks.get_mut(index))
-            {
-                pick.on = !pick.on;
+                self.page_press_owned = true;
+                return;
+            }
+            if let Some((col, row)) = self.page_minus_at(p, rect) {
+                self.page_mark = Some(PageMarkPress {
+                    kind: PageMark::Tear(col, row),
+                    origin: p,
+                    travel: 0.0,
+                });
+                self.page_press_owned = true;
+                return;
+            }
+            if let Some((col, row)) = self.sheet_tab_at(p, rect) {
+                self.page_mark = Some(PageMarkPress {
+                    kind: PageMark::Add(col, row),
+                    origin: p,
+                    travel: 0.0,
+                });
+                self.page_press_owned = true;
+                return;
             }
         }
+        if down && !chrome {
+            pan(self);
+        }
+        if released || !down {
+            self.page_press_owned = false;
+        }
     }
+
     fn paint_template(&self, painter: &Painter, paper: Rect, kind: PaperKind, scale: Vec2) {
         let sx = scale.x;
         let sy = scale.y;
@@ -9008,22 +8897,22 @@ impl InkarchyApp {
             ui.ctx().set_cursor_icon(CursorIcon::None);
             return;
         }
-        if self.object_delete.is_some() {
+        if self.sheet_tabs_on {
             let hand = ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| {
                 !Self::pen_over_chrome(ui.ctx(), p)
-                    && self.page_at_screen(p, self.canvas_rect).is_some()
+                    && (self.sheet_tab_at(p, self.canvas_rect).is_some()
+                        || self.page_minus_at(p, self.canvas_rect).is_some()
+                        || self.sticky_minus_at(p, self.canvas_rect).is_some())
             });
             ui.ctx().set_cursor_icon(if hand {
                 CursorIcon::PointingHand
             } else {
-                CursorIcon::Crosshair
+                CursorIcon::Grab
             });
             return;
         }
         if let Some(p) = ui.input(|i| i.pointer.hover_pos()) {
-            if self.sheet_tab_at(p, self.canvas_rect).is_some()
-                || self.fold_at(p, self.canvas_rect).is_some()
-            {
+            if self.sheet_tab_at(p, self.canvas_rect).is_some() {
                 ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
                 return;
             }
@@ -9072,13 +8961,13 @@ impl InkarchyApp {
                 || d.get_temp::<Rect>(Id::new("tin-rect"))
                     .map(|r| r.expand(4.0).contains(pos))
                     .unwrap_or(false)
+                || d.get_temp::<Rect>(Id::new("nib-rect"))
+                    .map(|r| r.expand(4.0).contains(pos))
+                    .unwrap_or(false)
                 || d.get_temp::<Rect>(Id::new("sticky-pad-rect"))
                     .map(|r| r.expand(4.0).contains(pos))
                     .unwrap_or(false)
                 || d.get_temp::<Rect>(Id::new("sticky-wheel-rect"))
-                    .map(|r| r.contains(pos))
-                    .unwrap_or(false)
-                || d.get_temp::<Rect>(Id::new("delete-list-rect"))
                     .map(|r| r.contains(pos))
                     .unwrap_or(false)
         })
@@ -9656,58 +9545,108 @@ impl InkWheelGeom {
     }
 }
 
-fn nearest_pen_size(width: f32) -> f32 {
-    PEN_SIZES
-        .iter()
-        .map(|(w, _)| *w)
-        .min_by(|a, b| {
-            (width - a)
-                .abs()
-                .partial_cmp(&(width - b).abs())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .unwrap_or(width)
+/// 0 at a hairline, 1 at the heavy end. The curve leaves more room for fine nibs.
+fn nib_t(width: f32) -> f32 {
+    let u = ((width - NIB_MIN) / (NIB_MAX - NIB_MIN)).clamp(0.0, 1.0);
+    u.sqrt()
 }
 
-fn pen_size_label(r: f32) -> &'static str {
-    if r < 2.6 {
-        "Hairline"
-    } else if r < 3.5 {
-        "Fine"
-    } else if r < 4.7 {
-        "Medium"
-    } else if r < 6.3 {
-        "Broad"
+fn width_from_nib_t(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    NIB_MIN + (NIB_MAX - NIB_MIN) * t * t
+}
+
+fn nib_track_t(track: Rect, p: Pos2, vertical: bool) -> f32 {
+    if vertical {
+        ((p.y - track.top()) / track.height().max(1.0)).clamp(0.0, 1.0)
     } else {
-        "Heavy"
+        ((p.x - track.left()) / track.width().max(1.0)).clamp(0.0, 1.0)
     }
+}
+
+fn nib_handle_pos(track: Rect, t: f32, vertical: bool) -> Pos2 {
+    let t = t.clamp(0.0, 1.0);
+    if vertical {
+        pos2(track.center().x, track.top() + track.height() * t)
+    } else {
+        pos2(track.left() + track.width() * t, track.center().y)
+    }
+}
+
+fn paint_nib_taper(p: &Painter, track: Rect, ink: Color32, vertical: bool) {
+    let n = 28;
+    let mut mesh = Mesh::default();
+    for i in 0..=n {
+        let t = i as f32 / n as f32;
+        let half = 0.7 + t * t * (track.height().min(track.width()) * 0.42 - 0.7);
+        let along = if vertical {
+            track.top() + track.height() * t
+        } else {
+            track.left() + track.width() * t
+        };
+        let (a, b) = if vertical {
+            (
+                pos2(track.center().x - half, along),
+                pos2(track.center().x + half, along),
+            )
+        } else {
+            (
+                pos2(along, track.center().y - half),
+                pos2(along, track.center().y + half),
+            )
+        };
+        let color = ink.gamma_multiply(0.35 + 0.65 * t);
+        mesh.colored_vertex(a, color);
+        mesh.colored_vertex(b, color);
+        if i < n {
+            let i = i * 2;
+            mesh.indices.extend([i, i + 2, i + 3, i, i + 3, i + 1]);
+        }
+    }
+    p.add(Shape::mesh(mesh));
+}
+
+fn paint_disc_shadow(p: &Painter, c: Pos2, r: f32, shadow: Color32) {
+    let soft = Color32::from_rgba_unmultiplied(shadow.r(), shadow.g(), shadow.b(), 32);
+    let deep = Color32::from_rgba_unmultiplied(shadow.r(), shadow.g(), shadow.b(), 56);
+    p.circle_filled(c + vec2(0.0, 6.0), r * 0.94, soft);
+    p.circle_filled(c + vec2(0.0, 2.5), r * 0.9, deep);
 }
 
 fn paint_sv_disk(p: &Painter, c: Pos2, r: f32, hue: f32) {
-    let nx = 24;
-    let ny = 24;
+    let rings = 18;
+    let segs = 64;
     let mut mesh = Mesh::default();
-    for y in 0..=ny {
-        for x in 0..=nx {
-            let s = x as f32 / nx as f32;
-            let t = y as f32 / ny as f32;
-            mesh.colored_vertex(
-                pos2(c.x + (s * 2.0 - 1.0) * r, c.y + (t * 2.0 - 1.0) * r),
-                hsv_to_rgb(hue, s, 1.0 - t),
-            );
+    mesh.colored_vertex(c, hsv_to_rgb(hue, 0.5, 0.5));
+    for ring in 1..=rings {
+        let rad = r * ring as f32 / rings as f32;
+        for i in 0..segs {
+            let a = i as f32 / segs as f32 * std::f32::consts::TAU;
+            let (sin, cos) = a.sin_cos();
+            let x = cos * rad;
+            let y = sin * rad;
+            let s = (x / r * 0.5 + 0.5).clamp(0.0, 1.0);
+            let v = (0.5 - y / r * 0.5).clamp(0.0, 1.0);
+            mesh.colored_vertex(c + vec2(x, y), hsv_to_rgb(hue, s, v));
         }
     }
-    let r2 = r * r * 1.08;
-    for y in 0..ny {
-        for x in 0..nx {
-            let px = ((x as f32 + 0.5) / nx as f32 * 2.0 - 1.0) * r;
-            let py = ((y as f32 + 0.5) / ny as f32 * 2.0 - 1.0) * r;
-            if px * px + py * py > r2 {
-                continue;
-            }
-            let a = y * (nx + 1) + x;
-            mesh.indices
-                .extend([a, a + 1, a + nx + 2, a, a + nx + 2, a + nx + 1]);
+    for i in 0..segs {
+        let next = (i + 1) % segs;
+        mesh.indices.extend([0, 1 + i, 1 + next]);
+    }
+    for ring in 1..rings {
+        let inner = 1 + (ring - 1) * segs;
+        let outer = 1 + ring * segs;
+        for i in 0..segs {
+            let next = (i + 1) % segs;
+            mesh.indices.extend([
+                inner + i,
+                outer + i,
+                outer + next,
+                inner + i,
+                outer + next,
+                inner + next,
+            ]);
         }
     }
     p.add(Shape::mesh(mesh));
@@ -9852,26 +9791,79 @@ fn sticky_pad_place(dock: Rect, edge: DockEdge, bounds: Rect) -> Rect {
         .unwrap_or_else(|| Rect::from_min_size(clamp(candidates[0]), size))
 }
 
-fn paint_sticky_stack(p: &Painter, rect: Rect, paper: Color32, ink: Color32, shadow: Color32) {
+fn paint_sticky_stack(p: &Painter, rect: Rect, paper: Color32, _ink: Color32, shadow: Color32) {
     for i in (0..3).rev() {
-        let o = vec2(i as f32 * 1.7, i as f32 * 1.7);
+        let o = vec2(i as f32 * 2.4, i as f32 * 2.4);
         let r = Rect::from_min_size(
             rect.min + o,
-            (rect.size() - vec2(5.0, 5.0)).max(vec2(12.0, 12.0)),
+            (rect.size() - vec2(7.0, 7.0)).max(vec2(12.0, 12.0)),
         );
-        p.rect_filled(
-            r.translate(vec2(1.2, 2.0)),
-            3.0,
-            shadow.gamma_multiply(0.28),
-        );
-        p.rect_filled(r, 3.0, paper);
-        p.rect_stroke(
-            r,
-            3.0,
-            Stroke::new(1.0, ink.gamma_multiply(0.18)),
-            StrokeKind::Inside,
-        );
+        let face = if i == 0 { paper } else { shade_rgb(paper, 0.9) };
+        paint_sticky_card(p, r, face, shadow);
     }
+}
+
+/// A note with a soft drop, a lit top edge, and a folded corner.
+fn paint_sticky_card(p: &Painter, rect: Rect, color: Color32, shadow: Color32) {
+    if rect.width() < 4.0 || rect.height() < 4.0 {
+        return;
+    }
+    let body = Color32::from_rgb(color.r(), color.g(), color.b());
+    let short = rect.width().min(rect.height());
+    let radius = (short * 0.035).clamp(1.5, 5.0);
+    let drop = (short * 0.055).clamp(2.5, 7.0);
+    p.rect_filled(
+        rect.translate(vec2(drop * 0.45, drop)).expand(drop * 0.28),
+        radius + 1.5,
+        Color32::from_rgba_unmultiplied(shadow.r(), shadow.g(), shadow.b(), 42),
+    );
+    p.rect_filled(
+        rect.translate(vec2(drop * 0.12, drop * 0.42)),
+        radius,
+        Color32::from_rgba_unmultiplied(shadow.r(), shadow.g(), shadow.b(), 96),
+    );
+    p.rect_filled(rect, radius, body);
+    let lip = (short * 0.07).clamp(2.0, 8.0);
+    p.rect_filled(
+        Rect::from_min_max(rect.min, pos2(rect.max.x, rect.min.y + lip)),
+        radius,
+        mix_col(body, Color32::WHITE, 0.42).gamma_multiply(0.55),
+    );
+    p.rect_filled(
+        Rect::from_min_max(pos2(rect.min.x, rect.max.y - lip * 0.65), rect.max),
+        0.0,
+        shade_rgb(body, 0.78).gamma_multiply(0.28),
+    );
+    let ear = (short * 0.2).clamp(10.0, 26.0);
+    let tip = rect.right_bottom();
+    let along_bottom = tip + vec2(-ear, 0.0);
+    let along_side = tip + vec2(0.0, -ear);
+    let flap = tip + vec2(-ear * 0.72, -ear * 0.72);
+    p.add(Shape::convex_polygon(
+        vec![along_bottom, tip, along_side],
+        shade_rgb(body, 0.62),
+        Stroke::NONE,
+    ));
+    p.add(Shape::convex_polygon(
+        vec![along_bottom, flap, along_side],
+        mix_col(body, Color32::WHITE, 0.22),
+        Stroke::new(1.05, shade_rgb(body, 0.7)),
+    ));
+    p.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, shade_rgb(body, 0.72)),
+        StrokeKind::Inside,
+    );
+}
+
+fn sticky_minus_band(note: Rect) -> Rect {
+    let along = (note.width() * 0.72).min(note.width() - 6.0);
+    let thick = (note.height() * 0.32).min(note.height() - 6.0);
+    if along < 8.0 || thick < 8.0 {
+        return Rect::NOTHING;
+    }
+    Rect::from_center_size(note.center(), vec2(along, thick))
 }
 
 fn well_glyph(well: Color32, paper: Color32, ink: Color32) -> Color32 {
@@ -10041,12 +10033,20 @@ fn wedge_stroke(origin: Pos2, r0: f32, r1: f32, n: usize, i: usize, color: Color
     Shape::closed_line(pts, Stroke::new(2.0_f32, color))
 }
 
-/// 50% of the edge, centered. A bit shorter in thickness, set off from the sheet.
+/// Stylus and finger taps wander. A page mark still commits inside this
+/// distance; a longer drag pans and does not add or delete.
+const PAGE_MARK_SLOP: f32 = 36.0;
+/// Share of the page edge a `+` or `−` covers, and its thickness.
+const MARK_ALONG: f32 = 0.34;
+const MARK_THICK: f32 = 0.12;
+const MARK_GAP: f32 = 0.06;
+
+/// Centered on the edge, set off from the sheet. Same footprint as the center `−`.
 fn outward_band(paper: Rect, edge: SheetEdge) -> Rect {
-    let gap = paper.height() * 0.10;
-    let thick = paper.height() * 0.22;
-    let along_h = paper.height() * 0.50;
-    let along_w = paper.width() * 0.50;
+    let gap = paper.height() * MARK_GAP;
+    let thick = paper.height() * MARK_THICK;
+    let along_h = paper.height() * MARK_ALONG;
+    let along_w = paper.width() * MARK_ALONG;
     let cy = paper.center().y;
     let cx = paper.center().x;
     match edge {
@@ -10069,58 +10069,63 @@ fn outward_band(paper: Rect, edge: SheetEdge) -> Rect {
     }
 }
 
+/// Same footprint as a top or bottom `+`, sitting on the page center.
+fn page_minus_band(paper: Rect) -> Rect {
+    let along = paper.width() * MARK_ALONG;
+    let thick = paper.height() * MARK_THICK;
+    Rect::from_center_size(paper.center(), vec2(along, thick))
+}
+
 fn center_band(paper: Rect) -> Rect {
     let w = paper.width() * 0.42;
     let h = paper.height() * 0.28;
     Rect::from_center_size(paper.center(), vec2(w, h))
 }
 
-fn sheet_tab_colors(desk: Color32, green: Color32) -> (Color32, Color32, Color32, Color32) {
-    let lum = desk.r() as u16 + desk.g() as u16 + desk.b() as u16;
-    if lum < 420 {
-        (
-            green.gamma_multiply(0.16),
-            mix_col(green, Color32::WHITE, 0.20),
-            green.gamma_multiply(0.26),
-            mix_col(green, Color32::WHITE, 0.36),
-        )
-    } else {
-        (
-            green.gamma_multiply(0.14),
-            shade_rgb(green, 0.55),
-            green.gamma_multiply(0.24),
-            shade_rgb(green, 0.42),
-        )
-    }
+fn sheet_mark_colors(pigment: Color32, paper: Color32) -> (Color32, Color32, Color32) {
+    let fill = Color32::from_rgba_unmultiplied(pigment.r(), pigment.g(), pigment.b(), 255);
+    let hot = mix_col(fill, Color32::WHITE, 0.16);
+    (fill, hot, paper)
 }
 
-fn paint_page_fold(p: &Painter, paper: Rect, zoom: f32, color: Color32) {
-    let s = 16.0 * zoom;
-    let fold = [
-        pos2(paper.max.x, paper.min.y),
-        pos2(paper.max.x - s, paper.min.y),
-        pos2(paper.max.x, paper.min.y + s),
-    ];
-    p.add(Shape::convex_polygon(fold.to_vec(), color, Stroke::NONE));
-}
-
-fn paint_sheet_tab(p: &Painter, rect: Rect, wash: Color32, plus: Color32) {
+fn paint_sheet_tab(
+    p: &Painter,
+    rect: Rect,
+    fill: Color32,
+    glyph: Color32,
+    shadow: Color32,
+    minus: bool,
+) {
     let short = rect.width().min(rect.height());
-    let radius = short * 0.10;
-    p.rect_filled(rect, radius, wash);
+    let radius = short * 0.22;
+    let drop = (short * 0.08).clamp(2.0, 5.0);
+    p.rect_filled(
+        rect.translate(vec2(0.0, drop)),
+        radius,
+        Color32::from_rgba_unmultiplied(shadow.r(), shadow.g(), shadow.b(), shadow.a().max(120)),
+    );
+    p.rect_filled(rect, radius, fill);
+    p.rect_stroke(
+        rect,
+        radius,
+        Stroke::new((short * 0.045).clamp(1.25, 2.2), shade_rgb(fill, 0.62)),
+        StrokeKind::Inside,
+    );
     let c = rect.center();
-    let arm = short * 0.18;
-    let thick = (short * 0.018).max(1.0);
+    let arm = short * 0.34;
+    let thick = (short * 0.075).max(1.6);
     p.rect_filled(
         Rect::from_center_size(c, vec2(arm * 2.0, thick)),
         thick * 0.5,
-        plus,
+        glyph,
     );
-    p.rect_filled(
-        Rect::from_center_size(c, vec2(thick, arm * 2.0)),
-        thick * 0.5,
-        plus,
-    );
+    if !minus {
+        p.rect_filled(
+            Rect::from_center_size(c, vec2(thick, arm * 2.0)),
+            thick * 0.5,
+            glyph,
+        );
+    }
 }
 
 /// Up arrow in the lectern tray.
@@ -10153,24 +10158,26 @@ fn paint_plus(p: &egui::Painter, c: Pos2, fg: Color32) {
     p.rect_filled(Rect::from_center_size(c, vec2(3.0, 16.0)), 2.0, fg);
 }
 
-/// Two offset sheets with a plus — add a page or pick items to remove.
+/// A page with a pen laid across it.
 fn paint_pages_icon(p: &Painter, c: Pos2, fg: Color32) {
-    let st = Stroke::new(1.6, fg);
-    p.rect_stroke(
-        Rect::from_center_size(c + vec2(3.2, -3.4), vec2(11.0, 14.0)),
-        2.4,
-        Stroke::new(1.4, fg.gamma_multiply(0.7)),
-        StrokeKind::Inside,
-    );
-    p.rect_stroke(
-        Rect::from_center_size(c + vec2(-2.4, 1.6), vec2(12.0, 15.0)),
-        2.6,
-        st,
-        StrokeKind::Inside,
-    );
-    let plus = c + vec2(6.6, 7.4);
-    p.rect_filled(Rect::from_center_size(plus, vec2(8.0, 1.8)), 0.9, fg);
-    p.rect_filled(Rect::from_center_size(plus, vec2(1.8, 8.0)), 0.9, fg);
+    let page = Rect::from_center_size(c + vec2(-1.4, 1.2), vec2(12.4, 15.6));
+    p.rect_stroke(page, 1.8, Stroke::new(1.7, fg), StrokeKind::Inside);
+    let nib = page.left_bottom() + vec2(2.4, -2.6);
+    let tail = page.right_top() + vec2(2.2, -1.6);
+    let along = tail - nib;
+    let len = along.length().max(1.0);
+    let dir = along / len;
+    let side = vec2(-dir.y, dir.x);
+    p.line_segment([nib, tail], Stroke::new(2.15, fg));
+    p.add(Shape::convex_polygon(
+        vec![
+            nib,
+            nib + dir * 4.2 + side * 1.7,
+            nib + dir * 4.2 - side * 1.7,
+        ],
+        fg,
+        Stroke::NONE,
+    ));
 }
 
 fn paint_more(p: &egui::Painter, c: Pos2, fg: Color32) {

@@ -344,6 +344,173 @@ pub fn text_baselines(path: &Path, page: u32) -> Vec<f32> {
     cluster_baselines(&mut extractor.ys)
 }
 
+/// Unicode from embedded PDF fonts (ToUnicode / encoding). Empty on scans.
+pub fn extract_text(path: &Path, page: u32) -> String {
+    let Ok(bytes) = std::fs::read(path) else {
+        return String::new();
+    };
+    extract_text_from_bytes(&bytes, page)
+}
+
+fn extract_text_from_bytes(bytes: &[u8], page: u32) -> String {
+    let Ok(pdf) = open_pdf(bytes.to_vec()) else {
+        return String::new();
+    };
+    extract_text_from_pdf(&pdf, page)
+}
+
+fn extract_text_from_pdf(pdf: &Pdf, page: u32) -> String {
+    let Some(pdf_page) = pdf.pages().get(page as usize) else {
+        return String::new();
+    };
+    let (w, h) = pdf_page.render_dimensions();
+    let settings = InterpreterSettings::default();
+    let mut context = hayro::hayro_interpret::Context::new(
+        kurbo::Affine::IDENTITY,
+        kurbo::Rect::new(0.0, 0.0, w as f64, h as f64),
+        pdf.xref(),
+        settings,
+    );
+    let mut extractor = GlyphExtractor {
+        height: h as f64,
+        glyphs: Vec::new(),
+    };
+    hayro::hayro_interpret::interpret_page(pdf_page, &mut context, &mut extractor);
+    glyphs_to_string(extractor.glyphs)
+}
+
+struct GlyphExtractor {
+    height: f64,
+    glyphs: Vec<(f32, f32, char)>,
+}
+
+impl hayro::hayro_interpret::Device<'_> for GlyphExtractor {
+    fn set_soft_mask(&mut self, _: Option<hayro::hayro_interpret::SoftMask<'_>>) {}
+    fn set_blend_mode(&mut self, _: hayro::hayro_interpret::BlendMode) {}
+    fn draw_path(
+        &mut self,
+        _: &kurbo::BezPath,
+        _: kurbo::Affine,
+        _: &hayro::hayro_interpret::Paint<'_>,
+        _: &hayro::hayro_interpret::PathDrawMode,
+    ) {
+    }
+    fn push_clip_path(&mut self, _: &hayro::hayro_interpret::ClipPath) {}
+    fn push_transparency_group(
+        &mut self,
+        _: f32,
+        _: Option<hayro::hayro_interpret::SoftMask<'_>>,
+        _: hayro::hayro_interpret::BlendMode,
+    ) {
+    }
+    fn draw_glyph(
+        &mut self,
+        glyph: &hayro::hayro_interpret::font::Glyph<'_>,
+        transform: kurbo::Affine,
+        glyph_transform: kurbo::Affine,
+        _: &hayro::hayro_interpret::Paint<'_>,
+        _: &hayro::hayro_interpret::GlyphDrawMode,
+    ) {
+        let Some(ch) = glyph.as_unicode() else {
+            return;
+        };
+        let flip = kurbo::Affine::translate((0.0, self.height))
+            * kurbo::Affine::scale_non_uniform(1.0, -1.0);
+        let p = flip * transform * glyph_transform * kurbo::Point::new(0.0, 0.0);
+        self.glyphs.push((p.x as f32, p.y as f32, ch));
+    }
+    fn draw_image(&mut self, _: hayro::hayro_interpret::Image<'_, '_>, _: kurbo::Affine) {}
+    fn pop_clip_path(&mut self) {}
+    fn pop_transparency_group(&mut self) {}
+}
+
+fn glyphs_to_string(mut glyphs: Vec<(f32, f32, char)>) -> String {
+    if glyphs.is_empty() {
+        return String::new();
+    }
+    glyphs.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.total_cmp(&b.0)));
+    let mut out = String::new();
+    let mut line_y = glyphs[0].1;
+    let mut last_x = f32::NEG_INFINITY;
+    for (x, y, ch) in glyphs {
+        if (y - line_y).abs() > 3.0 {
+            out.push('\n');
+            line_y = y;
+        } else if x - last_x > 10.0 && !out.is_empty() && !out.ends_with('\n') {
+            out.push(' ');
+        }
+        out.push(ch);
+        last_x = x;
+    }
+    out
+}
+
+/// Background hayro text pass. Keeps the last opened PDF so shelf search
+/// does not re-parse on every page.
+pub struct TextJob {
+    pub key: String,
+    pub path: PathBuf,
+    pub page: u32,
+}
+
+pub struct TextHub {
+    tx: Sender<TextJob>,
+    rx: Receiver<(String, String)>,
+}
+
+impl TextHub {
+    pub fn new() -> Self {
+        let (job_tx, job_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let _ = thread::Builder::new()
+            .name("inkarchy-pdf-text".into())
+            .spawn(move || text_loop(job_rx, done_tx));
+        Self {
+            tx: job_tx,
+            rx: done_rx,
+        }
+    }
+
+    pub fn request(&self, job: TextJob) -> bool {
+        self.tx.send(job).is_ok()
+    }
+
+    pub fn take_ready(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        while let Ok(item) = self.rx.try_recv() {
+            out.push(item);
+        }
+        out
+    }
+}
+
+fn text_loop(rx: Receiver<TextJob>, tx: Sender<(String, String)>) {
+    let mut cached: Option<(PathBuf, Pdf)> = None;
+    loop {
+        let Ok(job) = rx.recv() else {
+            return;
+        };
+        if cached
+            .as_ref()
+            .map(|(path, _)| path != &job.path)
+            .unwrap_or(true)
+        {
+            cached = std::fs::read(&job.path)
+                .ok()
+                .and_then(|bytes| open_pdf(bytes).ok())
+                .map(|pdf| (job.path.clone(), pdf));
+        }
+        let text = cached
+            .as_ref()
+            .filter(|(path, _)| path == &job.path)
+            .map(|(_, pdf)| extract_text_from_pdf(pdf, job.page))
+            .unwrap_or_else(|| extract_text(&job.path, job.page));
+        if tx.send((job.key, text)).is_err() {
+            return;
+        }
+    }
+}
+
 struct LineExtractor {
     height: f64,
     ys: Vec<f32>,
@@ -515,6 +682,61 @@ pub(crate) fn marked_pdf(pages: &[MarkedPage]) -> Vec<u8> {
     body
 }
 
+/// Helvetica Type1 page so hayro can map glyphs to Unicode.
+#[cfg(test)]
+pub(crate) fn text_pdf(text: &str) -> Vec<u8> {
+    let escaped = text
+        .replace('\\', "\\\\")
+        .replace('(', "\\(")
+        .replace(')', "\\)");
+    let stream = format!("BT /F1 12 Tf 20 40 Td ({escaped}) Tj ET\n");
+    let mut body = Vec::new();
+    body.extend_from_slice(b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+    let mut offsets = vec![0u32; 6];
+    push_obj(
+        &mut body,
+        &mut offsets,
+        1,
+        "<< /Type /Catalog /Pages 2 0 R >>",
+    );
+    push_obj(
+        &mut body,
+        &mut offsets,
+        2,
+        "<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
+    );
+    push_obj(
+        &mut body,
+        &mut offsets,
+        3,
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+    );
+    push_obj(
+        &mut body,
+        &mut offsets,
+        4,
+        &format!("<< /Length {} >>\nstream\n{stream}endstream", stream.len()),
+    );
+    push_obj(
+        &mut body,
+        &mut offsets,
+        5,
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    );
+    let xref_at = body.len();
+    let size = offsets.len();
+    body.extend_from_slice(format!("xref\n0 {size}\n").as_bytes());
+    body.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in offsets.iter().skip(1) {
+        body.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    body.extend_from_slice(
+        format!("trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n")
+            .as_bytes(),
+    );
+    body
+}
+
 #[cfg(test)]
 fn push_obj(body: &mut Vec<u8>, offsets: &mut [u32], id: u32, payload: &str) {
     offsets[id as usize] = body.len() as u32;
@@ -524,6 +746,32 @@ fn push_obj(body: &mut Vec<u8>, offsets: &mut [u32], id: u32, payload: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_text_reads_helvetica_glyphs() {
+        let bytes = text_pdf("Fourier");
+        let text = extract_text_from_bytes(&bytes, 0);
+        let folded: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            folded.to_lowercase().contains("fourier"),
+            "extracted {text:?}"
+        );
+        let dir = std::env::temp_dir().join(format!(
+            "inkarchy-pdf-text-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("page.pdf");
+        std::fs::write(&path, &bytes).unwrap();
+        let from_path = extract_text(&path, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+        let folded_path: String = from_path.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(folded_path.to_lowercase().contains("fourier"));
+    }
 
     #[test]
     fn inspect_and_render_a_marked_page() {

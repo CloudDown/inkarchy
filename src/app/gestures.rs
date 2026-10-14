@@ -20,8 +20,6 @@ enum CanvasGesture {
         id: Uuid,
         start: Vec2,
     },
-    /// Delete mode: a still finger toggles the page or object. A drag is a zone.
-    DeleteBand,
     Text,
     Tool,
 }
@@ -146,15 +144,21 @@ impl InkarchyApp {
             .canvas_touch
             .as_ref()
             .is_some_and(|g| matches!(g.mode, CanvasGesture::Tool));
+        // A press that began on a + or − stays with Pages mode, including the drag that cancels it.
+        if self.page_press_owned {
+            return false;
+        }
         for (device, id, phase, screen) in events {
             if phase == TouchPhase::Start && self.canvas_touch.is_none() {
                 if !canvas.contains(screen) || Self::pen_over_chrome(ui.ctx(), screen) {
                     continue;
                 }
-                if self.sheet_tab_at(screen, canvas).is_some()
-                    || self.fold_at(screen, canvas).is_some()
+                if self.pages_marks_ready
+                    && (self.sheet_tab_at(screen, canvas).is_some()
+                        || self.page_minus_at(screen, canvas).is_some()
+                        || self.sticky_minus_at(screen, canvas).is_some())
                 {
-                    return false; // Page tabs and the tear ear own their press.
+                    return false; // Page marks own their press.
                 }
                 let paper = self.camera.to_paper(screen, canvas);
                 if self.editing_text.is_some_and(|(page, id)| {
@@ -167,9 +171,8 @@ impl InkarchyApp {
                     continue; // TextEdit owns caret placement and text selection.
                 }
                 let hit = self.hit_object(paper);
-                let mode = if self.object_delete.is_some() {
-                    self.remember_delete_band_base();
-                    CanvasGesture::DeleteBand
+                let mode = if self.sheet_tabs_on {
+                    CanvasGesture::Pan(None)
                 } else if self.tool.is_eraser()
                     || (self.lib.index.finger_draw && self.tool.is_ink())
                 {
@@ -281,12 +284,6 @@ impl InkarchyApp {
                         self.camera.pan += screen - previous;
                         self.fitted_cell = None;
                     }
-                    CanvasGesture::DeleteBand => {
-                        self.delete_band = Some(gesture.origin);
-                        self.delete_band_now = Some(screen);
-                        self.delete_band_armed = true;
-                        self.apply_delete_band(canvas, Rect::from_two_pos(gesture.origin, screen));
-                    }
                     CanvasGesture::StickySize { page, id, start } => {
                         let travel = self.camera.screen_to_paper_delta(screen - gesture.origin);
                         let size = vec2(
@@ -318,21 +315,14 @@ impl InkarchyApp {
                             self.finish_text_edit();
                             self.sel.clear();
                         }
-                        CanvasGesture::DeleteBand => {
-                            let armed = gesture.moved;
-                            self.clear_delete_band();
-                            if !armed {
-                                self.toggle_delete_at(ui.ctx(), screen, canvas);
-                            }
-                        }
                         CanvasGesture::Move => {
+                            let double = ui
+                                .input(|i| i.pointer.button_double_clicked(PointerButton::Primary));
                             if let Some((page, id)) = self.selected_sticky() {
-                                if time - gesture.since < super::WHEEL_HOLD {
+                                if double && time - gesture.since < super::WHEEL_HOLD {
                                     self.open_sticky_sheet(page, id);
                                 }
-                            } else if ui
-                                .input(|i| i.pointer.button_double_clicked(PointerButton::Primary))
-                            {
+                            } else if double {
                                 self.edit_selected_text();
                             }
                         }

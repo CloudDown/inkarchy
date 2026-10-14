@@ -2,6 +2,9 @@
 
 ## 0.3.0 — 2026-10-14
 
+### Added
+- Shelf Search also matches typed text, stickies, and Unicode embedded in PDF backgrounds. A one-line excerpt appears under the spine when the hit is inside the notebook.
+
 ### Changed
 - Renamed to Inkarchy. Binary `inkarchy`, window title Inkarchy, Wayland app id `com.clouddown.inkarchy`, desktop entry `inkarchy.desktop`. Notes move from `~/.local/share/omacourses` to `~/.local/share/inkarchy` on first launch (`$CAHIER_DATA` remains a deprecated alias of `$INKARCHY_DATA`, and `$CAHIER_OPEN` of `$INKARCHY_OPEN`).
 

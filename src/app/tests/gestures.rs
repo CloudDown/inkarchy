@@ -50,7 +50,6 @@ fn finger_moves_and_resizes_images_without_switching_tools_or_panning() {
     assert_eq!(app.tool, Tool::Brush);
     assert!(app.canvas_touch.is_none() && app.drag_last.is_none());
     frames.settle(app);
-    frames.text_center("Replace");
     let before = app.note.as_ref().unwrap().pages[0].images[0].clone();
     let corner = app.camera.to_screen(before.rect().max, app.canvas_rect);
     let grip = corner + vec2(15.0, 0.0);
@@ -263,54 +262,29 @@ fn image_replacement_is_undoable_and_stale_imports_cannot_change_another_note() 
 }
 
 #[test]
-fn selected_image_actions_remain_accessible_on_small_windows() {
+fn selected_image_stays_usable_on_small_windows_without_an_action_bar() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Small touch screen");
     let app = &mut fixture.app;
     app.open_note(id);
     app.insert_png(&png(240, 120), 0, pos2(180.0, 180.0), None);
+    let image_id = app.note.as_ref().unwrap().pages[0].images[0].id;
     let mut frames = Frames::new(app);
     for size in [vec2(320.0, 280.0), vec2(360.0, 640.0), vec2(1280.0, 860.0)] {
         frames.size = size;
         app.fit_to_screen();
-        frames.settle(app);
-        let actions = frames
-            .ctx
-            .data(|d| d.get_temp::<Rect>(Id::new("selection-actions")))
-            .unwrap();
-        let dock = frames
-            .ctx
-            .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
-            .unwrap();
-        assert!(
-            Rect::from_min_size(Pos2::ZERO, size).contains_rect(actions),
-            "{size:?}: {actions:?}"
-        );
-        assert!(
-            !actions.intersects(dock),
-            "{size:?}: actions {actions:?} overlap dock {dock:?}"
-        );
-        for label in ["Replace", "Duplicate", "Delete", "Done"] {
-            let point = frames.text_center(label);
-            assert!(
-                frames.output.as_ref().unwrap().shapes.iter().any(|shape| {
-                    matches!(&shape.shape, Shape::Text(text) if text.galley.text() == label)
-                        && shape.clip_rect.contains(point)
-                }),
-                "{size:?}: {label} is clipped"
-            );
-        }
-        frames.snapshot(&format!("touch-image-{}", size.x as u32));
-        let duplicate = frames.text_center("Duplicate");
-        frames.touch(app, TouchPhase::Start, duplicate);
-        frames.touch(app, TouchPhase::End, duplicate);
-        assert_eq!(app.note.as_ref().unwrap().pages[0].images.len(), 2);
-        assert!(app.undo.undo(app.note.as_mut().unwrap()));
         app.sel = vec![Sel {
             page: 0,
-            id: app.note.as_ref().unwrap().pages[0].images[0].id,
+            id: image_id,
             kind: SelKind::Image,
         }];
+        frames.settle(app);
+        assert!(frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new("selection-actions")))
+            .is_none());
+        assert_eq!(app.note.as_ref().unwrap().pages[0].images.len(), 1);
+        frames.snapshot(&format!("touch-image-{}", size.x as u32));
     }
 }
 
@@ -388,14 +362,8 @@ fn held_tool_opens_settings_and_all_swatches_have_finger_sized_targets() {
     for vertical in [true, false] {
         let _ = ctx.run(RawInput::default(), |ctx| {
             CentralPanel::default().show(ctx, |ui| {
-                let chip = app.palette_chip(ui, Color32::BLACK, false, vertical);
-                assert_eq!(chip.rect.size(), vec2(44.0, 44.0));
-                let thickness = ui.next_auto_id();
-                app.thick_dot(ui, 4.4, true, "Medium");
-                assert_eq!(
-                    ctx.read_response(thickness).unwrap().rect.size(),
-                    vec2(44.0, 44.0)
-                );
+                let well = app.ink_well(ui, false);
+                assert_eq!(well.rect.size(), vec2(44.0, 44.0), "vertical={vertical}");
             });
         });
     }
@@ -420,16 +388,15 @@ fn finger_text_selection_offers_edit_and_cancel_releases_object_grab() {
     frames.touch(app, TouchPhase::Cancel, p + vec2(20.0, 0.0));
     assert!(app.canvas_touch.is_none() && app.drag_last.is_none());
     frames.settle(app);
-    let edit = frames.text_center("Edit text");
-    frames.snapshot("edit-text-action");
     assert_eq!(app.sel.len(), 1);
-    frames.touch(app, TouchPhase::Start, edit);
-    assert_eq!(app.sel.len(), 1, "tap stays owned by the selection toolbar");
-    frames.touch(app, TouchPhase::End, edit);
+    frames.touch(app, TouchPhase::Start, p);
+    frames.touch(app, TouchPhase::End, p);
+    frames.touch(app, TouchPhase::Start, p);
+    frames.touch(app, TouchPhase::End, p);
     assert_eq!(
         app.editing_text,
         Some((0, text_id)),
-        "edit activates on release"
+        "a second tap opens the text"
     );
     frames.step(app, vec![]);
     assert_eq!(app.editing_text, Some((0, text_id)));

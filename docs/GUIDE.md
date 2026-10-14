@@ -17,7 +17,7 @@ Add pages around the current sheet. Display them edge to edge in *Linked* mode, 
   <img src="screens/separees.png" alt="Separate pages with a gap" width="49%">
 </p>
 
-Open **Pages** to add a sheet on a free edge or select items to remove.
+Open **Pages** to add a sheet on a free edge, or tap the centre `−` to tear a page off.
 
 <p align="center">
   <img src="screens/onglets.png" alt="Tabs for adding a page" width="80%">
@@ -141,9 +141,9 @@ windowrule = float, class:^(com\.clouddown\.inkarchy)$
 
 The lectern follows the stylus: in range, the hand pans and the nib writes. Put it down, the mouse writes again.
 
-On a touch screen, drag an image or a text box directly with one finger, then use its corner handles to resize it. A short hold on a handwritten stroke selects it; the selection offers labelled editing, duplication and deletion actions. Images are selected as soon as they are inserted, and **Replace** changes an image without losing its placement.
+On a touch screen, drag an image or a text box directly with one finger, then use its corner handles to resize it. A short hold on a handwritten stroke selects it. `ctrl+d` duplicates the selection and `delete` removes it. Images are selected as soon as they are inserted.
 
-A finger on empty paper pans the canvas; two fingers pan and zoom even when something is selected. Choose **Draw with finger** in the notebook menu to use the pens by touch. The erasers and lasso work with a finger directly. Tap text to select it and choose **Edit text** (or double-tap it) to type. Hold a pen/eraser button to open its colour and thickness settings; tapping the active pen opens these settings too.
+A finger on empty paper pans the canvas; two fingers pan and zoom even when something is selected. Choose **Draw with finger** in the notebook menu to use the pens by touch. The erasers and lasso work with a finger directly. Double-tap text to type. Double-tap a sticky to open it large; one tap leaves it on the page. Hold a sticky for its colour. Hold a pen, or tap the ink dot, to open the colour saucer and the thickness taper together.
 
 | | Mouse | Stylus in range |
 |---|---|---|
@@ -179,9 +179,10 @@ A finger on empty paper pans the canvas; two fingers pan and zoom even when some
 
 | | |
 |---|---|
-| Pages → `+` on a free edge | add a unit page there |
-| Pages → check a page / Cancel | select pages to remove, or leave Pages mode |
-| Fold corner (when more than one unit) | tear that unit off |
+| Pages | show or hide the green `+` tabs and the red `−` on each page |
+| Tap a `+` | add a unit page on that edge |
+| Tap a `−` | tear that page off, or the sticky under that mark. A drag pans instead, and the press that opened Pages does not count |
+| Escape, or Pages again | hide the marks |
 | ⋯ → Linked / Separate | flush sheet vs gutter between pages |
 
 First launch: notebooks *Mindset* and *Art direction*.

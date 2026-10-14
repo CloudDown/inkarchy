@@ -18,7 +18,7 @@ Inkarchy : app native Rust (egui/eframe) de notes manuscrites au stylet, dans l'
 - [x] Roue souris : ne se ferme qu'en sortant de la roue ; clic au centre dans la sous-roue couleurs = retour, pas fermeture.
 - [x] Sélection multiple au rectangle (souris) ou appui long (doigt).
 - [x] Corbeille : bouton en bas (emoji), rangée rouge de 10 cases ; glisser sur l'icône corbeille = jeter ; glisser dans une case seulement si la corbeille est ouverte ; glisser hors = restaurer ; bouton Empty visible quand elle est ouverte.
-- [x] Recherche au centre, interface en anglais, mots professionnels.
+- [x] Recherche au centre, interface en anglais, mots professionnels. Filtre titre, texte tapé / stickies, et Unicode des PDF de fond (pas d’OCR, pas le manuscrit).
 - [x] Panneau Help minimaliste : titre « Help », raccourcis clavier/souris à gauche, mains à droite ; texture Canson.
 - [x] Défilement à deux doigts.
 - [x] Cahiers d'exemple au premier lancement (*Mindset*, *Art direction*).
@@ -27,11 +27,11 @@ Inkarchy : app native Rust (egui/eframe) de notes manuscrites au stylet, dans l'
 - [x] Outils : feutre, plume, crayon, surligneur, gommes trait/zone, lasso, texte, image, règle.
 - [x] Papiers : blanc, ligné, carreaux, pointillé, millimétré, ardoise ; texture Canson (`assets/canson.jpg`).
 - [x] Reconnaissance de formes en gardant le stylet immobile ~1 s.
-- [x] Pages multiples : bouton Pages (onglets `+` et sélection pour supprimer), pli de coin pour détacher, modes Linked / Separate.
+- [x] Pages multiples : bouton Pages (onglets `+` verts et `−` rouge au centre de chaque page), modes Linked / Separate.
 - [x] Bascule automatique souris ↔ stylet à l'approche du stylet (pas de bouton manuel).
 - [x] Gestes tactiles : 1 doigt = déplacer papier/objet, appui court = sélection de trait, 2 doigts = pan/zoom, tap 2 doigts = annuler.
 - [x] « Draw with finger » et type de gomme (trait / zone) dans le menu du cahier.
-- [x] Appui long sur un stylo = roue de couleur ; cinq épaisseurs sur la trousse.
+- [x] Appui long sur un stylo, ou la pastille d'encre, ouvre ensemble la soucoupe de couleur et le trait d'épaisseur.
 - [x] Mise en page petits écrans (min 320×280), rester sur la zone cadrée au resize.
 
 ### Fichiers

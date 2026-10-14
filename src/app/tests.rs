@@ -69,13 +69,14 @@ fn object_selection_moves_resizes_and_offers_actions_with_mouse_and_touch() {
         } else {
             "selection-mouse"
         });
-        let duplicate = frames.text_center("Duplicate");
-        frames.drag(app, duplicate, duplicate);
-        frames.settle(app);
+        assert!(frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new("selection-actions")))
+            .is_none());
+        assert_eq!(app.sel.len(), 1);
+        app.duplicate_selection();
         assert_eq!(app.note.as_ref().unwrap().pages[0].texts.len(), 2);
-        let delete = frames.text_center("Delete");
-        frames.drag(app, delete, delete);
-        frames.settle(app);
+        app.delete_selection();
         assert_eq!(app.note.as_ref().unwrap().pages[0].texts.len(), 1);
         assert_eq!(app.note.as_ref().unwrap().pages[0].texts[0].id, text_id);
     }
@@ -159,6 +160,123 @@ impl Drop for Fixture {
             std::fs::remove_dir_all(&self.root).expect("remove isolated test library");
         }
     }
+}
+
+fn shelf_ids(app: &InkarchyApp) -> Vec<Uuid> {
+    app.shelf_slots.iter().map(|(id, _)| *id).collect()
+}
+
+#[test]
+fn shelf_search_still_matches_the_title() {
+    let mut fixture = Fixture::new();
+    let alpha = fixture.notebook("Alpha");
+    let _beta = fixture.notebook("Beta");
+    fixture.app.scene = Scene::Shelf {
+        query: "beta".into(),
+    };
+    let mut frames = Frames::new(&fixture.app);
+    frames.settle(&mut fixture.app);
+    let ids = shelf_ids(&fixture.app);
+    assert!(ids.contains(&_beta));
+    assert!(!ids.contains(&alpha));
+}
+
+#[test]
+fn shelf_search_matches_typed_text_inside_a_notebook() {
+    let mut fixture = Fixture::new();
+    let hidden = fixture.notebook("Alpha");
+    let other = fixture.notebook("Beta");
+    let mut note = fixture.app.lib.load_note(hidden).unwrap();
+    let mut text = TextBox::new(pos2(24.0, 24.0), Color32::BLACK);
+    text.text = "Fourier series on the board".into();
+    note.pages[0].texts.push(text);
+    note.touch();
+    fixture.app.lib.save_note(&note).expect("save body");
+    fixture.app.scene = Scene::Shelf {
+        query: "fourier".into(),
+    };
+    let mut frames = Frames::new(&fixture.app);
+    frames.settle(&mut fixture.app);
+    let ids = shelf_ids(&fixture.app);
+    assert!(ids.contains(&hidden), "ids {ids:?}");
+    assert!(!ids.contains(&other));
+    let snippet = fixture.app.shelf_hit_snippet(hidden, "fourier");
+    assert!(
+        snippet
+            .as_deref()
+            .is_some_and(|s| s.to_lowercase().contains("fourier")),
+        "snippet {snippet:?}"
+    );
+    let base = DOS_PAD + PAPER_PEEK + DOS_H + TITLE_ROW;
+    assert!(
+        fixture
+            .app
+            .shelf_grid
+            .iter()
+            .any(|cell| cell.height() >= base + SNIPPET_ROW - 0.1),
+        "search cells must leave a line under the title"
+    );
+    let mut title = None;
+    let mut snip = None;
+    for shape in &frames.output.as_ref().unwrap().shapes {
+        let Shape::Text(text) = &shape.shape else {
+            continue;
+        };
+        let rect = Rect::from_min_size(text.pos, text.galley.size());
+        if text.galley.text() == "Alpha" {
+            title = Some(rect);
+        } else if text.galley.text().contains("fourier") && text.pos.y > 80.0 {
+            snip = Some(rect);
+        }
+    }
+    let title = title.expect("title");
+    let snip = snip.expect("snippet under title");
+    assert!(
+        snip.top() >= title.bottom() - 0.5,
+        "snippet {snip:?} overlaps title {title:?}"
+    );
+}
+
+#[test]
+fn shelf_search_matches_pdf_unicode() {
+    let mut fixture = Fixture::new();
+    let mut note = Note::blank("Lecture", 0);
+    let id = note.id;
+    note.pages[0].background = Some(PageBackground {
+        file: "source.pdf".into(),
+        pdf_page: Some(0),
+        source_size: Some([200.0, 100.0]),
+    });
+    fixture.app.lib.insert_new(&note).expect("save notebook");
+    let dir = fixture.app.lib.note_dir(id);
+    std::fs::create_dir_all(dir.join("media")).unwrap();
+    std::fs::write(dir.join("source.pdf"), crate::pdf::text_pdf("Fourier")).unwrap();
+    let decoy = fixture.notebook("Sketch");
+    fixture.app.scene = Scene::Shelf {
+        query: "fourier".into(),
+    };
+    let mut frames = Frames::new(&fixture.app);
+    let mut found = false;
+    for _ in 0..120 {
+        frames.step(&mut fixture.app, vec![]);
+        if fixture.app.shelf_hit_matches(id, "fourier") {
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "PDF unicode should reach the shelf search");
+    let ids = shelf_ids(&fixture.app);
+    assert!(ids.contains(&id), "ids {ids:?}");
+    assert!(!ids.contains(&decoy));
+}
+
+#[test]
+fn empty_shelf_query_keeps_the_slot_grid() {
+    let mut fixture = Fixture::new();
+    fixture.notebook("One");
+    let mut frames = Frames::new(&fixture.app);
+    frames.settle(&mut fixture.app);
+    assert_eq!(fixture.app.shelf_grid.len(), SHELF_SLOTS as usize);
 }
 
 #[test]
@@ -642,7 +760,7 @@ fn header_wells(frames: &Frames) -> Vec<Pos2> {
 }
 
 #[test]
-fn pages_mode_adds_a_sheet_and_cancel_hides_the_pluses() {
+fn pages_mode_adds_a_sheet_and_toggle_hides_the_pluses() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Pages");
     let app = &mut fixture.app;
@@ -661,10 +779,10 @@ fn pages_mode_adds_a_sheet_and_cancel_hides_the_pluses() {
     app.fitted_cell = None;
     frames.settle(app);
     let pages = app.note.as_ref().unwrap().pages.len();
-    let manage = header_wells(&frames)[0];
+    let manage = header_wells(&frames)[1];
     frames.drag(app, manage, manage);
     frames.settle(app);
-    assert!(app.object_delete.is_some());
+    assert!(app.sheet_tabs_on);
     let canvas = app.canvas_rect;
     let tabs = app.sheet_tabs(canvas);
     assert!(!tabs.is_empty(), "Pages mode shows the + tabs");
@@ -680,10 +798,9 @@ fn pages_mode_adds_a_sheet_and_cancel_hides_the_pluses() {
         pages + 1,
         "a + tab adds a page while managing"
     );
-    let cancel = frames.text_center("Cancel");
-    frames.drag(app, cancel, cancel);
+    frames.key(app, Key::Escape);
     frames.settle(app);
-    assert!(app.object_delete.is_none());
+    assert!(!app.sheet_tabs_on);
     assert!(
         app.sheet_tabs(app.canvas_rect).is_empty(),
         "leaving Pages mode hides the + tabs"
@@ -806,15 +923,15 @@ fn compact_controls_keep_drag_selection_and_wheel_actions_accessible() {
     frames.drag(app, dock.min + vec2(30.0, 29.0), pos2(310.0, 160.0));
     frames.settle(app);
     assert_eq!(app.dock_edge, DockEdge::Right);
-    app.start_object_delete();
+    app.enter_pages_mode();
     frames.settle(app);
-    let cancel = frames.text_center("Cancel");
-    let delete = frames.text_center("Delete (0)");
-    assert!(cancel.x < delete.x && cancel.y < 78.0 && delete.y < 78.0);
+    assert!(app.sheet_tabs_on);
     frames.snapshot("responsive-page-selection-small");
-    frames.touch(app, TouchPhase::Start, cancel);
-    frames.touch(app, TouchPhase::End, cancel);
-    assert!(app.object_delete.is_none());
+    let manage = header_wells(&frames)[1];
+    frames.touch(app, TouchPhase::Start, manage);
+    frames.touch(app, TouchPhase::End, manage);
+    frames.settle(app);
+    assert!(!app.sheet_tabs_on);
 }
 
 #[test]
@@ -1241,25 +1358,33 @@ fn sticky_tap_fills_the_sheet_and_a_corner_drag_resizes_it() {
         app.camera
             .to_screen(tx.rect().center() + app.origin_of(0), app.canvas_rect)
     };
-    frames.step(app, vec![Event::PointerMoved(screen)]);
-    frames.step(
-        app,
-        vec![Event::PointerButton {
-            pos: screen,
-            button: PointerButton::Primary,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-        }],
+    let click = |frames: &mut Frames, app: &mut InkarchyApp| {
+        frames.step(app, vec![Event::PointerMoved(screen)]);
+        frames.step(
+            app,
+            vec![Event::PointerButton {
+                pos: screen,
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            }],
+        );
+        frames.step(
+            app,
+            vec![Event::PointerButton {
+                pos: screen,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            }],
+        );
+    };
+    click(&mut frames, app);
+    assert!(
+        app.sticky_sheet.is_none(),
+        "one click leaves the note on the page"
     );
-    frames.step(
-        app,
-        vec![Event::PointerButton {
-            pos: screen,
-            button: PointerButton::Primary,
-            pressed: false,
-            modifiers: Modifiers::NONE,
-        }],
-    );
+    click(&mut frames, app);
     assert_eq!(app.sticky_sheet, Some((0, sticky_id)));
     frames.settle(app);
     frames.step(app, vec![Event::Text("Hello".into())]);
@@ -1326,6 +1451,43 @@ fn sticky_tap_fills_the_sheet_and_a_corner_drag_resizes_it() {
 }
 
 #[test]
+fn pages_mode_minus_removes_a_sticky() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Sticky minus");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let tx = TextBox::sticky(pos2(200.0, 180.0), app.look.yellow());
+    let sticky_id = tx.id;
+    app.note.as_mut().unwrap().pages[0].texts.push(tx);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    app.camera = Camera {
+        pan: vec2(40.0, 80.0),
+        zoom: 0.8,
+        stretch_y: None,
+    };
+    app.fitted_cell = None;
+    app.need_fit = false;
+    app.enter_pages_mode();
+    frames.step(app, vec![]);
+    let hit = {
+        let tx = &app.note.as_ref().unwrap().pages[0].texts[0];
+        sticky_minus_band(app.sticky_screen_rect(app.canvas_rect, 0, tx)).center()
+    };
+    frames.drag(app, hit, hit);
+    frames.settle(app);
+    assert!(app.note.as_ref().unwrap().pages[0]
+        .texts
+        .iter()
+        .all(|t| t.id != sticky_id));
+    assert!(app.undo.undo(app.note.as_mut().unwrap()));
+    assert!(app.note.as_ref().unwrap().pages[0]
+        .texts
+        .iter()
+        .any(|t| t.id == sticky_id));
+}
+
+#[test]
 fn scrolling_compact_toolbar_does_not_zoom_the_page() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Scroll tools");
@@ -1363,7 +1525,7 @@ fn notebook_menu_keeps_actions_and_keyboard_dismissal() {
     app.open_note(id);
     let mut frames = Frames::new(app);
     frames.settle(app);
-    let more = header_wells(&frames)[1];
+    let more = header_wells(&frames)[0];
     frames.drag(app, more, more);
     frames.settle(app);
     assert!(Popup::is_any_open(&frames.ctx));
@@ -1508,12 +1670,61 @@ fn ink_fields_use_continuous_meshes() {
     for mesh in &meshes {
         assert!(mesh.is_valid());
     }
-    assert_eq!(meshes[0].vertices.first().unwrap().color, Color32::WHITE);
-    assert_eq!(meshes[0].vertices.last().unwrap().color, Color32::BLACK);
+    let wash = &meshes[0].vertices;
+    assert!(
+        wash.iter()
+            .any(|v| v.color.r() < 12 && v.color.g() < 12 && v.color.b() < 12),
+        "the wash still reaches black"
+    );
+    assert!(
+        wash.iter()
+            .any(|v| v.color.r() as u16 + v.color.g() as u16 + v.color.b() as u16 > 600),
+        "the wash still reaches a light tint"
+    );
     assert_eq!(
         meshes[1].vertices.first().unwrap().color,
         meshes[1].vertices.last().unwrap().color
     );
+}
+
+#[test]
+fn nib_ribbon_sets_width_from_one_slot() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Nib");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    app.width = 2.0;
+    app.nib_open = true;
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let track = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("nib-track")))
+        .unwrap();
+    let heavy = if track.width() >= track.height() {
+        pos2(track.right() - 2.0, track.center().y)
+    } else {
+        pos2(track.center().x, track.bottom() - 2.0)
+    };
+    frames.drag(app, heavy, heavy);
+    assert!(
+        (app.width - 18.0).abs() < 1.2,
+        "the heavy end of the ribbon sets a broad nib, got {}",
+        app.width
+    );
+    let hair = if track.width() >= track.height() {
+        pos2(track.left() + 2.0, track.center().y)
+    } else {
+        pos2(track.center().x, track.top() + 2.0)
+    };
+    frames.drag(app, hair, hair);
+    assert!(
+        app.width < 2.0,
+        "the thin end stays a hairline, got {}",
+        app.width
+    );
+    frames.key(app, Key::Escape);
+    assert!(!app.nib_open);
 }
 
 #[test]
@@ -1674,125 +1885,7 @@ fn colored_note_tools_preserve_ink_and_support_mouse_and_touch() {
 }
 
 #[test]
-fn fold_tears_the_outer_page() {
-    let mut fixture = Fixture::new();
-    let id = fixture.notebook("Tear ear");
-    let app = &mut fixture.app;
-    app.open_note(id);
-    app.note.as_mut().unwrap().add_unit_at(1, 0);
-    let mut frames = Frames::new(app);
-    frames.settle(app);
-    app.camera = Camera {
-        pan: vec2(8.0, 8.0),
-        zoom: 0.5,
-        stretch_y: None,
-    };
-    app.fitted_cell = None;
-    app.need_fit = false;
-    let paper = app.unit_screen_rect(app.canvas_rect, 1, 0);
-    let ear = paper.right_top() + vec2(-4.0, 4.0);
-    frames.drag(app, ear, ear);
-    assert_eq!(app.note.as_ref().unwrap().pages.len(), 1);
-    assert!(app.note.as_ref().unwrap().unit_occupied(0, 0));
-    assert!(app.undo.undo(app.note.as_mut().unwrap()));
-    assert_eq!(app.note.as_ref().unwrap().pages.len(), 2);
-}
-
-fn delete_column_cloth(frames: &Frames) -> Rect {
-    fn consider(shape: &Shape, screen_w: f32, best: &mut Option<Rect>) {
-        match shape {
-            Shape::Rect(rect) if rect.corner_radius.nw == 22 => {
-                let r = rect.rect;
-                // The column is the cloth flush with the right margin. Its
-                // height changes with the rows, so the tallest rect is not it.
-                let on_the_right = (r.right() - (screen_w - 12.0)).abs() < 3.0 && r.width() > 150.0;
-                let higher = best.is_none_or(|have| r.top() < have.top());
-                if on_the_right && higher {
-                    *best = Some(r);
-                }
-            }
-            Shape::Vec(list) => {
-                for shape in list {
-                    consider(shape, screen_w, best);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut best = None;
-    for shape in &frames.output.as_ref().unwrap().shapes {
-        consider(&shape.shape, frames.size.x, &mut best);
-    }
-    best.expect("delete column cloth")
-}
-
-#[test]
-fn delete_column_height_follows_the_row_count() {
-    let mut fixture = Fixture::new();
-    let id = fixture.notebook("Delete height");
-    let app = &mut fixture.app;
-    app.open_note(id);
-    let mut frames = Frames::new(app);
-    frames.settle(app);
-    app.start_object_delete();
-    frames.step(app, vec![]);
-    frames.step(app, vec![]);
-    let empty = delete_column_cloth(&frames);
-    assert!(
-        empty.height() < 160.0 && empty.bottom() < frames.size.y - 40.0,
-        "no rows, the column is the header, got {empty:?}"
-    );
-
-    app.note.as_mut().unwrap().add_unit_at(1, 0);
-    app.object_delete = Some(vec![
-        DeletePick {
-            target: DeleteTarget::Page(0, 0),
-            on: true,
-        },
-        DeletePick {
-            target: DeleteTarget::Page(1, 0),
-            on: true,
-        },
-    ]);
-    frames.step(app, vec![]);
-    let two = delete_column_cloth(&frames);
-    assert!(
-        two.height() > empty.height() + 60.0 && two.bottom() < frames.size.y - 40.0,
-        "two rows set the height on that frame, empty {} two {two:?}",
-        empty.height()
-    );
-    frames.step(app, vec![]);
-    let two_again = delete_column_cloth(&frames);
-    assert!(
-        (two_again.height() - two.height()).abs() < 1.0,
-        "the column must not keep growing after the rows are in"
-    );
-
-    let note = app.note.as_mut().unwrap();
-    for col in 2..40 {
-        note.add_unit_at(col, 0);
-    }
-    app.object_delete = Some(
-        (0..40)
-            .map(|col| DeletePick {
-                target: DeleteTarget::Page(col, 0),
-                on: true,
-            })
-            .collect(),
-    );
-    frames.step(app, vec![]);
-    let many = delete_column_cloth(&frames);
-    assert!(
-        many.bottom() >= frames.size.y - 2.0,
-        "a long list fills the column and then scrolls, got {many:?}"
-    );
-    frames.step(app, vec![]);
-    let many_again = delete_column_cloth(&frames);
-    assert!((many_again.height() - many.height()).abs() < 1.0);
-}
-
-#[test]
-fn pages_mode_checks_pages_and_leaves_ink() {
+fn pages_mode_tear_badge_removes_a_page_and_leaves_ink() {
     for touch in [false, true] {
         let mut fixture = Fixture::new();
         let id = fixture.notebook("Delete pages");
@@ -1821,62 +1914,65 @@ fn pages_mode_checks_pages_and_leaves_ink() {
             stretch_y: None,
         };
         app.fitted_cell = None;
-        app.start_object_delete();
-        frames.step(app, vec![]);
-        frames.step(app, vec![]);
-        assert!(frames.output.as_ref().unwrap().shapes.iter().any(
-            |shape| matches!(&shape.shape, Shape::Text(text) if text.galley.text() == "Tap a page")
-        ));
-        let empty_cloth = delete_column_cloth(&frames);
-        assert!(
-            empty_cloth.height() < 160.0 && empty_cloth.bottom() < frames.size.y * 0.5,
-            "empty delete column should hug the header, got {empty_cloth:?}"
-        );
+        app.need_fit = false;
         let canvas = app.canvas_rect;
-        let page_two = app
-            .camera
-            .to_screen(pos2(PAGE_W * 1.5, PAGE_H * 0.5), canvas);
-        if touch {
-            frames.touch(app, TouchPhase::Start, page_two);
-            frames.touch(app, TouchPhase::End, page_two);
-        } else {
-            frames.drag(app, page_two, page_two);
-        }
-        let picks = app.object_delete.as_ref().unwrap();
-        assert!(picks
-            .iter()
-            .all(|pick| { matches!(pick.target, DeleteTarget::Page(_, _)) && pick.on }));
-        assert_eq!(picks.len(), 1);
-        assert!(picks.iter().any(|pick| {
-            matches!(pick.target, DeleteTarget::Page(col, row) if col == 1 && row == 0)
-        }));
-        frames.step(app, vec![]);
-        let filled_cloth = delete_column_cloth(&frames);
+        let paper = app.unit_screen_rect(canvas, 1, 0);
+        let minus = page_minus_band(paper);
+        let top = outward_band(paper, SheetEdge::Top);
         assert!(
-            filled_cloth.height() > empty_cloth.height() + 20.0
-                && filled_cloth.bottom() < frames.size.y - 40.0,
-            "column should fit the page row, empty {} filled {}",
-            empty_cloth.height(),
-            filled_cloth.height()
+            (minus.width() - top.width()).abs() < 0.5
+                && (minus.height() - top.height()).abs() < 0.5,
+            "the red minus matches a green + tab"
         );
-        frames.settle(app);
-        frames.snapshot(if touch {
-            "delete-picks-touch"
-        } else {
-            "delete-picks-mouse"
-        });
-        let commit = frames.text_center("Delete (1)");
-        frames.text_center("Page 2");
+        let hit = minus.center();
+        assert!(canvas.contains(hit), "center minus sits on the canvas");
+        app.enter_pages_mode();
+        // The press already down when the marks appear must not delete.
         if touch {
-            frames.touch(app, TouchPhase::Start, commit);
-            frames.touch(app, TouchPhase::End, commit);
+            frames.touch(app, TouchPhase::Start, hit);
         } else {
-            frames.drag(app, commit, commit);
+            frames.step(
+                app,
+                vec![Event::PointerButton {
+                    pos: hit,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                }],
+            );
         }
         frames.settle(app);
-        assert!(app.object_delete.is_none());
+        assert_eq!(app.note.as_ref().unwrap().pages.len(), 2);
+        if touch {
+            frames.touch(app, TouchPhase::End, hit);
+        } else {
+            frames.step(
+                app,
+                vec![Event::PointerButton {
+                    pos: hit,
+                    button: PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Modifiers::NONE,
+                }],
+            );
+        }
+        assert_eq!(app.note.as_ref().unwrap().pages.len(), 2);
+        frames.step(app, vec![]);
+        // A stylus tap often leaves the press point. That still deletes.
+        let wobble = hit + vec2(18.0, 6.0);
+        assert!(minus.contains(wobble));
+        if touch {
+            frames.touch(app, TouchPhase::Start, hit);
+            frames.touch(app, TouchPhase::Move, wobble);
+            frames.touch(app, TouchPhase::End, wobble);
+        } else {
+            frames.drag(app, hit, wobble);
+        }
+        frames.settle(app);
         let note = app.note.as_ref().unwrap();
         assert_eq!(note.pages.len(), 1);
+        assert!(note.unit_occupied(0, 0));
+        assert!(!note.unit_occupied(1, 0));
         assert_eq!(note.pages[0].texts[0].id, text_id);
         assert_eq!(note.pages[0].strokes[0].id, stroke_id);
         assert!(app.undo.undo(app.note.as_mut().unwrap()));
@@ -1892,42 +1988,35 @@ fn pages_mode_checks_pages_and_leaves_ink() {
         };
         app.fitted_cell = None;
         app.need_fit = false;
-        app.start_object_delete();
+        app.enter_pages_mode();
         frames.settle(app);
-        let page_two = app
-            .camera
-            .to_screen(pos2(PAGE_W * 1.5, PAGE_H * 0.5), app.canvas_rect);
-        frames.drag(app, page_two, page_two);
-        assert_eq!(app.object_delete.as_ref().unwrap().len(), 1);
+        let paper = app.unit_screen_rect(app.canvas_rect, 1, 0);
+        let off = paper.left_top() + vec2(paper.width() * 0.08, paper.height() * 0.08);
+        assert!(!page_minus_band(paper).contains(off));
+        frames.drag(app, off, off);
+        assert_eq!(app.note.as_ref().unwrap().pages.len(), 2);
         frames.key(app, Key::Escape);
-        assert!(app.object_delete.is_none());
+        assert!(!app.sheet_tabs_on);
         assert_eq!(app.note.as_ref().unwrap().pages.len(), 2);
         assert_eq!(app.note.as_ref().unwrap().pages[0].texts[0].id, text_id);
     }
 }
 
 #[test]
-fn delete_band_checks_a_zone_and_a_page() {
+fn pages_mode_finger_drag_pans_without_tearing() {
     for touch in [false, true] {
         let mut fixture = Fixture::new();
         let id = fixture.notebook("Delete zone");
         let app = &mut fixture.app;
         app.open_note(id);
         let mut text = TextBox::new(pos2(80.0, 80.0), Color32::BLACK);
-        text.text = "Gone".into();
+        text.text = "Keep".into();
         let text_id = text.id;
-        let mut stroke = InkStroke::new(Nib::Fineliner, Color32::BLACK, 3.0);
-        stroke.push(InkPoint::new(pos2(420.0, 360.0), 0.6));
-        stroke.push(InkPoint::new(pos2(520.0, 420.0), 0.8));
-        stroke.tessellate();
-        let stroke_id = stroke.id;
         {
             let note = app.note.as_mut().unwrap();
             note.pages[0].texts.push(text);
-            note.pages[0].strokes.push(stroke);
             note.pages.push(crate::document::Page::at(1, 0));
         }
-        let before = serde_json::to_value(&app.note.as_ref().unwrap().pages).unwrap();
         let mut frames = Frames::new(app);
         frames.settle(app);
         app.camera = Camera {
@@ -1936,59 +2025,28 @@ fn delete_band_checks_a_zone_and_a_page() {
             stretch_y: None,
         };
         app.fitted_cell = None;
-        app.start_object_delete();
+        app.enter_pages_mode();
         frames.settle(app);
         let canvas = app.canvas_rect;
-        let text_from = app.camera.to_screen(pos2(70.0, 70.0), canvas);
-        let text_to = app.camera.to_screen(pos2(370.0, 170.0), canvas);
-        let page_center = app
+        let from = app
             .camera
-            .to_screen(pos2(PAGE_W * 1.5, PAGE_H * 0.5), canvas);
-        let page_from = page_center - vec2(70.0, 50.0);
-        let page_to = page_center + vec2(70.0, 50.0);
-        let page_tap = app.camera.to_screen(pos2(40.0, 400.0), canvas);
+            .to_screen(pos2(PAGE_W * 0.5, PAGE_H * 0.5), canvas);
+        let to = from + vec2(80.0, 40.0);
+        let pan_before = app.camera.pan;
         if touch {
-            frames.touch(app, TouchPhase::Start, text_from);
-            frames.touch(app, TouchPhase::Move, text_to);
-            frames.touch(app, TouchPhase::End, text_to);
-            frames.touch(app, TouchPhase::Start, page_from);
-            frames.touch(app, TouchPhase::Move, page_to);
-            frames.touch(app, TouchPhase::End, page_to);
-            frames.touch(app, TouchPhase::Start, page_tap);
-            frames.touch(app, TouchPhase::End, page_tap);
+            frames.touch(app, TouchPhase::Start, from);
+            frames.touch(app, TouchPhase::Move, to);
+            frames.touch(app, TouchPhase::End, to);
         } else {
-            frames.drag(app, text_from, text_to);
-            frames.drag(app, page_from, page_to);
-            frames.drag(app, page_tap, page_tap);
-        }
-        let picks = app.object_delete.as_ref().unwrap();
-        assert!(picks.iter().any(|pick| {
-            matches!(pick.target, DeleteTarget::Page(col, row) if col == 1 && row == 0) && pick.on
-        }));
-        assert!(picks.iter().any(|pick| {
-            matches!(pick.target, DeleteTarget::Page(col, row) if col == 0 && row == 0) && pick.on
-        }));
-        frames.settle(app);
-        let commit = frames.text_center("Delete (1)");
-        frames.text_center("Page 2");
-        if touch {
-            frames.touch(app, TouchPhase::Start, commit);
-            frames.touch(app, TouchPhase::End, commit);
-        } else {
-            frames.drag(app, commit, commit);
+            frames.drag(app, from, to);
         }
         frames.settle(app);
-        assert!(app.object_delete.is_none());
-        let note = app.note.as_ref().unwrap();
-        assert_eq!(note.pages.len(), 1);
-        assert!(note.unit_occupied(0, 0));
-        assert!(!note.unit_occupied(1, 0));
-        assert_eq!(note.pages[0].texts[0].id, text_id);
-        assert_eq!(note.pages[0].strokes[0].id, stroke_id);
-        assert!(app.undo.undo(app.note.as_mut().unwrap()));
-        assert_eq!(
-            serde_json::to_value(&app.note.as_ref().unwrap().pages).unwrap(),
-            before
+        assert!(app.sheet_tabs_on);
+        assert_eq!(app.note.as_ref().unwrap().pages.len(), 2);
+        assert_eq!(app.note.as_ref().unwrap().pages[0].texts[0].id, text_id);
+        assert!(
+            (app.camera.pan - pan_before).length() > 1.0,
+            "a drag on the paper pans instead of selecting pages"
         );
     }
 }
