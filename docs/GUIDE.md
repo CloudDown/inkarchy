@@ -35,18 +35,22 @@ Choose lined, Cornell, grid, dotted, graph, or blank paper. Canson paper adds a 
 
 A pin on the shelf is a ribbon on the spine. Drag the sticky pad onto the page; hold a sticky for its color.
 
+<p align="center">
+  <img src="screens/sticky-notes.png" alt="Sticky notes on a dotted page" width="80%">
+</p>
+
 ### A shelf and a bin
 
 Keep your notebooks on the shelf and restore any you have moved to the bin.
 
 <p align="center">
-  <img src="screens/etagere.png" alt="Notebook shelf" width="49%">
+  <img src="screens/shelf.png" alt="Notebook shelf" width="49%">
   <img src="screens/corbeille.png" alt="Notebooks in the bin" width="49%">
 </p>
 
 ## Preview
 
-![Lined page with drawing tools](screens/feuille.png)
+![Cornell page with ink, highlighter and the tool dock](screens/hero.png)
 
 ## Run
 

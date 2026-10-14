@@ -1,12 +1,9 @@
-# Inkarchy
+<h1 align="center">Inkarchy</h1>
 
-Native stylus notes for Omarchy, written in Rust.
-
-![Lined page with drawing tools](docs/screens/feuille.png)
+<p align="center">Native stylus notes for Omarchy, written in Rust.</p>
 
 <p align="center">
-  <img src="docs/screens/etagere.png" alt="Notebook shelf" width="49%">
-  <img src="docs/screens/liees.png" alt="Linked pages" width="49%">
+  <img src="docs/screens/hero.png" alt="Cornell page with handwritten notes, highlighter and the tool dock" width="100%">
 </p>
 
 ## Install
@@ -17,12 +14,20 @@ curl -fsSL https://raw.githubusercontent.com/CloudDown/inkarchy/main/install.sh 
 
 Uninstall: `curl -fsSL https://raw.githubusercontent.com/CloudDown/inkarchy/main/install.sh | bash -s -- --uninstall`
 
+<table>
+  <tr>
+    <td width="33%" align="center"><img src="docs/screens/pdf-annotation.png" alt="Annotated PDF"><br><sub>Annotate PDFs</sub></td>
+    <td width="33%" align="center"><img src="docs/screens/sticky-notes.png" alt="Sticky notes"><br><sub>Sticky notes</sub></td>
+    <td width="33%" align="center"><img src="docs/screens/shelf.png" alt="Notebook shelf"><br><sub>Notebook shelf</sub></td>
+  </tr>
+</table>
 
 ## Usage
 
 ```bash
 inkarchy                      # open the shelf
 inkarchy ~/Downloads/x.pdf    # open a PDF (or PNG, JPEG, WEBP, SVG, .txt, .md) as a notebook
+INKARCHY_OPEN=Physics inkarchy  # open a notebook by title
 inkarchy --help               # all commands and gestures
 ```
 
@@ -34,9 +39,9 @@ inkarchy --help               # all commands and gestures
 | `[` `]` · `1-9` | thickness · ink color |
 | `m` | cycle paper |
 | `+` `-` · `0` | zoom · fit to screen |
+| `space` + drag | pan |
 | `ctrl+z` / `ctrl+y` | undo / redo |
-| `ctrl+o` | open a file |
-| `ctrl+s` | save |
+| `ctrl+o` · `ctrl+s` | open a file · save |
 | `ctrl+e` / `ctrl+shift+e` | export PNG / PDF |
 
-[Docs](docs/GUIDE.md)
+<p align="center"><a href="docs/GUIDE.md">Docs</a></p>
