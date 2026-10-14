@@ -1,10 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=Cahier
+Name=Inkarchy
 Comment=Stylus notes on an Omarchy lectern
-Exec=cahier %F
-Icon=com.clouddown.cahier
+Exec=inkarchy %F
+Icon=inkarchy
 Terminal=false
 MimeType=application/pdf;image/png;image/jpeg;image/webp;image/svg+xml;
 Categories=Office;Education;
-StartupWMClass=com.clouddown.cahier
+StartupWMClass=com.clouddown.inkarchy

@@ -206,7 +206,7 @@ struct DockSlide {
     shown: bool,
 }
 
-pub struct CahierApp {
+pub struct InkarchyApp {
     look: Look,
     lib: Library,
     scene: Scene,
@@ -304,7 +304,7 @@ pub struct CahierApp {
     pending_image: Option<(usize, Pos2)>,
     /// Open the file dialog outside the click (system portal).
     pending_open: bool,
-    /// Paths sent by a second `cahier file.pdf` while this window is open.
+    /// Paths sent by a second `inkarchy file.pdf` while this window is open.
     inbox: Option<crate::ipc::Inbox>,
     bg_textures: HashMap<String, TextureHandle>,
     bg_tex_scale: HashMap<String, f32>,
@@ -382,7 +382,7 @@ struct StickyResize {
     wrote: bool,
 }
 
-impl CahierApp {
+impl InkarchyApp {
     pub fn new(cc: &eframe::CreationContext<'_>, files: Vec<PathBuf>) -> Self {
         crate::fonts::install(&cc.egui_ctx);
         let look = Look::load();
@@ -391,7 +391,9 @@ impl CahierApp {
         seed::seed_if_needed(&mut lib);
         let mut app = Self::with_library(look, lib);
         if files.is_empty() {
-            if let Ok(q) = std::env::var("CAHIER_OPEN") {
+            // INKARCHY_OPEN wins. CAHIER_OPEN is a deprecated alias.
+            let open = std::env::var("INKARCHY_OPEN").or_else(|_| std::env::var("CAHIER_OPEN"));
+            if let Ok(q) = open {
                 let q = q.trim().to_lowercase();
                 if !q.is_empty() {
                     if let Some(id) = app
@@ -1113,7 +1115,7 @@ impl CahierApp {
     }
 }
 
-impl eframe::App for CahierApp {
+impl eframe::App for InkarchyApp {
     fn raw_input_hook(&mut self, ctx: &Context, raw_input: &mut egui::RawInput) {
         if self.tablet.ready() {
             self.tablet.pump_events();
@@ -1216,7 +1218,7 @@ impl eframe::App for CahierApp {
             self.lib.save_index()
         };
         if let Err(err) = saved {
-            eprintln!("cahier: {err}");
+            eprintln!("inkarchy: {err}");
         }
     }
 }
@@ -1258,7 +1260,7 @@ impl ShowToast<'_> {
     }
 }
 
-impl CahierApp {
+impl InkarchyApp {
     fn ingest_touch_pressure(&self, ctx: &Context) {
         ctx.input(|i| {
             for ev in &i.events {
@@ -1756,7 +1758,7 @@ impl CahierApp {
                                     let action = if compact_cards {
                                         self.compact_dos(ui, &meta, selected, false, slot)
                                     } else {
-                                        self.cahier_dos(ui, &meta, selected, false)
+                                        self.notebook_cover(ui, &meta, selected, false)
                                     };
                                     match action {
                                         Some(DosAct::Open) => open = Some(meta.id),
@@ -2772,11 +2774,11 @@ impl CahierApp {
     }
 
     /// Notebook sheet: the same object for the help card and the marks.
-    fn paint_cahier_page(&self, p: &Painter, rect: Rect, paper: &TextureHandle) -> Rect {
-        self.paint_cahier_leaf(p, rect, 20.0, 18.0, paper)
+    fn paint_notebook_page(&self, p: &Painter, rect: Rect, paper: &TextureHandle) -> Rect {
+        self.paint_notebook_leaf(p, rect, 20.0, 18.0, paper)
     }
 
-    fn paint_cahier_leaf(
+    fn paint_notebook_leaf(
         &self,
         p: &Painter,
         rect: Rect,
@@ -2815,7 +2817,7 @@ impl CahierApp {
         let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
         let paper = self.paper_tex(ui.ctx());
         let p = ui.painter_at(rect);
-        let inner = self.paint_cahier_page(&p, rect, &paper);
+        let inner = self.paint_notebook_page(&p, rect, &paper);
         let ink = self.look.ink;
         let mute = ink.gamma_multiply(0.46);
         p.text(
@@ -3237,7 +3239,7 @@ impl CahierApp {
                                         let action = if compact {
                                             self.compact_dos(ui, &meta, selected, true, slot)
                                         } else {
-                                            self.cahier_dos(ui, &meta, selected, true)
+                                            self.notebook_cover(ui, &meta, selected, true)
                                         };
                                         match action {
                                             Some(DosAct::Open) => *open = Some(meta.id),
@@ -3604,7 +3606,7 @@ impl CahierApp {
         }
     }
 
-    fn cahier_dos(
+    fn notebook_cover(
         &mut self,
         ui: &mut Ui,
         meta: &crate::library::NoteMeta,
@@ -3616,7 +3618,7 @@ impl CahierApp {
             DOS_PAD + PAPER_PEEK + DOS_H + TITLE_ROW,
         );
         let (slot_rect, resp) = ui.allocate_exact_size(slot, Sense::click());
-        let id = Id::new("cahier-dos").with(meta.id);
+        let id = Id::new("notebook-cover").with(meta.id);
         let renaming = self.rename_id == Some(meta.id) && !in_bin;
         let pointer = ui.input(|i| i.pointer.hover_pos());
         let over = !renaming && pointer.is_some_and(|p| slot_rect.contains(p));
@@ -5416,7 +5418,7 @@ impl CahierApp {
             .unwrap_or(Rect::from_center_size(bounds.center(), vec2(48.0, 48.0)));
         let pad = sticky_pad_place(dock, self.dock_layout_edge(), bounds);
         let color = self.sticky_color;
-        Area::new(Id::new("cahier-sticky-pad"))
+        Area::new(Id::new("inkarchy-sticky-pad"))
             .order(Order::Foreground)
             .fixed_pos(pad.min)
             .constrain_to(bounds)
@@ -5464,7 +5466,7 @@ impl CahierApp {
 
         if let Some(p) = self.sticky_drag {
             let ghost = Rect::from_center_size(p, vec2(88.0, 88.0));
-            Area::new(Id::new("cahier-sticky-ghost"))
+            Area::new(Id::new("inkarchy-sticky-ghost"))
                 .order(Order::Tooltip)
                 .fixed_pos(ghost.min)
                 .interactable(false)
@@ -5517,7 +5519,7 @@ impl CahierApp {
         let (sw, sh) = (place.width(), place.height());
         let current = Color32::from_rgb(self.ink.r(), self.ink.g(), self.ink.b());
         // Do not reuse the horizontal area's width for a vertical palette.
-        let inner = Area::new(Id::new(("cahier-ink-strip", vertical)))
+        let inner = Area::new(Id::new(("inkarchy-ink-strip", vertical)))
             .order(Order::Foreground)
             .fixed_pos(place.min)
             .constrain_to(bounds)
@@ -5650,7 +5652,7 @@ impl CahierApp {
         );
         let (tin_w, tin_h) = (place.width(), place.height());
         let paper = self.paper_tex(ctx);
-        let inner = Area::new(Id::new("cahier-tin"))
+        let inner = Area::new(Id::new("inkarchy-tin"))
             .order(Order::Foreground)
             .fixed_pos(place.min)
             .constrain_to(bounds)
@@ -7586,7 +7588,7 @@ impl CahierApp {
         let (send, result) = mpsc::channel();
         let repaint = ctx.clone();
         let spawned = std::thread::Builder::new()
-            .name("cahier-image-picker".into())
+            .name("inkarchy-image-picker".into())
             .spawn(move || {
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let Some(file) = pollster::block_on(task) else {
@@ -7724,7 +7726,7 @@ impl CahierApp {
                     paths.push(path);
                 } else if bytes.starts_with(b"%PDF") {
                     let path =
-                        std::env::temp_dir().join(format!("cahier-drop-{}.pdf", Uuid::new_v4()));
+                        std::env::temp_dir().join(format!("inkarchy-drop-{}.pdf", Uuid::new_v4()));
                     if std::fs::write(&path, &bytes).is_ok() {
                         paths.push(path);
                     }
@@ -9374,9 +9376,14 @@ impl CahierApp {
             self.bg_pending.remove(&key);
             match result {
                 Ok(rendered) => {
+                    eprintln!(
+                        "pdf raster ok {key} {}x{} scale {}",
+                        rendered.width, rendered.height, rendered.scale
+                    );
                     self.store_background(ctx, key, rendered);
                 }
-                Err(_) => {
+                Err(err) => {
+                    eprintln!("pdf raster err {key}: {err}");
                     self.bg_failed.insert(key);
                 }
             }
@@ -9483,12 +9490,18 @@ impl CahierApp {
             let hub = self
                 .pdf_raster
                 .get_or_insert_with(crate::pdf::RasterHub::new);
-            if hub.request(crate::pdf::RasterJob {
+            let sent = hub.request(crate::pdf::RasterJob {
                 key: key.clone(),
-                path,
+                path: path.clone(),
                 page,
                 scale: wanted,
-            }) {
+            });
+            eprintln!(
+                "pdf request sent={sent} page={page} scale={wanted} path={} exists={}",
+                path.display(),
+                path.exists()
+            );
+            if sent {
                 self.bg_pending.insert(key);
             }
             return cached;

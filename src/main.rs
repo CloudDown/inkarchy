@@ -16,28 +16,30 @@ mod seed;
 mod tablet;
 mod undo;
 
-use app::CahierApp;
+use app::InkarchyApp;
 
 const HELP: &str = "\
-cahier — stylus notes, Omarchy lectern
+inkarchy — stylus notes, Omarchy lectern
 
 Usage:
-  cahier
-  cahier --help
-  cahier --version
-  cahier --data-dir
-  cahier --theme
+  inkarchy
+  inkarchy --help
+  inkarchy --version
+  inkarchy --data-dir
+  inkarchy --theme
 
-Opens the lectern. Notebooks live in $CAHIER_DATA
-or ~/.local/share/omacourses. Chrome follows
-~/.local/state/omarchy/current/theme (same palette as the terminal).
+Opens the lectern. Notebooks live in $INKARCHY_DATA
+or ~/.local/share/inkarchy ($CAHIER_DATA is a deprecated alias).
+INKARCHY_OPEN opens a notebook by title ($CAHIER_OPEN is a deprecated alias).
+Chrome follows ~/.local/state/omarchy/current/theme
+(same palette as the terminal).
 
 Examples:
-  cahier
-  CAHIER_DATA=/tmp/cahier cahier
-  CAHIER_OPEN=Mindset cahier
-  cahier --theme
-  cahier --data-dir
+  inkarchy
+  INKARCHY_DATA=/tmp/inkarchy inkarchy
+  INKARCHY_OPEN=Mindset inkarchy
+  inkarchy --theme
+  inkarchy --data-dir
 
 Gestures (inside a notebook):
   p felt-tip   b fountain   c pencil   h highlighter
@@ -59,8 +61,8 @@ Gestures (inside a notebook):
   ctrl+o open a PDF, image, or short text file
 
 Open a file (a new window, or the one already running):
-  cahier ~/Downloads/x.pdf
-  cahier notes.png diagram.svg readme.md
+  inkarchy ~/Downloads/x.pdf
+  inkarchy notes.png diagram.svg readme.md
 ";
 
 fn main() -> eframe::Result<()> {
@@ -71,7 +73,7 @@ fn main() -> eframe::Result<()> {
             return Ok(());
         }
         Ok(cli::CliRequest::Version) => {
-            println!("cahier {}", env!("CARGO_PKG_VERSION"));
+            println!("inkarchy {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
         Ok(cli::CliRequest::DataDir) => {
@@ -96,7 +98,7 @@ fn main() -> eframe::Result<()> {
         Ok(cli::CliRequest::Run(files)) => files,
         Err(err) => {
             eprintln!("Error: {err}.");
-            eprintln!("  cahier --help");
+            eprintln!("  inkarchy --help");
             std::process::exit(2);
         }
     };
@@ -108,15 +110,15 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 860.0])
             .with_min_inner_size([320.0, 280.0])
-            .with_title("Cahier")
-            .with_app_id("com.clouddown.cahier"),
+            .with_title("Inkarchy")
+            .with_app_id("com.clouddown.inkarchy"),
         vsync: false,
         ..Default::default()
     };
     eframe::run_native(
-        "Cahier",
+        "Inkarchy",
         options,
-        Box::new(move |cc| Ok(Box::new(CahierApp::new(cc, files)))),
+        Box::new(move |cc| Ok(Box::new(InkarchyApp::new(cc, files)))),
     )
 }
 

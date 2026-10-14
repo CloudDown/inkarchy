@@ -1,9 +1,9 @@
-# Cahier (omacourses)
+# Inkarchy
 
-Native Rust (egui) stylus notes. Product name Cahier. Binary `cahier`. One repository is this product. Local data only.
+Native Rust (egui) stylus notes. Product name Inkarchy. Binary `inkarchy`. One repository is this product. Local data only.
 
 ## Language
-- In-app strings, README, CLI help: English. Product name stays Cahier.
+- In-app strings, README, CLI help: English. Product name stays Inkarchy.
 - User often writes French; reply in French.
 - Keep code identifiers and notebook JSON as they are so existing notes still open (`fab-corbeille`, `cahier-dock`, serde aliases).
 

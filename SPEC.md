@@ -1,14 +1,14 @@
-# SPEC — Cahier (omacourses)
+# SPEC — Inkarchy
 
 Référence produit. À lire **avant** toute modification. Si une demande contredit ce fichier, le signaler avant de coder.
 
 ## But
-Cahier : app native Rust (egui/eframe) de notes manuscrites au stylet, dans l'esprit Omarchy : rapide, minimaliste, visuelle, locale. Inspirée de Samsung Notes / Apple Notes, mais chaque élément est un objet de papeterie (étagère, chemise, pupitre), pas une carte Material.
+Inkarchy : app native Rust (egui/eframe) de notes manuscrites au stylet, dans l'esprit Omarchy : rapide, minimaliste, visuelle, locale. Inspirée de Samsung Notes / Apple Notes, mais chaque élément est un objet de papeterie (étagère, chemise, pupitre), pas une carte Material. Ancien nom : Cahier.
 
 ## Plateforme cible
 - Linux, Wayland d'abord (Hyprland / Omarchy, Arch). X11 supporté par eframe.
 - Écran tactile + stylet (tablet Wayland) **et** clavier/souris.
-- Binaire `cahier`, app id `com.clouddown.cahier`, Rust ≥ 1.89.
+- Binaire `inkarchy`, app id `com.clouddown.inkarchy`, desktop `inkarchy.desktop`, Rust ≥ 1.89.
 - Thème lu depuis `~/.local/state/omarchy/current/theme/` (`colors.toml`), police UI via `fc-match monospace`.
 
 ## Fonctionnalités
@@ -43,7 +43,7 @@ Cahier : app native Rust (egui/eframe) de notes manuscrites au stylet, dans l'es
 
 ### Demandé / pas fait
 - [ ] Fusionner PR #1 puis PR #2 dans `main` et publier `v0.2.0`.
-- [ ] Nom de produit moins centré Omarchy (axe vitesse, minimalisme, Rust) (à confirmer : renommage du dépôt voulu ?).
+- [x] Nom de produit Inkarchy (dépôt CloudDown/inkarchy).
 - [ ] Icônes de la roue fournies par l'utilisateur (à confirmer : déjà livrées ?).
 - [ ] Raccourcis épingler/emoji/corbeille au clavier listés dans Help (à confirmer).
 - [ ] Travail local non commité en cours (app.rs, pdf.rs, tests) : contenu à confirmer.
@@ -58,7 +58,8 @@ Cahier : app native Rust (egui/eframe) de notes manuscrites au stylet, dans l'es
 7. Ne jamais supprimer les proxys Wayland `allow(dead_code)` ni les impls Dispatch vides du tablet-pad (sinon stylet/pinch coupés).
 
 ## Données et sauvegarde
-- Dossier : `~/.local/share/omacourses` (ou `$CAHIER_DATA`).
+- Dossier : `~/.local/share/inkarchy` (ou `$INKARCHY_DATA` ; `$CAHIER_DATA` est un alias déprécié).
+- Migration : au démarrage, si `~/.local/share/omacourses` existe et que le nouveau dossier n'existe pas, le renommer (copie si le rename échoue) et le journaliser.
 - `library.json` : index étagère + corbeille (slots). `<id>/note.json` par cahier ; fichiers importés copiés dans ce dossier.
 - Écriture atomique (`atomic_write` : fichier temporaire même dossier, fsync, rename). Un échec = toast, jamais silencieux.
 - Mettre à la corbeille garde les fichiers ; seul « Empty » supprime.

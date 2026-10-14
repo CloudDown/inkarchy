@@ -43,12 +43,12 @@ jobs:
 
       - name: Build release binary
         run: |
-          cargo build --locked --release --bin cahier
-          cp target/release/cahier cahier-x86_64-unknown-linux-gnu
-          strip cahier-x86_64-unknown-linux-gnu
+          cargo build --locked --release --bin inkarchy
+          cp target/release/inkarchy inkarchy-x86_64-unknown-linux-gnu
+          strip inkarchy-x86_64-unknown-linux-gnu
 
       - name: Attach binary to the GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: cahier-x86_64-unknown-linux-gnu
+          files: inkarchy-x86_64-unknown-linux-gnu
           generate_release_notes: true

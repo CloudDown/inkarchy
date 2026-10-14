@@ -260,7 +260,7 @@ mod tests {
     }
 
     fn lib() -> (TempDir, Library) {
-        let dir = std::env::temp_dir().join(format!("cahier-import-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("inkarchy-import-{}", uuid::Uuid::new_v4()));
         let _ = fs::remove_dir_all(&dir);
         (TempDir(dir.clone()), Library::fresh(dir))
     }
@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn classify_uses_the_extension_and_pdf_magic() {
-        let dir = std::env::temp_dir().join(format!("cahier-kind-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("inkarchy-kind-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         let pdf = dir.join("noext");
         fs::write(&pdf, b"%PDF-1.4\n").unwrap();

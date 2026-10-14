@@ -1,4 +1,4 @@
-//! A second `cahier file.pdf` hands the paths to the window that is already open.
+//! A second `inkarchy file.pdf` hands the paths to the window that is already open.
 //!
 //! If nothing is listening, the caller starts its own window.
 
@@ -155,7 +155,7 @@ fn socket_path() -> PathBuf {
         hash ^= byte as u64;
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    base.join(format!("cahier-{hash:x}.sock"))
+    base.join(format!("inkarchy-{hash:x}.sock"))
 }
 
 #[cfg(all(test, unix))]
@@ -164,9 +164,9 @@ mod tests {
 
     #[test]
     fn forward_reaches_a_listening_window_and_stops_when_it_closes() {
-        let dir = std::env::temp_dir().join(format!("cahier-ipc-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("inkarchy-ipc-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&dir);
-        let socket = dir.join("cahier.sock");
+        let socket = dir.join("inkarchy.sock");
         let inbox = sys::bind_at(&socket, false).expect("bind");
         let files = vec![
             PathBuf::from("/tmp/lecture.pdf"),
@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn forward_without_a_listener_is_false() {
         let socket =
-            std::env::temp_dir().join(format!("cahier-ipc-missing-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("inkarchy-ipc-missing-{}", uuid::Uuid::new_v4()));
         assert!(!sys::forward_to(
             &socket,
             &[PathBuf::from("/tmp/lecture.pdf")]

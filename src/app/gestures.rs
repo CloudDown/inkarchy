@@ -37,7 +37,7 @@ pub(super) struct TouchGesture {
     snapshot: bool,
 }
 
-impl CahierApp {
+impl InkarchyApp {
     /// A short hold opens settings once; lifting that finger must not also
     /// toggle the tool. Mouse right-click and keyboard clicks stay available.
     pub(super) fn tool_button_action(response: &Response) -> (bool, bool) {

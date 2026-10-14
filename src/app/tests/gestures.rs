@@ -12,7 +12,7 @@ fn png(w: u32, h: u32) -> Vec<u8> {
     bytes
 }
 
-fn drawing_view(app: &mut CahierApp, frames: &mut Frames) {
+fn drawing_view(app: &mut InkarchyApp, frames: &mut Frames) {
     frames.settle(app);
     app.camera = Camera {
         pan: vec2(30.0, 30.0),

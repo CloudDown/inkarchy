@@ -1,6 +1,6 @@
 //! PDF pages, rendered with [hayro](https://crates.io/crates/hayro).
 //!
-//! hayro is pure Rust and is linked into the binary. Cahier does not need
+//! hayro is pure Rust and is linked into the binary. Inkarchy does not need
 //! Poppler, MuPDF, or PDFium on the system.
 
 use std::collections::HashMap;
@@ -14,7 +14,7 @@ use hayro::hayro_syntax::{LoadPdfError, Pdf, PdfData};
 use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{render, RenderSettings};
 
-/// Screen points Cahier uses per PDF point (96 dpi paper, 72 dpi PDF).
+/// Screen points Inkarchy uses per PDF point (96 dpi paper, 72 dpi PDF).
 pub const PAPER_PER_PT: f32 = 96.0 / 72.0;
 
 #[derive(Clone, Copy, Debug)]
@@ -93,7 +93,7 @@ impl RasterHub {
         let (job_tx, job_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         let _ = thread::Builder::new()
-            .name("cahier-pdf".into())
+            .name("inkarchy-pdf".into())
             .spawn(move || raster_loop(job_rx, done_tx));
         Self {
             tx: job_tx,
@@ -123,6 +123,7 @@ fn raster_loop(rx: Receiver<RasterJob>, tx: Sender<(String, Result<Rendered, Str
             latest.insert((job.path.clone(), job.page), job);
         }
         for job in latest.into_values() {
+            eprintln!("pdf worker page {} scale {}", job.page, job.scale);
             if cached.as_ref().is_none_or(|(path, _)| path != &job.path) {
                 cached = match std::fs::read(&job.path) {
                     Ok(bytes) => match open_pdf(bytes) {
@@ -516,9 +517,76 @@ mod tests {
     }
 
     #[test]
+    fn user_pdf_raster_is_not_blank_paper() {
+        let path = std::path::Path::new(
+            "/home/rain/.local/share/inkarchy/notes/05f522d9-e551-4b1f-8022-a32f09eed561/source.pdf",
+        );
+        if !path.is_file() {
+            return;
+        }
+        let bytes = std::fs::read(path).unwrap();
+        let specs = inspect_pdf(&bytes).expect("inspect user pdf");
+        eprintln!("pages={} first={:?}", specs.len(), specs.first());
+        let rendered = render_pdf_bytes(&bytes, 0, 1.0).expect("render user pdf");
+        for (label, path) in [
+            (
+                "chimie",
+                "/home/rain/.local/share/inkarchy/notes/05f522d9-e551-4b1f-8022-a32f09eed561/source.pdf",
+            ),
+            (
+                "chimie15",
+                "/home/rain/.local/share/inkarchy/notes/acfb46e5-b20d-4e70-a734-acb1aba2cddc/source.pdf",
+            ),
+            (
+                "quiz",
+                "/home/rain/.local/share/inkarchy/notes/245f7593-c0e9-4198-bfdc-0fae5cd70548/source.pdf",
+            ),
+        ] {
+            let bytes = std::fs::read(path).unwrap();
+            let specs = inspect_pdf(&bytes).unwrap();
+            eprintln!("{label} pages {}", specs.len());
+            for i in 0..specs.len().min(2) {
+                let t = std::time::Instant::now();
+                match render_pdf_bytes(&bytes, i as u32, 1.0) {
+                    Ok(rendered) => {
+                        let mut ink = 0usize;
+                        for px in rendered.rgba.chunks_exact(4) {
+                            if px[3] > 16 && (px[0] < 245 || px[1] < 245 || px[2] < 245) {
+                                ink += 1;
+                            }
+                        }
+                        eprintln!(
+                            "  page {i} {}x{} ink {ink} {:?}",
+                            rendered.width,
+                            rendered.height,
+                            t.elapsed()
+                        );
+                    }
+                    Err(err) => eprintln!("  page {i} ERR {err} {:?}", t.elapsed()),
+                }
+            }
+        }
+        let mut ink = 0usize;
+        let mut transparent = 0usize;
+        for px in rendered.rgba.chunks_exact(4) {
+            if px[3] < 16 {
+                transparent += 1;
+            } else if px[0] < 245 || px[1] < 245 || px[2] < 245 {
+                ink += 1;
+            }
+        }
+        let total = rendered.width as usize * rendered.height as usize;
+        eprintln!(
+            "raster {}x{} ink={ink} transparent={transparent} total={total}",
+            rendered.width, rendered.height
+        );
+        assert!(ink > total / 200, "pdf page looks blank");
+    }
+
+    #[test]
     fn raster_hub_keeps_page_index_off_the_ui_thread() {
         let dir = std::env::temp_dir().join(format!(
-            "cahier-pdf-hub-{}-{}",
+            "inkarchy-pdf-hub-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

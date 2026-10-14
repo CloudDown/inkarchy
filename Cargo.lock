@@ -1955,6 +1955,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "inkarchy"
+version = "0.3.0"
+dependencies = [
+ "arboard",
+ "chrono",
+ "directories",
+ "eframe",
+ "egui",
+ "flate2",
+ "fontdue",
+ "hayro",
+ "image",
+ "kurbo 0.12.0",
+ "lopdf",
+ "pollster",
+ "raw-window-handle",
+ "resvg",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tiny-skia",
+ "toml",
+ "usvg",
+ "uuid",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+]
+
+[[package]]
 name = "inout"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2708,36 +2738,6 @@ dependencies = [
  "objc2 0.5.3",
  "objc2-core-location",
  "objc2-foundation 0.2.2",
-]
-
-[[package]]
-name = "omacourses"
-version = "0.2.0"
-dependencies = [
- "arboard",
- "chrono",
- "directories",
- "eframe",
- "egui",
- "flate2",
- "fontdue",
- "hayro",
- "image",
- "kurbo 0.12.0",
- "lopdf",
- "pollster",
- "raw-window-handle",
- "resvg",
- "rfd",
- "serde",
- "serde_json",
- "tiny-skia",
- "toml",
- "usvg",
- "uuid",
- "wayland-backend",
- "wayland-client",
- "wayland-protocols",
 ]
 
 [[package]]

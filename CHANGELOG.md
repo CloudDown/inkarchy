@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0 — 2026-10-14
+
+### Changed
+- Renamed to Inkarchy. Binary `inkarchy`, window title Inkarchy, Wayland app id `com.clouddown.inkarchy`, desktop entry `inkarchy.desktop`. Notes move from `~/.local/share/omacourses` to `~/.local/share/inkarchy` on first launch (`$CAHIER_DATA` remains a deprecated alias of `$INKARCHY_DATA`, and `$CAHIER_OPEN` of `$INKARCHY_OPEN`).
+
 ## 0.2.0 — 2026-10-10
 
 ### Added

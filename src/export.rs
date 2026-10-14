@@ -874,6 +874,36 @@ fn flate_stream(
     stream
 }
 
+/// `CahierInk` is the XObject name written before 0.3.0. Reading a page still
+/// treats that name as this stamp, so a later export does not reuse the slot.
+fn fresh_ink_xobject_name(xobjects: &lopdf::Dictionary) -> String {
+    let mut n = 0u32;
+    loop {
+        let name = ink_xobject_name(n);
+        let legacy = legacy_ink_xobject_name(n);
+        if !xobjects.has(name.as_bytes()) && !xobjects.has(legacy.as_bytes()) {
+            return name;
+        }
+        n += 1;
+    }
+}
+
+fn ink_xobject_name(n: u32) -> String {
+    if n == 0 {
+        "InkarchyInk".to_string()
+    } else {
+        format!("InkarchyInk{n}")
+    }
+}
+
+fn legacy_ink_xobject_name(n: u32) -> String {
+    if n == 0 {
+        "CahierInk".to_string()
+    } else {
+        format!("CahierInk{n}")
+    }
+}
+
 fn insert_xobject(
     doc: &mut lopdf::Document,
     page_id: lopdf::ObjectId,
@@ -889,12 +919,7 @@ fn insert_xobject(
             .unwrap_or_else(lopdf::Dictionary::new),
         _ => lopdf::Dictionary::new(),
     };
-    let mut name = "CahierInk".to_string();
-    let mut n = 0u32;
-    while xobjects.has(name.as_bytes()) {
-        n += 1;
-        name = format!("CahierInk{n}");
-    }
+    let name = fresh_ink_xobject_name(&xobjects);
     xobjects.set(name.as_str(), lopdf::Object::Reference(image_id));
     resources.set("XObject", xobjects);
     let page = doc.get_object_mut(page_id)?.as_dict_mut()?;
@@ -1002,6 +1027,18 @@ mod tests {
     }
 
     #[test]
+    fn legacy_ink_xobject_name_is_not_reused() {
+        let mut xobjects = lopdf::Dictionary::new();
+        assert_eq!(fresh_ink_xobject_name(&xobjects), "InkarchyInk");
+        xobjects.set("CahierInk", lopdf::Object::Integer(1));
+        assert_eq!(fresh_ink_xobject_name(&xobjects), "InkarchyInk1");
+        xobjects.set("InkarchyInk1", lopdf::Object::Integer(1));
+        assert_eq!(fresh_ink_xobject_name(&xobjects), "InkarchyInk2");
+        xobjects.set("CahierInk2", lopdf::Object::Integer(1));
+        assert_eq!(fresh_ink_xobject_name(&xobjects), "InkarchyInk3");
+    }
+
+    #[test]
     fn annotated_pdf_keeps_the_original_page_and_adds_ink() {
         let bytes = marked_pdf(&[MarkedPage {
             width: 200.0,
@@ -1009,7 +1046,7 @@ mod tests {
             rotate: 0,
             marker: "KEEP-ORIGINAL",
         }]);
-        let dir = std::env::temp_dir().join(format!("cahier-stamp-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("inkarchy-stamp-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("source.pdf"), &bytes).unwrap();
@@ -1035,7 +1072,7 @@ mod tests {
             "original page content was dropped"
         );
         assert!(
-            text.contains("CahierInk"),
+            text.contains("InkarchyInk"),
             "annotations were not added on top"
         );
         let doc = lopdf::Document::load_mem(&pdf).unwrap();
@@ -1053,7 +1090,7 @@ mod tests {
         }]);
         let [a, b, c, d, e, f] = image_matrix(90, 0.0, 0.0, 200.0, 100.0);
         assert_eq!([a, b, c, d, e, f], [0.0, 100.0, -200.0, 0.0, 200.0, 0.0]);
-        let dir = std::env::temp_dir().join(format!("cahier-rot-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("inkarchy-rot-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("source.pdf"), &bytes).unwrap();
         let mut note = Note::blank("rot", 0);

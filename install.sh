@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="CloudDown/omacourses"
+REPO="CloudDown/inkarchy"
 SOURCE_URL="https://github.com/${REPO}/archive/refs/heads/main.tar.gz"
-RELEASE_ASSET="cahier-x86_64-unknown-linux-gnu"
+RELEASE_ASSET="inkarchy-x86_64-unknown-linux-gnu"
+# Asset name from releases tagged before the Inkarchy rename.
+LEGACY_RELEASE_ASSET="cahier-x86_64-unknown-linux-gnu"
 RAW_ROOT="https://raw.githubusercontent.com/${REPO}/main"
-APP_ID="com.clouddown.cahier"
+APP_ID="com.clouddown.inkarchy"
+BIN_NAME="inkarchy"
+DESKTOP_ID="inkarchy"
+ICON_NAME="inkarchy"
 
 fail() {
   printf 'install.sh: %s\n' "$*" >&2
@@ -14,7 +19,7 @@ fail() {
 
 usage() {
   cat <<'EOF'
-Install Cahier, a stylus notes app.
+Install Inkarchy, a stylus notes app.
 
 Usage:
   install.sh                 download the latest Linux x86_64 release
@@ -23,7 +28,7 @@ Usage:
   install.sh --help
 
 The binary goes to ${CARGO_INSTALL_ROOT:-$HOME/.local}/bin. A desktop entry
-and icon are installed under ~/.local/share so Cahier shows up in the menu.
+and icon are installed under ~/.local/share so Inkarchy shows up in the menu.
 EOF
 }
 
@@ -52,9 +57,10 @@ esac
 
 install_dir="${CARGO_INSTALL_ROOT:-$HOME/.local}/bin"
 data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
-desktop_path="${data_home}/applications/${APP_ID}.desktop"
+desktop_dir="${data_home}/applications"
+desktop_path="${desktop_dir}/${DESKTOP_ID}.desktop"
 icon_dir="${data_home}/icons/hicolor/scalable/apps"
-icon_path="${icon_dir}/${APP_ID}.svg"
+icon_path="${icon_dir}/${ICON_NAME}.svg"
 
 fetch_repo_file() {
   local rel="$1"
@@ -67,42 +73,40 @@ fetch_repo_file() {
   chmod 644 "$dest"
 }
 
-install_desktop() {
-  local bin_path="$1"
-  mkdir -p "$(dirname "$desktop_path")" "$icon_dir"
-  fetch_repo_file "assets/${APP_ID}.svg" "$icon_path"
-  {
-    printf '%s\n' \
-      '[Desktop Entry]' \
-      'Type=Application' \
-      'Name=Cahier' \
-      'Comment=Stylus notes on an Omarchy lectern' \
-      "Exec=\"${bin_path}\" %F" \
-      "Icon=${APP_ID}" \
-      'Terminal=false' \
-      'MimeType=application/pdf;image/png;image/jpeg;image/webp;image/svg+xml;' \
-      'Categories=Office;Education;' \
-      "StartupWMClass=${APP_ID}"
-  } > "$desktop_path"
-  chmod 644 "$desktop_path"
+refresh_desktop_caches() {
   if command -v update-desktop-database >/dev/null 2>&1; then
-    update-desktop-database "$(dirname "$desktop_path")" >/dev/null 2>&1 || true
+    update-desktop-database "$desktop_dir" >/dev/null 2>&1 || true
   fi
   if command -v gtk-update-icon-cache >/dev/null 2>&1; then
     gtk-update-icon-cache -f -t "${data_home}/icons/hicolor" >/dev/null 2>&1 || true
   fi
 }
 
-uninstall_cahier() {
-  rm -f "${install_dir}/cahier" "$desktop_path" "$icon_path"
-  if command -v update-desktop-database >/dev/null 2>&1; then
-    update-desktop-database "$(dirname "$desktop_path")" >/dev/null 2>&1 || true
-  fi
-  printf 'Removed Cahier from %s, and the desktop entry and icon.\n' "$install_dir"
+# Previous product name was Cahier (binary `cahier`, app id com.clouddown.cahier).
+remove_legacy_cahier() {
+  rm -f "${install_dir}/cahier"
+  rm -f "${desktop_dir}/cahier.desktop"
+  rm -f "${desktop_dir}/com.clouddown.cahier.desktop"
+  rm -f "${icon_dir}/com.clouddown.cahier.svg"
+  rm -f "${icon_dir}/cahier.svg"
+}
+
+install_desktop() {
+  mkdir -p "$desktop_dir" "$icon_dir"
+  fetch_repo_file "assets/${ICON_NAME}.svg" "$icon_path"
+  fetch_repo_file "assets/${DESKTOP_ID}.desktop" "$desktop_path"
+  refresh_desktop_caches
+}
+
+uninstall_inkarchy() {
+  rm -f "${install_dir}/${BIN_NAME}" "$desktop_path" "$icon_path"
+  remove_legacy_cahier
+  refresh_desktop_caches
+  printf 'Removed Inkarchy from %s, and the desktop entry and icon.\n' "$install_dir"
 }
 
 if [[ "$mode" == "uninstall" ]]; then
-  uninstall_cahier
+  uninstall_inkarchy
   exit 0
 fi
 
@@ -117,7 +121,7 @@ fi
 
 if command -v pacman >/dev/null 2>&1 && [[ -r /etc/os-release ]] && grep -Eiq '^(ID|ID_LIKE)=.*(arch|omarchy)' /etc/os-release; then
   if ! pacman -T "${packages[@]}" >/dev/null 2>&1; then
-    printf 'Cahier needs system libraries. Install them with pacman? [y/N] '
+    printf 'Inkarchy needs system libraries. Install them with pacman? [y/N] '
     [[ -t 0 ]] || fail "Missing Arch dependencies; run interactively to install them."
     read -r answer
     [[ "$answer" =~ ^[Yy]$ ]] || fail "Required dependencies were not installed."
@@ -136,15 +140,16 @@ command -v fc-match >/dev/null 2>&1 || fail "fc-match is required. Install the f
 install_binary() {
   local src="$1"
   mkdir -p "$install_dir"
-  install -m 755 "$src" "${install_dir}/cahier"
-  install_desktop "${install_dir}/cahier"
-  printf '\nInstalled Cahier to %s/cahier\n' "$install_dir"
+  install -m 755 "$src" "${install_dir}/${BIN_NAME}"
+  remove_legacy_cahier
+  install_desktop
+  printf '\nInstalled Inkarchy to %s/%s\n' "$install_dir" "$BIN_NAME"
   printf 'Desktop entry: %s\n' "$desktop_path"
   printf 'Icon: %s\n' "$icon_path"
   if [[ ":$PATH:" != *":$install_dir:"* ]]; then
     printf 'Add it to your PATH if needed: export PATH="%s:$PATH"\n' "$install_dir"
   fi
-  printf 'Run it with: cahier\n'
+  printf 'Run it with: %s\n' "$BIN_NAME"
   offer_pdf_default
 }
 
@@ -153,16 +158,16 @@ offer_pdf_default() {
   if ! command -v xdg-mime >/dev/null 2>&1; then
     return
   fi
-  local cmd="xdg-mime default ${APP_ID}.desktop application/pdf"
+  local cmd="xdg-mime default ${DESKTOP_ID}.desktop application/pdf"
   if [[ -t 0 ]]; then
-    printf 'Open PDF files with Cahier by default? [y/N] '
+    printf 'Open PDF files with Inkarchy by default? [y/N] '
     local answer=""
     read -r answer || answer=""
     if [[ "$answer" =~ ^[Yy]$ ]]; then
-      xdg-mime default "${APP_ID}.desktop" application/pdf || true
+      xdg-mime default "${DESKTOP_ID}.desktop" application/pdf || true
     fi
   else
-    printf 'To open PDFs with Cahier by default, run:\n  %s\n' "$cmd"
+    printf 'To open PDFs with Inkarchy by default, run:\n  %s\n' "$cmd"
   fi
 }
 
@@ -170,28 +175,39 @@ if [[ "$mode" == "source" ]]; then
   command -v cargo >/dev/null 2>&1 || fail "Rust/Cargo is required. On Arch, install it with: sudo pacman -S rust"
   workdir="$(mktemp -d)"
   trap 'rm -rf "$workdir"' EXIT
-  printf 'Downloading Cahier source…\n'
+  printf 'Downloading Inkarchy source…\n'
   download "$SOURCE_URL" | tar -xz -C "$workdir" --strip-components=1
-  printf 'Building Cahier (first build can take a few minutes)…\n'
+  printf 'Building Inkarchy (first build can take a few minutes)…\n'
   (
     cd "$workdir"
-    cargo build --locked --release --bin cahier
+    cargo build --locked --release --bin "$BIN_NAME"
   )
-  install_binary "${workdir}/target/release/cahier"
+  install_binary "${workdir}/target/release/${BIN_NAME}"
   exit 0
 fi
 
 [[ "$(uname -m)" == "x86_64" ]] || fail "No prebuilt binary for $(uname -m). Re-run with --from-source."
 
-release_url="https://github.com/${REPO}/releases/latest/download/${RELEASE_ASSET}"
+# True when `dest` is a Linux ELF from the named latest-release asset.
+release_elf() {
+  local asset="$1"
+  local dest="$2"
+  local url="https://github.com/${REPO}/releases/latest/download/${asset}"
+  if ! download "$url" > "$dest"; then
+    return 1
+  fi
+  local magic
+  magic="$(od -An -t x1 -N 4 "$dest" | tr -d ' \n')"
+  [[ "$magic" == "7f454c46" ]]
+}
+
 bin_tmp="$(mktemp)"
 trap 'rm -f "$bin_tmp"' EXIT
-printf 'Downloading the latest Cahier release…\n'
-if ! download "$release_url" > "$bin_tmp"; then
-  fail "Could not download the latest release. Re-run with --from-source to compile main."
-fi
-magic="$(od -An -t x1 -N 4 "$bin_tmp" | tr -d ' \n')"
-if [[ "$magic" != "7f454c46" ]]; then
-  fail "The latest release has no Linux x86_64 binary yet. Re-run with --from-source to compile main."
+printf 'Downloading the latest Inkarchy release…\n'
+if ! release_elf "$RELEASE_ASSET" "$bin_tmp"; then
+  printf 'No %s on the latest release; trying %s…\n' "$RELEASE_ASSET" "$LEGACY_RELEASE_ASSET"
+  if ! release_elf "$LEGACY_RELEASE_ASSET" "$bin_tmp"; then
+    fail "The latest release has no Linux x86_64 binary yet. Re-run with --from-source to compile main."
+  fi
 fi
 install_binary "$bin_tmp"

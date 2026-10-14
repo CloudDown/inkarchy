@@ -1,10 +1,10 @@
-# Cahier
+# Inkarchy
 
-Stylus notes on an **Omarchy lectern**. Cahier is a native Rust and egui app for handwritten notes, sketches, and diagrams.
+Stylus notes on an **Omarchy lectern**. Inkarchy is a native Rust and egui app for handwritten notes, sketches, and diagrams.
 
 The **shelf** holds your notebooks; each notebook opens onto a page with paper, drawing tools, and a ruler. The interface follows the active Omarchy theme, while the paper keeps its own look.
 
-Your notes stay on your computer in `~/.local/share/omacourses`. Cahier needs no account or network connection.
+Your notes stay on your computer in `~/.local/share/inkarchy`. Inkarchy needs no account or network connection. Notes from Cahier (`~/.local/share/omacourses`) are moved there on first launch.
 
 ## What's New
 
@@ -53,46 +53,46 @@ Keep your notebooks on the shelf and restore any you have moved to the bin.
 ### Install (Arch Linux / Omarchy)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CloudDown/omacourses/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/CloudDown/inkarchy/main/install.sh | bash
 ```
 
-The installer checks runtime libraries, including `fc-match` from fontconfig, asks before installing any that are missing, downloads the latest release binary, and puts `cahier` in `~/.local/bin`. It also installs a desktop entry and icon (`com.clouddown.cahier`) so Cahier appears in the application menu.
+The installer checks runtime libraries, including `fc-match` from fontconfig, asks before installing any that are missing, downloads the latest release binary, and puts `inkarchy` in `~/.local/bin`. It also installs a desktop entry and icon (`inkarchy.desktop`, app id `com.clouddown.inkarchy`) so Inkarchy appears in the application menu. An older `cahier` binary and desktop entry are removed if they are present.
 
 Compile `main` from source instead:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CloudDown/omacourses/main/install.sh | bash -s -- --from-source
+curl -fsSL https://raw.githubusercontent.com/CloudDown/inkarchy/main/install.sh | bash -s -- --from-source
 ```
 
 Remove the binary, desktop entry, and icon:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CloudDown/omacourses/main/install.sh | bash -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/CloudDown/inkarchy/main/install.sh | bash -s -- --uninstall
 ```
 
 Other Linux distributions work when the graphics libraries are already installed. `--from-source` also needs Rust and Cargo.
 
 ```bash
 cargo run --release
-cahier --help
-cahier --data-dir
+inkarchy --help
+inkarchy --data-dir
 ```
 
-Binary: `cahier`. Data: `~/.local/share/omacourses` (or `$CAHIER_DATA`).
+Binary: `inkarchy`. Data: `~/.local/share/inkarchy` (or `$INKARCHY_DATA`; `$CAHIER_DATA` is a deprecated alias).
 
 ```bash
-CAHIER_OPEN=Mindset cahier   # open a notebook by title
+CAHIER_OPEN=Mindset inkarchy   # open a notebook by title
 ```
 
 Theme read from `omarchy theme current` / `colors.toml`.
 
 ## Open a file
 
-Cahier opens a PDF, an image, or a short text file as a notebook.
+Inkarchy opens a PDF, an image, or a short text file as a notebook.
 
 ```bash
-cahier ~/Downloads/x.pdf
-cahier notes.png diagram.svg readme.md
+inkarchy ~/Downloads/x.pdf
+inkarchy notes.png diagram.svg readme.md
 ```
 
 Each PDF page becomes a page. The rendered page stays put as the background, and ink goes on top. Downloading the notebook as PDF keeps the original page and draws the annotations over it. The original file is copied into the notebook folder.
@@ -101,9 +101,9 @@ PNG, JPEG, WEBP, and SVG become a page background when you open them from the sh
 
 Open is the sheet button at the top right of the shelf, and a row in the notebook menu. `Ctrl+O` opens the same dialog.
 
-PDF rendering uses [hayro](https://crates.io/crates/hayro), linked into the `cahier` binary. Install does not add Poppler, MuPDF, or PDFium.
+PDF rendering uses [hayro](https://crates.io/crates/hayro), linked into the `inkarchy` binary. Install does not add Poppler, MuPDF, or PDFium.
 
-### Open with Cahier
+### Open with Inkarchy
 
 `install.sh` writes a desktop entry with `Exec` passing every selected file (`%F`) and:
 
@@ -111,12 +111,12 @@ PDF rendering uses [hayro](https://crates.io/crates/hayro), linked into the `cah
 MimeType=application/pdf;image/png;image/jpeg;image/webp;image/svg+xml;
 ```
 
-On Omarchy, in Nautilus, right-click a PDF and choose **Open with Cahier**. The same path from a terminal is `cahier ~/Downloads/x.pdf`. If Cahier is already running, that command opens the file in the existing window.
+On Omarchy, in Nautilus, right-click a PDF and choose **Open with Inkarchy**. The same path from a terminal is `inkarchy ~/Downloads/x.pdf`. If Inkarchy is already running, that command opens the file in the existing window.
 
-The installer asks before making Cahier the default PDF application, and only when you are at a terminal. To do it yourself:
+The installer asks before making Inkarchy the default PDF application, and only when you are at a terminal. To do it yourself:
 
 ```bash
-xdg-mime default com.clouddown.cahier.desktop application/pdf
+xdg-mime default inkarchy.desktop application/pdf
 ```
 
 ### Hyprland
@@ -124,13 +124,13 @@ xdg-mime default com.clouddown.cahier.desktop application/pdf
 Optional keybinding in `~/.config/hypr/hyprland.conf`:
 
 ```ini
-bind = SUPER, N, exec, cahier
+bind = SUPER, N, exec, inkarchy
 ```
 
-The window uses app id `com.clouddown.cahier`, the same value as `StartupWMClass` in the desktop file. Example window rule:
+The window uses app id `com.clouddown.inkarchy`, the same value as `StartupWMClass` in the desktop file. Example window rule:
 
 ```ini
-windowrule = float, class:^(com\.clouddown\.cahier)$
+windowrule = float, class:^(com\.clouddown\.inkarchy)$
 ```
 
 ## Gestures

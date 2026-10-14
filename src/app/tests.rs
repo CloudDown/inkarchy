@@ -131,16 +131,16 @@ fn selection_scale_preserves_group_offsets_across_linked_pages() {
 }
 
 struct Fixture {
-    app: CahierApp,
+    app: InkarchyApp,
     root: std::path::PathBuf,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("cahier-ui-{}", Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("inkarchy-ui-{}", Uuid::new_v4()));
         let lib = Library::fresh(root.clone());
         Self {
-            app: CahierApp::with_library(Look::load(), lib),
+            app: InkarchyApp::with_library(Look::load(), lib),
             root,
         }
     }
@@ -159,6 +159,66 @@ impl Drop for Fixture {
             std::fs::remove_dir_all(&self.root).expect("remove isolated test library");
         }
     }
+}
+
+#[test]
+fn pdf_page_paints_its_raster() {
+    let src = std::path::Path::new(
+        "/home/rain/.local/share/inkarchy/notes/05f522d9-e551-4b1f-8022-a32f09eed561/source.pdf",
+    );
+    if !src.is_file() {
+        return;
+    }
+    let bytes = std::fs::read(src).unwrap();
+    let mut fixture = Fixture::new();
+    let note = crate::import::import_new_note(&mut fixture.app.lib, src).expect("import");
+    let id = note.id;
+    assert!(note.pages.iter().any(|p| p.background.is_some()));
+    fixture.app.open_note(id);
+    let mut frames = Frames::new(&fixture.app);
+    for _ in 0..200 {
+        frames.step(&mut fixture.app, vec![]);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let shapes = &frames.output.as_ref().unwrap().shapes;
+    let mut big_dark = 0;
+    for (i, shape) in shapes.iter().enumerate() {
+        let bounds = shape.shape.visual_bounding_rect();
+        if bounds.width() < 400.0 || bounds.height() < 400.0 {
+            continue;
+        }
+        let kind = match &shape.shape {
+            Shape::Mesh(mesh) => {
+                let image = frames.textures.get(&mesh.texture_id);
+                let (w, h, dark) = image
+                    .map(|image| {
+                        let dark = image.pixels.iter().any(|px| {
+                            px.a() > 16 && (px.r() < 240 || px.g() < 240 || px.b() < 240)
+                        });
+                        (image.width(), image.height(), dark)
+                    })
+                    .unwrap_or((0, 0, false));
+                if dark && w > 400 {
+                    big_dark += 1;
+                }
+                format!("mesh {w}x{h} dark={dark}")
+            }
+            Shape::Rect(rect) => format!(
+                "rect fill {:?} stroke {}",
+                rect.fill, rect.stroke.width
+            ),
+            other => format!("{other:?}").chars().take(40).collect(),
+        };
+        eprintln!(
+            "{i:03} {kind} {:.0}x{:.0} @ {:.0},{:.0}",
+            bounds.width(),
+            bounds.height(),
+            bounds.min.x,
+            bounds.min.y
+        );
+    }
+    let _ = bytes.len();
+    assert!(big_dark > 0, "PDF raster was not painted on the page");
 }
 
 #[test]
@@ -213,7 +273,7 @@ struct Frames {
 }
 
 impl Frames {
-    fn new(app: &CahierApp) -> Self {
+    fn new(app: &InkarchyApp) -> Self {
         let ctx = Context::default();
         crate::fonts::install(&ctx);
         app.look.apply(&ctx);
@@ -226,7 +286,7 @@ impl Frames {
         }
     }
 
-    fn step(&mut self, app: &mut CahierApp, events: Vec<Event>) {
+    fn step(&mut self, app: &mut InkarchyApp, events: Vec<Event>) {
         self.time += 1.0 / 60.0;
         let input = RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)),
@@ -259,7 +319,7 @@ impl Frames {
         self.output = Some(output);
     }
 
-    fn settle(&mut self, app: &mut CahierApp) {
+    fn settle(&mut self, app: &mut InkarchyApp) {
         for _ in 0..20 {
             self.step(app, vec![]);
         }
@@ -282,7 +342,7 @@ impl Frames {
             .unwrap_or_else(|| panic!("visible label: {label}"))
     }
 
-    fn drag(&mut self, app: &mut CahierApp, from: Pos2, to: Pos2) {
+    fn drag(&mut self, app: &mut InkarchyApp, from: Pos2, to: Pos2) {
         self.step(app, vec![Event::PointerMoved(from)]);
         self.step(
             app,
@@ -306,7 +366,7 @@ impl Frames {
         );
     }
 
-    fn key(&mut self, app: &mut CahierApp, key: Key) {
+    fn key(&mut self, app: &mut InkarchyApp, key: Key) {
         for pressed in [true, false] {
             self.step(
                 app,
@@ -321,7 +381,7 @@ impl Frames {
         }
     }
 
-    fn touch(&mut self, app: &mut CahierApp, phase: TouchPhase, pos: Pos2) {
+    fn touch(&mut self, app: &mut InkarchyApp, phase: TouchPhase, pos: Pos2) {
         let mut events = vec![
             Event::Touch {
                 device_id: TouchDeviceId(1),
@@ -348,7 +408,7 @@ impl Frames {
 
     // Optional CPU snapshots of the actual egui meshes, without opening a desktop window.
     fn snapshot(&self, name: &str) {
-        let Some(directory) = std::env::var_os("CAHIER_TEST_ARTIFACTS") else {
+        let Some(directory) = std::env::var_os("INKARCHY_TEST_ARTIFACTS") else {
             return;
         };
         let output = self.output.as_ref().unwrap();
@@ -2369,7 +2429,7 @@ fn linked_canvas_keeps_selected_page_when_resized() {
     }
 }
 
-fn assert_uniform_page_fit(app: &CahierApp, origin: Vec2, page_w: f32, page_h: f32) {
+fn assert_uniform_page_fit(app: &InkarchyApp, origin: Vec2, page_w: f32, page_h: f32) {
     let rect = app.canvas_rect;
     assert!(app.camera.stretch_y.is_none());
     let page = Rect::from_min_max(

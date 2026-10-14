@@ -550,12 +550,94 @@ impl Library {
 }
 
 pub fn data_dir() -> PathBuf {
+    if let Some(p) = std::env::var_os("INKARCHY_DATA") {
+        return PathBuf::from(p);
+    }
+    // Deprecated alias kept so existing wrappers keep working.
     if let Some(p) = std::env::var_os("CAHIER_DATA") {
         return PathBuf::from(p);
     }
-    directories::ProjectDirs::from("com", "clouddown", "omacourses")
+    let dest = project_data_dir("inkarchy");
+    let src = project_data_dir("omacourses");
+    migrate_legacy_data_dir(&src, &dest);
+    dest
+}
+
+fn project_data_dir(application: &str) -> PathBuf {
+    directories::ProjectDirs::from("com", "clouddown", application)
         .map(|p| p.data_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from(".").join("data"))
+}
+
+/// Move `~/.local/share/omacourses` to `~/.local/share/inkarchy` once.
+/// Rename first; copy then remove the source if rename fails (e.g. cross-device).
+fn migrate_legacy_data_dir(src: &Path, dest: &Path) {
+    if dest.exists() || !src.exists() || src == dest {
+        return;
+    }
+    if let Some(parent) = dest.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            eprintln!(
+                "inkarchy: failed to migrate data from {} to {}: {err}",
+                src.display(),
+                dest.display()
+            );
+            return;
+        }
+    }
+    match fs::rename(src, dest) {
+        Ok(()) => {
+            eprintln!(
+                "inkarchy: migrated data from {} to {}",
+                src.display(),
+                dest.display()
+            );
+        }
+        Err(rename_err) => {
+            if dest.exists() {
+                return;
+            }
+            match copy_dir_recursive(src, dest) {
+                Ok(()) => {
+                    eprintln!(
+                        "inkarchy: copied data from {} to {} (rename failed: {rename_err})",
+                        src.display(),
+                        dest.display()
+                    );
+                    if let Err(err) = fs::remove_dir_all(src) {
+                        eprintln!(
+                            "inkarchy: copied data to {}, but could not remove {}: {err}",
+                            dest.display(),
+                            src.display()
+                        );
+                    }
+                }
+                Err(copy_err) => {
+                    let _ = fs::remove_dir_all(dest);
+                    eprintln!(
+                        "inkarchy: failed to migrate data from {} to {}: rename: {rename_err}; copy: {copy_err}",
+                        src.display(),
+                        dest.display()
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn copy_dir_recursive(src: &Path, dest: &Path) -> io::Result<()> {
+    fs::create_dir_all(dest)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn ensure_png(bytes: &[u8]) -> Option<Vec<u8>> {
@@ -614,7 +696,7 @@ mod tests {
 
     #[test]
     fn atomic_save_roundtrip_replaces_the_file_and_leaves_no_temp() {
-        let root = std::env::temp_dir().join(format!("cahier-atomic-{}", Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("inkarchy-atomic-{}", Uuid::new_v4()));
         let _ = fs::remove_dir_all(&root);
         let mut lib = Library::fresh(&root);
         let note = crate::document::Note::blank("Atomic", 1);
@@ -639,7 +721,7 @@ mod tests {
 
     #[test]
     fn atomic_write_failure_keeps_the_previous_file() {
-        let root = std::env::temp_dir().join(format!("cahier-atomic-ro-{}", Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("inkarchy-atomic-ro-{}", Uuid::new_v4()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("create root");
         let path = root.join("library.json");
@@ -662,7 +744,7 @@ mod tests {
 
     #[test]
     fn save_index_reports_a_directory_that_cannot_be_created() {
-        let root = std::env::temp_dir().join(format!("cahier-atomic-file-{}", Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("inkarchy-atomic-file-{}", Uuid::new_v4()));
         let _ = fs::remove_file(&root);
         fs::write(&root, b"not a directory").expect("blocker file");
         let lib = Library::fresh(&root);
@@ -703,6 +785,84 @@ mod tests {
                 let _ = fs::set_permissions(self.0, perms);
             }
         }
+    }
+
+    #[test]
+    fn migrates_legacy_data_dir_when_the_new_dir_is_absent() {
+        let root = std::env::temp_dir().join(format!("inkarchy-migrate-{}", Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&root);
+        let src = root.join("omacourses");
+        let dest = root.join("inkarchy");
+        fs::create_dir_all(src.join("notes")).expect("legacy notes dir");
+        fs::write(src.join("library.json"), br#"{"seeded":true}"#).expect("legacy index");
+        fs::write(src.join("notes").join("keep.txt"), b"ok").expect("legacy note file");
+
+        migrate_legacy_data_dir(&src, &dest);
+
+        assert!(dest.join("library.json").is_file());
+        assert_eq!(
+            fs::read(dest.join("notes").join("keep.txt")).expect("migrated file"),
+            b"ok"
+        );
+        assert!(
+            !src.exists(),
+            "legacy directory should be gone after rename"
+        );
+
+        fs::write(dest.join("library.json"), br#"{"seeded":true,"kept":true}"#).expect("mark dest");
+        let leftover = root.join("omacourses-again");
+        fs::create_dir_all(&leftover).expect("new leftover");
+        fs::write(leftover.join("library.json"), br#"{"seeded":false}"#).expect("leftover index");
+        migrate_legacy_data_dir(&leftover, &dest);
+        assert_eq!(
+            fs::read(dest.join("library.json")).expect("dest unchanged"),
+            br#"{"seeded":true,"kept":true}"#
+        );
+        assert!(leftover.join("library.json").is_file());
+
+        let copy_src = root.join("omacourses-copy");
+        let copy_dest = root.join("inkarchy-copy");
+        fs::create_dir_all(copy_src.join("notes")).expect("copy src");
+        fs::write(copy_src.join("library.json"), b"copied").expect("copy index");
+        copy_dir_recursive(&copy_src, &copy_dest).expect("copy fallback");
+        assert_eq!(
+            fs::read(copy_dest.join("library.json")).expect("copied index"),
+            b"copied"
+        );
+        assert!(copy_src.join("library.json").is_file());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn migrates_legacy_data_dir_across_devices_by_copy() {
+        let shm = Path::new("/dev/shm");
+        if !shm.is_dir() {
+            return;
+        }
+        let src_root = std::env::temp_dir().join(format!("inkarchy-exdev-src-{}", Uuid::new_v4()));
+        let dest_root = shm.join(format!("inkarchy-exdev-dst-{}", Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&src_root);
+        let _ = fs::remove_dir_all(&dest_root);
+        let src = src_root.join("omacourses");
+        let dest = dest_root.join("inkarchy");
+        fs::create_dir_all(src.join("notes")).expect("legacy notes dir");
+        fs::write(src.join("library.json"), b"cross").expect("legacy index");
+        fs::write(src.join("notes").join("keep.txt"), b"ok").expect("legacy note file");
+
+        migrate_legacy_data_dir(&src, &dest);
+
+        assert_eq!(
+            fs::read(dest.join("library.json")).expect("migrated index"),
+            b"cross"
+        );
+        assert_eq!(
+            fs::read(dest.join("notes").join("keep.txt")).expect("migrated file"),
+            b"ok"
+        );
+        assert!(!src.exists());
+        let _ = fs::remove_dir_all(&src_root);
+        let _ = fs::remove_dir_all(&dest_root);
     }
 
     #[test]

@@ -1,15 +1,15 @@
 [package]
-name = "omacourses"
-version = "0.2.0"
+name = "inkarchy"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.89"
 authors = ["CloudDown"]
-description = "Cahier — stylus notes on an Omarchy lectern"
+description = "Inkarchy — stylus notes on an Omarchy lectern"
 license = "MIT"
-default-run = "cahier"
+default-run = "inkarchy"
 
 [[bin]]
-name = "cahier"
+name = "inkarchy"
 path = "src/main.rs"
 
 [dependencies]
