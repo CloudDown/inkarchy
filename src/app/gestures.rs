@@ -14,6 +14,14 @@ enum CanvasGesture {
         initial: Vec2,
         scale: f32,
     },
+    /// One finger on the sticky's corner. `start` is the size at contact.
+    StickySize {
+        page: usize,
+        id: Uuid,
+        start: Vec2,
+    },
+    /// Delete mode: a still finger toggles the page or object. A drag is a zone.
+    DeleteBand,
     Text,
     Tool,
 }
@@ -99,6 +107,10 @@ impl CahierApp {
             self.touch_navigation = false;
             return false;
         }
+        if self.sticky_sheet.is_some() {
+            self.canvas_touch = None;
+            return true;
+        }
         let pen = self.tablet.snapshot();
         if !ui.input(|i| i.focused) {
             self.reset_canvas_gesture();
@@ -120,11 +132,10 @@ impl CahierApp {
             self.touch_navigation = touching;
             return true;
         }
-        if self.page_delete.is_some()
-            || self.export_picker_open
-            || Popup::is_any_open(ui.ctx())
-            || self.palm_guard(&pen)
-        {
+        if self.sticky_wheel.is_some() {
+            return true;
+        }
+        if self.export_picker_open || Popup::is_any_open(ui.ctx()) || self.palm_guard(&pen) {
             self.canvas_touch = None;
             self.drag_last = None;
             self.selection_resize = None;
@@ -140,8 +151,10 @@ impl CahierApp {
                 if !canvas.contains(screen) || Self::pen_over_chrome(ui.ctx(), screen) {
                     continue;
                 }
-                if self.sheet_tab_at(screen, canvas).is_some() {
-                    return false; // Page tabs own their complete press.
+                if self.sheet_tab_at(screen, canvas).is_some()
+                    || self.fold_at(screen, canvas).is_some()
+                {
+                    return false; // Page tabs and the tear ear own their press.
                 }
                 let paper = self.camera.to_paper(screen, canvas);
                 if self.editing_text.is_some_and(|(page, id)| {
@@ -154,11 +167,18 @@ impl CahierApp {
                     continue; // TextEdit owns caret placement and text selection.
                 }
                 let hit = self.hit_object(paper);
-                let mode = if self.tool.is_eraser()
+                let mode = if self.object_delete.is_some() {
+                    self.remember_delete_band_base();
+                    CanvasGesture::DeleteBand
+                } else if self.tool.is_eraser()
                     || (self.lib.index.finger_draw && self.tool.is_ink())
                 {
                     self.sel.clear();
                     CanvasGesture::Tool
+                } else if let Some((page, id, start)) = self.sticky_corner(screen, canvas) {
+                    self.finish_text_edit();
+                    self.sel.clear();
+                    CanvasGesture::StickySize { page, id, start }
                 } else if let Some((corner, anchor)) = self.selection_corner(screen, canvas) {
                     CanvasGesture::Resize {
                         anchor,
@@ -219,7 +239,7 @@ impl CahierApp {
                 } else {
                     gesture.last
                 };
-                let delta = (screen - previous) / self.camera.zoom;
+                let delta = self.camera.screen_to_paper_delta(screen - previous);
                 match gesture.mode {
                     CanvasGesture::Move => {
                         if delta != Vec2::ZERO {
@@ -239,7 +259,7 @@ impl CahierApp {
                     } => {
                         // Offset the handle by finger travel: a generous hit area
                         // must not make the image jump when grabbed off-centre.
-                        let travel = (screen - gesture.origin) / self.camera.zoom;
+                        let travel = self.camera.screen_to_paper_delta(screen - gesture.origin);
                         let next = ((initial + travel).dot(initial) / initial.length_sq().max(1.0))
                             .clamp(0.1, 10.0);
                         if (next - scale).abs() > 0.0001 {
@@ -261,6 +281,27 @@ impl CahierApp {
                         self.camera.pan += screen - previous;
                         self.fitted_cell = None;
                     }
+                    CanvasGesture::DeleteBand => {
+                        self.delete_band = Some(gesture.origin);
+                        self.delete_band_now = Some(screen);
+                        self.delete_band_armed = true;
+                        self.apply_delete_band(canvas, Rect::from_two_pos(gesture.origin, screen));
+                    }
+                    CanvasGesture::StickySize { page, id, start } => {
+                        let travel = self.camera.screen_to_paper_delta(screen - gesture.origin);
+                        let size = vec2(
+                            (start.x + travel.x).max(Self::STICKY_MIN),
+                            (start.y + travel.y).max(Self::STICKY_MIN),
+                        );
+                        if size != start {
+                            if !gesture.snapshot {
+                                self.push_snapshot();
+                                gesture.snapshot = true;
+                            }
+                            self.set_sticky_size(page, id, size);
+                            self.mark_dirty();
+                        }
+                    }
                     CanvasGesture::Tool => {}
                 }
             }
@@ -277,18 +318,49 @@ impl CahierApp {
                             self.finish_text_edit();
                             self.sel.clear();
                         }
-                        CanvasGesture::Move
-                            if ui.input(|i| {
-                                i.pointer.button_double_clicked(PointerButton::Primary)
-                            }) =>
-                        {
-                            self.edit_selected_text();
+                        CanvasGesture::DeleteBand => {
+                            let armed = gesture.moved;
+                            self.clear_delete_band();
+                            if !armed {
+                                self.toggle_delete_at(ui.ctx(), screen, canvas);
+                            }
+                        }
+                        CanvasGesture::Move => {
+                            if let Some((page, id)) = self.selected_sticky() {
+                                if time - gesture.since < super::WHEEL_HOLD {
+                                    self.open_sticky_sheet(page, id);
+                                }
+                            } else if ui
+                                .input(|i| i.pointer.button_double_clicked(PointerButton::Primary))
+                            {
+                                self.edit_selected_text();
+                            }
                         }
                         _ => {}
                     }
                 }
             } else {
                 self.canvas_touch = Some(gesture);
+            }
+        }
+
+        // A still finger on a sticky opens the folder cloth wheel.
+        let sticky_hold = self.canvas_touch.as_ref().and_then(|gesture| {
+            (!gesture.moved && matches!(gesture.mode, CanvasGesture::Move))
+                .then_some((gesture.origin, gesture.since))
+        });
+        if let Some((origin, since)) = sticky_hold {
+            if let Some((page, id)) = self.selected_sticky() {
+                let held = time - since;
+                if held >= super::WHEEL_HOLD {
+                    self.canvas_touch = None;
+                    self.drag_last = None;
+                    self.open_sticky_wheel(page, id, origin, ui.ctx(), false);
+                } else {
+                    ui.ctx().request_repaint_after(Duration::from_secs_f64(
+                        (super::WHEEL_HOLD - held).max(0.001),
+                    ));
+                }
             }
         }
 

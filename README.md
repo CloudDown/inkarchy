@@ -17,7 +17,7 @@ Add pages around the current sheet. Display them edge to edge in *Linked* mode, 
   <img src="docs/screens/separees.png" alt="Separate pages with a gap" width="49%">
 </p>
 
-Use the `+` tabs to add a page along any free edge.
+Use the `+` tabs to add a page along any free edge. The top-right button hides them.
 
 <p align="center">
   <img src="docs/screens/onglets.png" alt="Tabs for adding a page" width="80%">
@@ -33,7 +33,7 @@ Choose lined, Cornell, grid, dotted, graph, or blank paper. Canson paper adds a 
 
 ### Lectern objects
 
-A pin on the shelf is a ribbon on the spine. Drag the sticky pad onto the page; hold the pad for color.
+A pin on the shelf is a ribbon on the spine. Drag the sticky pad onto the page; hold a sticky for its color.
 
 ### A shelf and a bin
 
@@ -176,6 +176,7 @@ A finger on empty paper pans the canvas; two fingers pan and zoom even when some
 | | |
 |---|---|
 | `+` on a free edge | add a unit page there |
+| Top-right page-tabs button | hide or show those `+` tabs |
 | Fold corner (when more than one unit) | tear that unit off |
 | ⋯ → Linked / Separate | flush sheet vs gutter between pages |
 

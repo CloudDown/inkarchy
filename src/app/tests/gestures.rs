@@ -17,6 +17,7 @@ fn drawing_view(app: &mut CahierApp, frames: &mut Frames) {
     app.camera = Camera {
         pan: vec2(30.0, 30.0),
         zoom: 1.0,
+        stretch_y: None,
     };
     app.fitted_cell = None;
     frames.settle(app);

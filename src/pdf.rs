@@ -221,6 +221,13 @@ pub fn clamp_scale(pt_w: f32, pt_h: f32, scale: f32) -> f32 {
     }
 }
 
+/// Keep the current raster until the new scale is clearly sharper.
+/// Snap 4 → 8 on an A4 page clamps back to ~4.9; that jump is not worth
+/// dropping the page (the 96 MB cache then flashes empty paper).
+pub fn raster_is_sharp_enough(have: f32, wanted: f32) -> bool {
+    wanted <= 0.0 || have + 0.05 >= wanted || (have > 0.0 && wanted <= have * 1.3)
+}
+
 /// Text baselines in PDF points, origin top-left of the page.
 pub fn text_baselines(path: &Path, page: u32) -> Vec<f32> {
     let Ok(bytes) = std::fs::read(path) else {
@@ -484,6 +491,28 @@ mod tests {
         assert_eq!(raster_scale(20.0, 20.0, 600.0, 800.0, 1.0), 0.25);
         let scale = raster_scale(800.0, 600.0, 600.0, 450.0, 1.0);
         assert!((1.0..=2.0).contains(&scale));
+    }
+
+    #[test]
+    fn a_4x_raster_covers_the_clamped_8x_step() {
+        // Around 190% on a fitted A4, snap jumps 4 → 8, then the 4096 cap
+        // brings 8 back to ~4.9. Keep the 4x page so the cache does not flash
+        // empty paper.
+        let a4 = clamp_scale(595.0, 842.0, 8.0);
+        assert!(
+            raster_is_sharp_enough(4.0, a4),
+            "4x should cover clamped 8x ({a4})"
+        );
+        let letter = clamp_scale(612.0, 792.0, 8.0);
+        assert!(
+            raster_is_sharp_enough(4.0, letter),
+            "4x should cover clamped 8x letter ({letter})"
+        );
+        assert!(raster_is_sharp_enough(3.0, 3.0));
+        assert!(raster_is_sharp_enough(2.0, 2.04));
+        assert!(!raster_is_sharp_enough(2.0, 3.0));
+        assert!(!raster_is_sharp_enough(1.0, 2.0));
+        assert!(!raster_is_sharp_enough(3.0, 4.0));
     }
 
     #[test]
