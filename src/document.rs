@@ -388,6 +388,35 @@ impl Note {
         (self.page_w.max(1.0), self.page_h.max(1.0))
     }
 
+    /// Page chrome for one paint, without stroke points or ribbon meshes.
+    pub fn clone_for_paint(&self) -> Self {
+        Self {
+            id: self.id,
+            title: self.title.clone(),
+            paper: self.paper,
+            cover: self.cover,
+            emoji: self.emoji.clone(),
+            created: self.created,
+            updated: self.updated,
+            pinned: self.pinned,
+            page_w: self.page_w,
+            page_h: self.page_h,
+            sheet_join: self.sheet_join,
+            pages: self
+                .pages
+                .iter()
+                .map(|page| Page {
+                    strokes: Vec::new(),
+                    texts: page.texts.clone(),
+                    images: page.images.clone(),
+                    col: page.col,
+                    row: page.row,
+                    background: page.background.clone(),
+                })
+                .collect(),
+        }
+    }
+
     pub fn touch(&mut self) {
         self.updated = Utc::now();
     }
@@ -1067,6 +1096,26 @@ mod tests {
         assert_eq!(k, PaperKind::Cornell);
         assert_eq!(k.cycle(), PaperKind::Blank);
         assert_eq!(k.label(), "Cornell");
+    }
+
+    #[test]
+    fn clone_for_paint_drops_strokes_and_keeps_text() {
+        let mut n = Note::blank("t", 1);
+        n.pages[0].strokes.push(stroke_from_polyline(
+            &[[10.0, 10.0], [40.0, 12.0]],
+            Nib::Fineliner,
+            Color32::BLACK,
+            2.0,
+        ));
+        n.pages[0]
+            .texts
+            .push(TextBox::new(Pos2::new(8.0, 8.0), Color32::BLACK));
+        let paint = n.clone_for_paint();
+        assert!(paint.pages[0].strokes.is_empty());
+        assert_eq!(paint.pages[0].texts.len(), 1);
+        assert_eq!(paint.id, n.id);
+        assert_eq!(paint.paper, n.paper);
+        assert_eq!(n.pages[0].strokes.len(), 1);
     }
 
     #[test]

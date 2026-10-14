@@ -17,7 +17,7 @@ Add pages around the current sheet. Display them edge to edge in *Linked* mode, 
   <img src="screens/separees.png" alt="Separate pages with a gap" width="49%">
 </p>
 
-Use the `+` tabs to add a page along any free edge. The top-right button hides them.
+Open **Pages** to add a sheet on a free edge or select items to remove.
 
 <p align="center">
   <img src="screens/onglets.png" alt="Tabs for adding a page" width="80%">
@@ -179,8 +179,8 @@ A finger on empty paper pans the canvas; two fingers pan and zoom even when some
 
 | | |
 |---|---|
-| `+` on a free edge | add a unit page there |
-| Top-right page-tabs button | hide or show those `+` tabs |
+| Pages → `+` on a free edge | add a unit page there |
+| Pages → check a page / Cancel | select pages to remove, or leave Pages mode |
 | Fold corner (when more than one unit) | tear that unit off |
 | ⋯ → Linked / Separate | flush sheet vs gutter between pages |
 

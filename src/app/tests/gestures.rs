@@ -339,18 +339,19 @@ fn held_tool_opens_settings_and_all_swatches_have_finger_sized_targets() {
     frames.touch(app, TouchPhase::Start, target);
     frames.time += 0.7;
     frames.step(app, vec![]);
-    assert!(app.palette_open, "settings open during the hold itself");
+    assert!(app.tin_open, "settings open during the hold itself");
     frames.touch(app, TouchPhase::End, target);
     frames.settle(app);
     assert_eq!(app.tool, Tool::Pencil);
     assert!(
-        app.palette_open,
-        "long press opens settings without a follow-up click"
+        app.tin_open,
+        "long press opens the colour wheel without a follow-up click"
     );
     frames.snapshot("touch-tool-settings");
     app.tool = Tool::EraserArea;
+    app.last_eraser = Tool::EraserArea;
     app.width = 27.0;
-    app.palette_open = false;
+    app.tin_open = false;
     frames.settle(app);
     let fill = app.tool_well_fill(Tool::EraserArea, true);
     let eraser = frames
@@ -369,16 +370,12 @@ fn held_tool_opens_settings_and_all_swatches_have_finger_sized_targets() {
     frames.touch(app, TouchPhase::Start, eraser);
     frames.time += 0.4;
     frames.step(app, vec![]);
-    assert!(app.palette_open);
-    assert_eq!(
-        app.width, 27.0,
-        "opening eraser settings preserves its width"
-    );
-    app.palette_open = false;
+    assert!(!app.tin_open, "eraser hold does not open the colour wheel");
+    assert_eq!(app.width, 27.0, "eraser hold preserves its width");
     frames.time += 0.5;
     frames.step(app, vec![]);
     assert!(
-        !app.palette_open,
+        !app.tin_open,
         "a hold fires once, including egui's later long-touch event"
     );
     frames.touch(app, TouchPhase::End, eraser);
@@ -393,14 +390,8 @@ fn held_tool_opens_settings_and_all_swatches_have_finger_sized_targets() {
             CentralPanel::default().show(ctx, |ui| {
                 let chip = app.palette_chip(ui, Color32::BLACK, false, vertical);
                 assert_eq!(chip.rect.size(), vec2(44.0, 44.0));
-                let color = ui.next_auto_id();
-                app.color_dot(ui, Color32::BLACK, true, vertical);
-                assert_eq!(
-                    ctx.read_response(color).unwrap().rect.size(),
-                    vec2(44.0, 44.0)
-                );
                 let thickness = ui.next_auto_id();
-                app.thick_dot(ui, 4.4, true, vertical);
+                app.thick_dot(ui, 4.4, true, "Medium");
                 assert_eq!(
                     ctx.read_response(thickness).unwrap().rect.size(),
                     vec2(44.0, 44.0)

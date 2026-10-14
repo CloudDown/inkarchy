@@ -3,9 +3,16 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
 use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, Style, Visuals};
+
+/// Shared serif family. Cloning the `Arc` avoids building a new name every label.
+pub(crate) fn serif_family() -> FontFamily {
+    static NAME: OnceLock<Arc<str>> = OnceLock::new();
+    FontFamily::Name(NAME.get_or_init(|| Arc::from("serif")).clone())
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ThemeStamp {
@@ -174,7 +181,7 @@ impl Look {
     }
 
     pub fn serif(&self, size: f32) -> FontId {
-        FontId::new(size, FontFamily::Name("serif".into()))
+        FontId::new(size, serif_family())
     }
 
     pub fn mono(&self, size: f32) -> FontId {

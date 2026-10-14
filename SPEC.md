@@ -27,11 +27,11 @@ Inkarchy : app native Rust (egui/eframe) de notes manuscrites au stylet, dans l'
 - [x] Outils : feutre, plume, crayon, surligneur, gommes trait/zone, lasso, texte, image, règle.
 - [x] Papiers : blanc, ligné, carreaux, pointillé, millimétré, ardoise ; texture Canson (`assets/canson.jpg`).
 - [x] Reconnaissance de formes en gardant le stylet immobile ~1 s.
-- [x] Pages multiples : `+` sur un bord libre, pli de coin pour détacher, modes Linked / Separate.
+- [x] Pages multiples : bouton Pages (onglets `+` et sélection pour supprimer), pli de coin pour détacher, modes Linked / Separate.
 - [x] Bascule automatique souris ↔ stylet à l'approche du stylet (pas de bouton manuel).
 - [x] Gestes tactiles : 1 doigt = déplacer papier/objet, appui court = sélection de trait, 2 doigts = pan/zoom, tap 2 doigts = annuler.
-- [x] « Draw with finger » dans le menu du cahier.
-- [x] Appui long sur un bouton stylo/gomme = couleur et épaisseur.
+- [x] « Draw with finger » et type de gomme (trait / zone) dans le menu du cahier.
+- [x] Appui long sur un stylo = roue de couleur ; cinq épaisseurs sur la trousse.
 - [x] Mise en page petits écrans (min 320×280), rester sur la zone cadrée au resize.
 
 ### Fichiers

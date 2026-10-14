@@ -561,12 +561,11 @@ fn responsive_note_controls_do_not_overlap_through_resizes() {
             vec2(600.0, 400.0),
         ] {
             frames.size = size;
-            for accessory in 0..3 {
-                app.palette_open = accessory > 0;
-                app.tin_open = accessory == 2;
+            for accessory in 0..2 {
+                app.tin_open = accessory == 1;
                 frames.settle(app);
                 let screen = Rect::from_min_size(Pos2::ZERO, size);
-                let controls: Vec<_> = ["top-rect", "dock-rect", "strip-rect", "tin-rect"]
+                let controls: Vec<_> = ["top-rect", "dock-rect", "tin-rect"]
                     .into_iter()
                     .filter_map(|key| {
                         frames
@@ -608,7 +607,7 @@ fn responsive_note_controls_do_not_overlap_through_resizes() {
                         assert!(!face.intersects(*other), "header buttons overlap");
                     }
                 }
-                if edge == DockEdge::Bottom && size.x == 320.0 && accessory == 2 {
+                if edge == DockEdge::Bottom && size.x == 320.0 && accessory == 1 {
                     frames.snapshot("responsive-note-small");
                 }
             }
@@ -616,7 +615,7 @@ fn responsive_note_controls_do_not_overlap_through_resizes() {
     }
 }
 
-/// Header wells, rightmost first. Index 0 is page tabs, 1 is the notebook menu.
+/// Header wells, rightmost first. Index 0 is Pages, 1 is the notebook menu.
 fn header_wells(frames: &Frames) -> Vec<Pos2> {
     let mut wells: Vec<Rect> = frames
         .output
@@ -643,39 +642,51 @@ fn header_wells(frames: &Frames) -> Vec<Pos2> {
 }
 
 #[test]
-fn page_tab_button_hides_and_restores_the_pluses() {
+fn pages_mode_adds_a_sheet_and_cancel_hides_the_pluses() {
     let mut fixture = Fixture::new();
-    let id = fixture.notebook("Page tabs");
+    let id = fixture.notebook("Pages");
     let app = &mut fixture.app;
     app.open_note(id);
     let mut frames = Frames::new(app);
     frames.settle(app);
-    let canvas = app.canvas_rect;
-    let tabs = app.sheet_tabs(canvas);
-    assert!(!tabs.is_empty(), "a new page offers + tabs");
-    let hit = tabs[0].2.center();
-    let pages = app.note.as_ref().unwrap().pages.len();
-    let hide = header_wells(&frames)[0];
-    frames.drag(app, hide, hide);
-    frames.settle(app);
     assert!(
         app.sheet_tabs(app.canvas_rect).is_empty(),
-        "the top-right button hides the + tabs"
+        "tabs stay hidden while writing"
     );
+    app.camera = Camera {
+        pan: vec2(180.0, 180.0),
+        zoom: 0.35,
+        stretch_y: None,
+    };
+    app.fitted_cell = None;
+    frames.settle(app);
+    let pages = app.note.as_ref().unwrap().pages.len();
+    let manage = header_wells(&frames)[0];
+    frames.drag(app, manage, manage);
+    frames.settle(app);
+    assert!(app.object_delete.is_some());
+    let canvas = app.canvas_rect;
+    let tabs = app.sheet_tabs(canvas);
+    assert!(!tabs.is_empty(), "Pages mode shows the + tabs");
+    let hit = tabs
+        .iter()
+        .map(|(_, _, rect)| rect.center())
+        .find(|pos| canvas.contains(*pos))
+        .expect("a + tab sits on the canvas");
     frames.drag(app, hit, hit);
     frames.settle(app);
     assert_eq!(
         app.note.as_ref().unwrap().pages.len(),
-        pages,
-        "a hidden tab does not add a page"
+        pages + 1,
+        "a + tab adds a page while managing"
     );
-    let show = header_wells(&frames)[0];
-    frames.touch(app, TouchPhase::Start, show);
-    frames.touch(app, TouchPhase::End, show);
+    let cancel = frames.text_center("Cancel");
+    frames.drag(app, cancel, cancel);
     frames.settle(app);
+    assert!(app.object_delete.is_none());
     assert!(
-        !app.sheet_tabs(app.canvas_rect).is_empty(),
-        "a finger tap shows the + tabs again"
+        app.sheet_tabs(app.canvas_rect).is_empty(),
+        "leaving Pages mode hides the + tabs"
     );
 }
 
@@ -828,6 +839,82 @@ fn early_turn_stays_while_the_hand_keeps_moving_into_the_new_wall() {
 }
 
 #[test]
+fn dock_folds_to_the_grip_while_held_and_opens_on_release() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Dock fold");
+    let app = &mut fixture.app;
+    let mut frames = Frames::new(app);
+    frames.size = vec2(900.0, 600.0);
+    app.open_note(id);
+    frames.settle(app);
+    let rest = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
+        .unwrap();
+    assert!(
+        rest.width() > rest.height() * 2.0,
+        "resting case is a long bar, got {rest:?}"
+    );
+    let grip = rest.min + vec2(22.0, 28.0);
+    frames.step(app, vec![Event::PointerMoved(grip)]);
+    frames.step(
+        app,
+        vec![Event::PointerButton {
+            pos: grip,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    for _ in 0..24 {
+        frames.step(app, vec![]);
+    }
+    let folded = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
+        .unwrap();
+    assert!(
+        app.dock_held && app.dock_fold > 0.85,
+        "pressing the grip folds the case, held={} fold={}",
+        app.dock_held,
+        app.dock_fold
+    );
+    assert!(
+        folded.width() < rest.width() * 0.45,
+        "case shrinks toward the grip, rest {rest:?} folded {folded:?}"
+    );
+    assert!(
+        (folded.width() - folded.height()).abs() < 24.0,
+        "folded case is a pill on the grip, got {folded:?}"
+    );
+    frames.step(
+        app,
+        vec![Event::PointerButton {
+            pos: grip,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    for _ in 0..40 {
+        frames.step(app, vec![]);
+    }
+    let open = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
+        .unwrap();
+    assert!(
+        app.dock_fold < 0.05,
+        "release opens the case, fold={}",
+        app.dock_fold
+    );
+    assert!(
+        (open.width() - rest.width()).abs() < 12.0,
+        "opened case matches rest width, rest {rest:?} open {open:?}"
+    );
+}
+
+#[test]
 fn dock_turns_onto_the_edge_while_carried_then_springs_home() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Dock slide");
@@ -845,6 +932,7 @@ fn dock_turns_onto_the_edge_while_carried_then_springs_home() {
         dock.width() > dock.height(),
         "resting case is a horizontal bar, got {dock:?}"
     );
+    let rest_w = dock.width();
     let from = dock.min + vec2(30.0, 29.0);
     let to = pos2(860.0, 280.0);
     frames.step(app, vec![Event::PointerMoved(from)]);
@@ -857,42 +945,36 @@ fn dock_turns_onto_the_edge_while_carried_then_springs_home() {
             modifiers: Modifiers::NONE,
         }],
     );
-    // Lift without heading into a side wall: the bar keeps its shape.
+    // Lift without heading into a side wall: the case folds onto the grip.
     let lifted = pos2(from.x, (from.y - 180.0).max(120.0));
     frames.step(app, vec![Event::PointerMoved(lifted)]);
-    frames.step(app, vec![]);
-    let open = frames
+    for _ in 0..20 {
+        frames.step(app, vec![]);
+    }
+    let folded = frames
         .ctx
         .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
         .unwrap();
     assert!(
-        open.width() > open.height(),
-        "lifting the case keeps the bar, got {open:?}"
+        app.dock_fold > 0.8,
+        "held case folds onto the grip, fold={}",
+        app.dock_fold
+    );
+    assert!(
+        folded.width() < rest_w * 0.55,
+        "folded case shrinks toward the grip, rest {rest_w} got {folded:?}"
     );
     let mut turned_with_room = false;
-    let mut horizontal_hit_right = false;
     let steps = 16;
     for i in 1..=steps {
         let t = i as f32 / steps as f32;
         let p = lifted + (to - lifted) * t;
         frames.step(app, vec![Event::PointerMoved(p)]);
         frames.step(app, vec![]);
-        let rect = frames
-            .ctx
-            .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
-            .unwrap();
-        let horizontal = rect.width() > rect.height();
-        if horizontal && rect.right() > frames.size.x - 12.0 {
-            horizontal_hit_right = true;
-        }
-        if !horizontal && p.x < frames.size.x - 100.0 {
+        if app.dock_layout_edge() == DockEdge::Right && p.x < frames.size.x - 100.0 {
             turned_with_room = true;
         }
     }
-    assert!(
-        !horizontal_hit_right,
-        "the long side met the right edge before the case turned"
-    );
     assert!(
         turned_with_room,
         "case should turn while there is still room before the right edge"
@@ -904,8 +986,8 @@ fn dock_turns_onto_the_edge_while_carried_then_springs_home() {
     assert_eq!(app.dock_edge, DockEdge::Bottom);
     assert_eq!(app.dock_layout_edge(), DockEdge::Right);
     assert!(
-        mid.height() > mid.width(),
-        "case turns while the finger is down, got {mid:?}"
+        mid.width() < rest_w * 0.55,
+        "carried case stays folded, got {mid:?}"
     );
     frames.step(
         app,
@@ -950,45 +1032,20 @@ fn dock_turns_onto_the_edge_while_carried_then_springs_home() {
         }],
     );
     let mut turned_above_bottom = false;
-    let mut vertical_hit_bottom = false;
     for i in 1..=16 {
         let t = i as f32 / 16.0;
         let p = grip + (down - grip) * t;
         frames.step(app, vec![Event::PointerMoved(p)]);
         frames.step(app, vec![]);
-        let rect = frames
-            .ctx
-            .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
-            .unwrap();
-        let vertical = rect.height() > rect.width();
-        // A full-height side case already sits on the bottom bound before the
-        // drag. Count a collision only after the hand has moved far enough
-        // that the following paint should be the turned case.
-        let travelled = p.y - grip.y;
-        if vertical && travelled > 70.0 && rect.bottom() > frames.size.y - 12.0 {
-            vertical_hit_bottom = true;
-        }
-        if !vertical && p.y < frames.size.y - 100.0 {
+        if app.dock_layout_edge() == DockEdge::Bottom && p.y < frames.size.y - 100.0 {
             turned_above_bottom = true;
         }
     }
-    assert!(
-        !vertical_hit_bottom,
-        "the long side met the bottom edge before the case turned"
-    );
     assert!(
         turned_above_bottom,
         "case should turn while there is still room before the bottom edge"
     );
     assert_eq!(app.dock_layout_edge(), DockEdge::Bottom);
-    let low = frames
-        .ctx
-        .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
-        .unwrap();
-    assert!(
-        low.width() > low.height(),
-        "case is flat before the bottom edge, got {low:?}"
-    );
     frames.step(
         app,
         vec![Event::PointerButton {
@@ -1311,6 +1368,8 @@ fn notebook_menu_keeps_actions_and_keyboard_dismissal() {
     frames.settle(app);
     assert!(Popup::is_any_open(&frames.ctx));
     let last = frames.text_center("Move to trash");
+    frames.text_center("Stroke eraser");
+    frames.text_center("Area eraser");
     assert!(
         frames.output.as_ref().unwrap().shapes.iter().any(|shape| {
             matches!(&shape.shape, Shape::Text(text) if text.galley.text() == "Move to trash")
@@ -1377,39 +1436,40 @@ fn ink_tin_keeps_color_picking_and_fits_after_resize() {
     let id = fixture.notebook("Ink tin");
     let app = &mut fixture.app;
     app.open_note(id);
-    app.palette_open = true;
     app.tin_open = true;
     let mut frames = Frames::new(app);
     frames.settle(app);
-    for (input, col) in [(0, 2), (1, 6), (2, 9)] {
-        let id = Id::new(("tin-pan", 0, col));
-        let hit = frames.ctx.read_response(id).unwrap().rect;
-        match input {
-            0 => frames.drag(app, hit.center(), hit.center()),
-            1 => {
-                frames.touch(app, TouchPhase::Start, hit.center());
-                frames.touch(app, TouchPhase::End, hit.center());
-            }
-            _ => {
-                frames.ctx.memory_mut(|m| m.request_focus(id));
-                frames.key(app, Key::Enter);
-            }
-        }
-        assert_eq!(app.ink, hsv_to_rgb(col as f32 / 12.0, 0.88, 0.92));
-        assert!(app.tin_open);
-    }
+    let wheel = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("tin-wheel")))
+        .unwrap();
+    let geom = ink_wheel_geom(wheel);
+    let hue_at = geom.hue_pos(0.25);
+    frames.drag(app, hue_at, hue_at);
+    assert!(
+        (app.tin_hue - 0.25).abs() < 0.04,
+        "hue ring sets tin_hue, got {}",
+        app.tin_hue
+    );
+    assert!(app.tin_open);
+    let sv = geom.sv_pos(0.65, 0.8);
+    frames.touch(app, TouchPhase::Start, sv);
+    frames.touch(app, TouchPhase::End, sv);
+    let expect = hsv_to_rgb(app.tin_hue, 0.65, 0.8);
+    assert_eq!(app.ink, expect);
+    assert!(app.tin_open);
     frames.settle(app);
     let tin = frames
         .ctx
         .data(|d| d.get_temp::<Rect>(Id::new("tin-rect")))
         .unwrap();
-    let strip = frames
+    let dock = frames
         .ctx
-        .data(|d| d.get_temp::<Rect>(Id::new("strip-rect")))
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
         .unwrap();
     assert!(
-        !tin.intersects(strip),
-        "advanced colours must not cover the ink strip"
+        !tin.shrink(0.5).intersects(dock),
+        "colour wheel must not cover the tools"
     );
     frames.snapshot("ink-tin");
     frames.size = vec2(900.0, 500.0);
@@ -1421,7 +1481,7 @@ fn ink_tin_keeps_color_picking_and_fits_after_resize() {
     assert!(Rect::from_min_size(Pos2::ZERO, frames.size).contains_rect(tin));
     frames.snapshot("ink-tin-short");
     frames.key(app, Key::Escape);
-    assert!(!app.tin_open && app.palette_open);
+    assert!(!app.tin_open);
     assert!(matches!(app.scene, Scene::Desk));
 }
 
@@ -1430,15 +1490,8 @@ fn ink_fields_use_continuous_meshes() {
     let ctx = Context::default();
     let output = ctx.run(RawInput::default(), |ctx| {
         let painter = ctx.layer_painter(LayerId::background());
-        paint_sv_field(
-            &painter,
-            Rect::from_min_size(Pos2::ZERO, vec2(204.0, 132.0)),
-            0.5,
-        );
-        paint_hue_bar(
-            &painter,
-            Rect::from_min_size(pos2(0.0, 144.0), vec2(204.0, 16.0)),
-        );
+        paint_sv_disk(&painter, pos2(102.0, 102.0), 96.0, 0.5);
+        paint_hue_ring(&painter, pos2(102.0, 102.0), 108.0, 136.0);
     });
     let meshes: Vec<_> = output
         .shapes
@@ -1588,28 +1641,22 @@ fn colored_note_tools_preserve_ink_and_support_mouse_and_touch() {
         );
         assert_eq!(app.note.as_ref().unwrap().paper, paper);
         tool_center(&frames, app.tool_well_fill(Tool::Brush, true));
-        app.palette_open = true;
+        app.tin_open = true;
         frames.settle(app);
         let dock = frames
             .ctx
             .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
             .unwrap();
         assert!(Rect::from_min_size(Pos2::ZERO, size).contains_rect(dock));
-        let strip = frames
+        let tin = frames
             .ctx
-            .data(|d| d.get_temp::<Rect>(Id::new("strip-rect")))
+            .data(|d| d.get_temp::<Rect>(Id::new("tin-rect")))
             .unwrap();
-        assert!(Rect::from_min_size(Pos2::ZERO, size).contains_rect(strip));
-        if touch {
-            assert!(
-                strip.width() <= 60.0,
-                "vertical palette must remain a narrow strip"
-            );
-            assert!(
-                strip.max.x <= dock.min.x,
-                "palette must not cover the tools"
-            );
-        }
+        assert!(Rect::from_min_size(Pos2::ZERO, size).contains_rect(tin));
+        assert!(
+            !tin.shrink(0.5).intersects(dock),
+            "colour wheel must not cover the tools"
+        );
         frames.snapshot(if touch {
             "note-colors-vertical"
         } else {
@@ -1745,10 +1792,10 @@ fn delete_column_height_follows_the_row_count() {
 }
 
 #[test]
-fn delete_picker_lists_objects_and_removes_only_the_checked_ones() {
+fn pages_mode_checks_pages_and_leaves_ink() {
     for touch in [false, true] {
         let mut fixture = Fixture::new();
-        let id = fixture.notebook("Delete picks");
+        let id = fixture.notebook("Delete pages");
         let app = &mut fixture.app;
         app.open_note(id);
         let mut text = TextBox::new(pos2(80.0, 80.0), Color32::BLACK);
@@ -1760,63 +1807,55 @@ fn delete_picker_lists_objects_and_removes_only_the_checked_ones() {
         stroke.tessellate();
         let stroke_id = stroke.id;
         {
-            let page = &mut app.note.as_mut().unwrap().pages[0];
-            page.texts.push(text);
-            page.strokes.push(stroke);
+            let note = app.note.as_mut().unwrap();
+            note.pages[0].texts.push(text);
+            note.pages[0].strokes.push(stroke);
+            note.pages.push(crate::document::Page::at(1, 0));
         }
         let before = serde_json::to_value(&app.note.as_ref().unwrap().pages).unwrap();
         let mut frames = Frames::new(app);
         frames.settle(app);
         app.camera = Camera {
-            pan: vec2(40.0, 40.0),
-            zoom: 1.0,
+            pan: vec2(30.0, 80.0),
+            zoom: 0.4,
             stretch_y: None,
         };
         app.fitted_cell = None;
         app.start_object_delete();
-        // Two frames: the first Area pass only measures. With no rows the
-        // cloth is the header, not the whole column.
         frames.step(app, vec![]);
         frames.step(app, vec![]);
-        assert!(frames
-            .output
-            .as_ref()
-            .unwrap()
-            .shapes
-            .iter()
-            .any(|shape| matches!(&shape.shape, Shape::Text(text) if text.galley.text() == "Tap or drag a zone")));
+        assert!(frames.output.as_ref().unwrap().shapes.iter().any(
+            |shape| matches!(&shape.shape, Shape::Text(text) if text.galley.text() == "Tap a page")
+        ));
         let empty_cloth = delete_column_cloth(&frames);
         assert!(
             empty_cloth.height() < 160.0 && empty_cloth.bottom() < frames.size.y * 0.5,
             "empty delete column should hug the header, got {empty_cloth:?}"
         );
         let canvas = app.canvas_rect;
-        let text_at = app.camera.to_screen(pos2(160.0, 120.0), canvas);
-        let stroke_at = app.camera.to_screen(pos2(470.0, 390.0), canvas);
+        let page_two = app
+            .camera
+            .to_screen(pos2(PAGE_W * 1.5, PAGE_H * 0.5), canvas);
         if touch {
-            frames.touch(app, TouchPhase::Start, text_at);
-            frames.touch(app, TouchPhase::End, text_at);
-            frames.touch(app, TouchPhase::Start, stroke_at);
-            frames.touch(app, TouchPhase::End, stroke_at);
+            frames.touch(app, TouchPhase::Start, page_two);
+            frames.touch(app, TouchPhase::End, page_two);
         } else {
-            frames.drag(app, text_at, text_at);
-            frames.drag(app, stroke_at, stroke_at);
+            frames.drag(app, page_two, page_two);
         }
         let picks = app.object_delete.as_ref().unwrap();
-        assert_eq!(picks.len(), 2);
-        assert!(picks.iter().all(|pick| pick.on));
         assert!(picks
             .iter()
-            .any(|pick| matches!(pick.target, DeleteTarget::Object(sel) if sel.id == text_id)));
-        assert!(picks
-            .iter()
-            .any(|pick| matches!(pick.target, DeleteTarget::Object(sel) if sel.id == stroke_id)));
+            .all(|pick| { matches!(pick.target, DeleteTarget::Page(_, _)) && pick.on }));
+        assert_eq!(picks.len(), 1);
+        assert!(picks.iter().any(|pick| {
+            matches!(pick.target, DeleteTarget::Page(col, row) if col == 1 && row == 0)
+        }));
         frames.step(app, vec![]);
         let filled_cloth = delete_column_cloth(&frames);
         assert!(
-            filled_cloth.height() > empty_cloth.height() + 60.0
+            filled_cloth.height() > empty_cloth.height() + 20.0
                 && filled_cloth.bottom() < frames.size.y - 40.0,
-            "column should fit the two rows, empty {} filled {}",
+            "column should fit the page row, empty {} filled {}",
             empty_cloth.height(),
             filled_cloth.height()
         );
@@ -1826,32 +1865,8 @@ fn delete_picker_lists_objects_and_removes_only_the_checked_ones() {
         } else {
             "delete-picks-mouse"
         });
-        let row = frames.text_center("Stroke");
-        if touch {
-            frames.touch(app, TouchPhase::Start, row);
-            frames.touch(app, TouchPhase::End, row);
-        } else {
-            frames.drag(app, row, row);
-        }
-        frames.settle(app);
-        let picks = app.object_delete.as_ref().unwrap();
-        assert!(
-            !picks
-                .iter()
-                .find(
-                    |pick| matches!(pick.target, DeleteTarget::Object(sel) if sel.id == stroke_id)
-                )
-                .unwrap()
-                .on
-        );
-        assert!(
-            picks
-                .iter()
-                .find(|pick| matches!(pick.target, DeleteTarget::Object(sel) if sel.id == text_id))
-                .unwrap()
-                .on
-        );
         let commit = frames.text_center("Delete (1)");
+        frames.text_center("Page 2");
         if touch {
             frames.touch(app, TouchPhase::Start, commit);
             frames.touch(app, TouchPhase::End, commit);
@@ -1860,23 +1875,33 @@ fn delete_picker_lists_objects_and_removes_only_the_checked_ones() {
         }
         frames.settle(app);
         assert!(app.object_delete.is_none());
-        let page = &app.note.as_ref().unwrap().pages[0];
-        assert!(page.texts.is_empty());
-        assert_eq!(page.strokes.len(), 1);
-        assert_eq!(page.strokes[0].id, stroke_id);
+        let note = app.note.as_ref().unwrap();
+        assert_eq!(note.pages.len(), 1);
+        assert_eq!(note.pages[0].texts[0].id, text_id);
+        assert_eq!(note.pages[0].strokes[0].id, stroke_id);
         assert!(app.undo.undo(app.note.as_mut().unwrap()));
         assert_eq!(
             serde_json::to_value(&app.note.as_ref().unwrap().pages).unwrap(),
             before
         );
 
+        app.camera = Camera {
+            pan: vec2(30.0, 80.0),
+            zoom: 0.4,
+            stretch_y: None,
+        };
+        app.fitted_cell = None;
+        app.need_fit = false;
         app.start_object_delete();
         frames.settle(app);
-        let text_at = app.camera.to_screen(pos2(160.0, 120.0), app.canvas_rect);
-        frames.drag(app, text_at, text_at);
+        let page_two = app
+            .camera
+            .to_screen(pos2(PAGE_W * 1.5, PAGE_H * 0.5), app.canvas_rect);
+        frames.drag(app, page_two, page_two);
         assert_eq!(app.object_delete.as_ref().unwrap().len(), 1);
         frames.key(app, Key::Escape);
         assert!(app.object_delete.is_none());
+        assert_eq!(app.note.as_ref().unwrap().pages.len(), 2);
         assert_eq!(app.note.as_ref().unwrap().pages[0].texts[0].id, text_id);
     }
 }
@@ -1938,19 +1963,13 @@ fn delete_band_checks_a_zone_and_a_page() {
         }
         let picks = app.object_delete.as_ref().unwrap();
         assert!(picks.iter().any(|pick| {
-            matches!(pick.target, DeleteTarget::Object(sel) if sel.id == text_id) && pick.on
-        }));
-        assert!(!picks.iter().any(|pick| {
-            matches!(pick.target, DeleteTarget::Object(sel) if sel.id == stroke_id)
-        }));
-        assert!(picks.iter().any(|pick| {
             matches!(pick.target, DeleteTarget::Page(col, row) if col == 1 && row == 0) && pick.on
         }));
         assert!(picks.iter().any(|pick| {
             matches!(pick.target, DeleteTarget::Page(col, row) if col == 0 && row == 0) && pick.on
         }));
         frames.settle(app);
-        let commit = frames.text_center("Delete (2)");
+        let commit = frames.text_center("Delete (1)");
         frames.text_center("Page 2");
         if touch {
             frames.touch(app, TouchPhase::Start, commit);
@@ -1964,8 +1983,7 @@ fn delete_band_checks_a_zone_and_a_page() {
         assert_eq!(note.pages.len(), 1);
         assert!(note.unit_occupied(0, 0));
         assert!(!note.unit_occupied(1, 0));
-        assert!(note.pages[0].texts.is_empty());
-        assert_eq!(note.pages[0].strokes.len(), 1);
+        assert_eq!(note.pages[0].texts[0].id, text_id);
         assert_eq!(note.pages[0].strokes[0].id, stroke_id);
         assert!(app.undo.undo(app.note.as_mut().unwrap()));
         assert_eq!(

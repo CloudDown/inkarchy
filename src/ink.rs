@@ -82,7 +82,7 @@ impl InkPoint {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct InkStroke {
     pub id: Uuid,
     pub nib: Nib,
@@ -100,7 +100,7 @@ impl InkStroke {
             nib,
             color: color.to_array(),
             width,
-            points: Vec::new(),
+            points: Vec::with_capacity(64),
             mesh: None,
         }
     }
@@ -170,6 +170,12 @@ impl InkStroke {
 
     pub fn hits(&self, pos: Pos2, extra: f32) -> bool {
         let r = self.width * 0.55 + extra;
+        let Some((min, max)) = self.bbox() else {
+            return false;
+        };
+        if pos.x + r < min.x || pos.y + r < min.y || pos.x - r > max.x || pos.y - r > max.y {
+            return false;
+        }
         let r2 = r * r;
         for w in self.points.windows(2) {
             if dist2_seg(pos, w[0].pos(), w[1].pos()) <= r2 {
@@ -191,12 +197,28 @@ impl InkStroke {
     }
 }
 
-pub fn map_mesh(src: &Mesh, map: impl Fn(Pos2) -> Pos2) -> Mesh {
-    let mut m = src.clone();
-    for v in &mut m.vertices {
-        v.pos = map(v.pos);
+impl Clone for InkStroke {
+    /// Points travel with the stroke. The ribbon mesh is a cache and is rebuilt on paint.
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            nib: self.nib,
+            color: self.color,
+            width: self.width,
+            points: self.points.clone(),
+            mesh: None,
+        }
     }
-    m
+}
+
+/// Paper-space ribbon into screen space: `x' = ox + x * sx`, `y' = oy + y * sy`.
+pub fn map_mesh(src: &Mesh, ox: f32, oy: f32, sx: f32, sy: f32) -> Mesh {
+    let mut mesh = src.clone();
+    for v in &mut mesh.vertices {
+        v.pos.x = ox + v.pos.x * sx;
+        v.pos.y = oy + v.pos.y * sy;
+    }
+    mesh
 }
 
 pub fn ribbon_mesh(points: &[InkPoint], width: f32, nib: Nib, color: Color32) -> Mesh {
@@ -215,8 +237,13 @@ pub fn ribbon_mesh(points: &[InkPoint], width: f32, nib: Nib, color: Color32) ->
         return mesh;
     }
 
-    let mut left = Vec::with_capacity(points.len());
-    let mut right = Vec::with_capacity(points.len());
+    let n = points.len();
+    // Two end discs (13 rim verts) plus a shared-vertex strip: 2 verts per sample.
+    mesh.vertices.reserve(2 * 14 + 2 * n);
+    mesh.indices.reserve(2 * 36 + (n - 1) * 6);
+
+    let mut left = Vec::with_capacity(n);
+    let mut right = Vec::with_capacity(n);
     for (i, pt) in points.iter().enumerate() {
         let tan = if i == 0 {
             points[1].pos() - points[0].pos()
@@ -262,9 +289,25 @@ pub fn ribbon_mesh(points: &[InkPoint], width: f32, nib: Nib, color: Color32) ->
     );
     add_disc(&mut mesh, last.pos(), dist(last.pos(), *left_last), color);
 
-    for i in 0..points.len() - 1 {
-        add_tri(&mut mesh, left[i], right[i], left[i + 1], color);
-        add_tri(&mut mesh, right[i], right[i + 1], left[i + 1], color);
+    let body = mesh.vertices.len() as u32;
+    for i in 0..n {
+        mesh.vertices.push(Vertex {
+            pos: left[i],
+            uv: Pos2::ZERO,
+            color,
+        });
+        mesh.vertices.push(Vertex {
+            pos: right[i],
+            uv: Pos2::ZERO,
+            color,
+        });
+    }
+    for i in 0..n - 1 {
+        let l0 = body + (i as u32) * 2;
+        let r0 = l0 + 1;
+        let l1 = l0 + 2;
+        let r1 = l0 + 3;
+        mesh.indices.extend_from_slice(&[l0, r0, l1, r0, r1, l1]);
     }
     mesh
 }
@@ -299,18 +342,6 @@ pub fn ribbon_outline(points: &[InkPoint], width: f32, nib: Nib) -> Vec<Pos2> {
     }
     left.extend(right.into_iter().rev());
     left
-}
-
-fn add_tri(mesh: &mut Mesh, a: Pos2, b: Pos2, c: Pos2, color: Color32) {
-    let i = mesh.vertices.len() as u32;
-    for p in [a, b, c] {
-        mesh.vertices.push(Vertex {
-            pos: p,
-            uv: Pos2::ZERO,
-            color,
-        });
-    }
-    mesh.indices.extend_from_slice(&[i, i + 1, i + 2]);
 }
 
 fn add_disc(mesh: &mut Mesh, c: Pos2, r: f32, color: Color32) {
@@ -945,6 +976,52 @@ mod tests {
         let mesh = ribbon_mesh(&points, 3.0, Nib::Fineliner, Color32::BLACK);
         assert!(!mesh.vertices.is_empty());
         assert!(!mesh.indices.is_empty());
+        assert!(mesh.is_valid());
+        // Two discs plus one shared quad, not six fresh vertices per triangle.
+        assert_eq!(mesh.vertices.len(), 2 * 14 + 4);
+        assert_eq!(mesh.indices.len(), 2 * 36 + 6);
+        let left = mesh.vertices.iter().any(|v| (v.pos.y - 1.5).abs() < 0.01);
+        let right = mesh.vertices.iter().any(|v| (v.pos.y + 1.5).abs() < 0.01);
+        assert!(left && right);
+    }
+
+    #[test]
+    fn clone_drops_the_ribbon_cache() {
+        let mut stroke = InkStroke::new(Nib::Fineliner, Color32::BLACK, 2.0);
+        stroke.push(InkPoint::new(pos2(0.0, 0.0), 1.0));
+        stroke.push(InkPoint::new(pos2(30.0, 4.0), 1.0));
+        let _ = stroke.tessellate();
+        assert!(stroke.mesh.is_some());
+        let copy = stroke.clone();
+        assert!(copy.mesh.is_none());
+        assert_eq!(copy.points.len(), stroke.points.len());
+        assert!(stroke.mesh.is_some());
+    }
+
+    #[test]
+    fn map_mesh_is_an_affine_scale_and_shift() {
+        let points = [
+            InkPoint::new(pos2(0.0, 0.0), 1.0),
+            InkPoint::new(pos2(10.0, 0.0), 1.0),
+        ];
+        let src = ribbon_mesh(&points, 2.0, Nib::Fineliner, Color32::BLACK);
+        let mapped = map_mesh(&src, 5.0, -3.0, 2.0, 4.0);
+        assert_eq!(mapped.indices, src.indices);
+        assert_eq!(mapped.vertices.len(), src.vertices.len());
+        for (before, after) in src.vertices.iter().zip(&mapped.vertices) {
+            assert!((after.pos.x - (5.0 + before.pos.x * 2.0)).abs() < 1e-4);
+            assert!((after.pos.y - (-3.0 + before.pos.y * 4.0)).abs() < 1e-4);
+            assert_eq!(after.color, before.color);
+        }
+    }
+
+    #[test]
+    fn hits_rejects_points_outside_the_stroke_box() {
+        let mut stroke = InkStroke::new(Nib::Fineliner, Color32::BLACK, 2.0);
+        stroke.push(InkPoint::new(pos2(0.0, 0.0), 1.0));
+        stroke.push(InkPoint::new(pos2(40.0, 0.0), 1.0));
+        assert!(stroke.hits(pos2(20.0, 0.5), 1.0));
+        assert!(!stroke.hits(pos2(20.0, 80.0), 1.0));
     }
 
     #[test]
