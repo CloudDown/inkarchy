@@ -203,10 +203,7 @@ fn pdf_page_paints_its_raster() {
                 }
                 format!("mesh {w}x{h} dark={dark}")
             }
-            Shape::Rect(rect) => format!(
-                "rect fill {:?} stroke {}",
-                rect.fill, rect.stroke.width
-            ),
+            Shape::Rect(rect) => format!("rect fill {:?} stroke {}", rect.fill, rect.stroke.width),
             other => format!("{other:?}").chars().take(40).collect(),
         };
         eprintln!(
