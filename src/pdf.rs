@@ -64,14 +64,19 @@ pub fn raster_scale(
     snap_scale(sx.max(sy))
 }
 
+/// First paint: a 0.25× bitmap, then the sharp pass.
+pub fn preview_scale(_wanted: f32) -> f32 {
+    0.25
+}
+
 fn snap_scale(want: f32) -> f32 {
-    let want = want.clamp(0.25, 8.0);
-    const STEPS: [f32; 9] = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 8.0];
+    let want = want.clamp(0.25, 4.0);
+    const STEPS: [f32; 8] = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
     STEPS
         .iter()
         .copied()
         .find(|step| *step + 0.08 >= want)
-        .unwrap_or(8.0)
+        .unwrap_or(4.0)
 }
 
 /// One PDF page to raster off the UI thread.
@@ -116,40 +121,69 @@ impl RasterHub {
 
 fn raster_loop(rx: Receiver<RasterJob>, tx: Sender<(String, Result<Rendered, String>)>) {
     let mut cached: Option<(PathBuf, Pdf)> = None;
-    while let Ok(first) = rx.recv() {
-        let mut latest: HashMap<(PathBuf, u32), RasterJob> = HashMap::new();
-        latest.insert((first.path.clone(), first.page), first);
-        while let Ok(job) = rx.try_recv() {
-            latest.insert((job.path.clone(), job.page), job);
+    let mut queued: HashMap<(PathBuf, u32), RasterJob> = HashMap::new();
+    loop {
+        if queued.is_empty() {
+            match rx.recv() {
+                Ok(job) => {
+                    queued.insert((job.path.clone(), job.page), job);
+                }
+                Err(_) => return,
+            }
         }
-        for job in latest.into_values() {
-            eprintln!("pdf worker page {} scale {}", job.page, job.scale);
-            if cached.as_ref().is_none_or(|(path, _)| path != &job.path) {
-                cached = match std::fs::read(&job.path) {
-                    Ok(bytes) => match open_pdf(bytes) {
-                        Ok(pdf) => Some((job.path.clone(), pdf)),
-                        Err(err) => {
-                            if tx.send((job.key, Err(err))).is_err() {
-                                return;
-                            }
-                            continue;
-                        }
-                    },
+        while let Ok(job) = rx.try_recv() {
+            queued.insert((job.path.clone(), job.page), job);
+        }
+        let next = queued
+            .iter()
+            .min_by(|a, b| {
+                a.1.page
+                    .cmp(&b.1.page)
+                    .then(a.1.scale.total_cmp(&b.1.scale))
+            })
+            .map(|(key, _)| key.clone());
+        let Some(key) = next else {
+            continue;
+        };
+        let Some(job) = queued.remove(&key) else {
+            continue;
+        };
+        if let Some(hit) = load_raster_cache(&job.path, job.page, job.scale) {
+            if tx.send((job.key, Ok(hit))).is_err() {
+                return;
+            }
+            continue;
+        }
+        if cached.as_ref().is_none_or(|(path, _)| path != &job.path) {
+            cached = match std::fs::read(&job.path) {
+                Ok(bytes) => match open_pdf(bytes) {
+                    Ok(pdf) => Some((job.path.clone(), pdf)),
                     Err(err) => {
-                        if tx.send((job.key, Err(err.to_string()))).is_err() {
+                        if tx.send((job.key, Err(err))).is_err() {
                             return;
                         }
                         continue;
                     }
-                };
+                },
+                Err(err) => {
+                    if tx.send((job.key, Err(err.to_string()))).is_err() {
+                        return;
+                    }
+                    continue;
+                }
+            };
+        }
+        let result = cached
+            .as_ref()
+            .map(|(_, pdf)| render_opened(pdf, job.page, job.scale))
+            .unwrap_or_else(|| Err("This PDF could not be read.".into()));
+        if let Ok(rendered) = &result {
+            if rendered.scale <= 0.26 {
+                save_raster_cache(&job.path, job.page, rendered);
             }
-            let result = cached
-                .as_ref()
-                .map(|(_, pdf)| render_opened(pdf, job.page, job.scale))
-                .unwrap_or_else(|| Err("This PDF could not be read.".into()));
-            if tx.send((job.key, result)).is_err() {
-                return;
-            }
+        }
+        if tx.send((job.key, result)).is_err() {
+            return;
         }
     }
 }
@@ -212,9 +246,9 @@ fn render_opened(pdf: &Pdf, page: u32, scale: f32) -> Result<Rendered, String> {
 }
 
 pub fn clamp_scale(pt_w: f32, pt_h: f32, scale: f32) -> f32 {
-    let scale = scale.clamp(0.25, 8.0);
+    let scale = scale.clamp(0.25, 4.0);
     let long = pt_w.max(pt_h).max(1.0) * scale;
-    const MAX: f32 = 4096.0;
+    const MAX: f32 = 2048.0;
     if long > MAX {
         (scale * (MAX / long)).max(0.25)
     } else {
@@ -222,9 +256,63 @@ pub fn clamp_scale(pt_w: f32, pt_h: f32, scale: f32) -> f32 {
     }
 }
 
+fn raster_cache_path(pdf: &Path, page: u32, scale: f32) -> PathBuf {
+    let cents = (scale * 100.0).round() as u32;
+    pdf.parent()
+        .unwrap_or(pdf)
+        .join("raster")
+        .join(format!("p{page}-{cents}.png"))
+}
+
+pub fn raster_cache_fresh(pdf: &Path, page: u32, scale: f32) -> bool {
+    let cache = raster_cache_path(pdf, page, scale);
+    let Ok(pdf_meta) = std::fs::metadata(pdf) else {
+        return false;
+    };
+    let Ok(cache_meta) = std::fs::metadata(&cache) else {
+        return false;
+    };
+    match (cache_meta.modified(), pdf_meta.modified()) {
+        (Ok(cached), Ok(src)) => cached >= src,
+        _ => true,
+    }
+}
+
+pub fn load_raster_cache(pdf: &Path, page: u32, scale: f32) -> Option<Rendered> {
+    if !raster_cache_fresh(pdf, page, scale) {
+        return None;
+    }
+    let img = image::open(raster_cache_path(pdf, page, scale))
+        .ok()?
+        .into_rgba8();
+    let width = img.width();
+    let height = img.height();
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(Rendered {
+        width,
+        height,
+        rgba: img.into_raw(),
+        scale,
+    })
+}
+
+fn save_raster_cache(pdf: &Path, page: u32, rendered: &Rendered) {
+    let path = raster_cache_path(pdf, page, rendered.scale);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = image::save_buffer(
+        &path,
+        &rendered.rgba,
+        rendered.width,
+        rendered.height,
+        image::ExtendedColorType::Rgba8,
+    );
+}
+
 /// Keep the current raster until the new scale is clearly sharper.
-/// Snap 4 → 8 on an A4 page clamps back to ~4.9; that jump is not worth
-/// dropping the page (the 96 MB cache then flashes empty paper).
 pub fn raster_is_sharp_enough(have: f32, wanted: f32) -> bool {
     wanted <= 0.0 || have + 0.05 >= wanted || (have > 0.0 && wanted <= have * 1.3)
 }
@@ -332,6 +420,9 @@ fn open_pdf(bytes: Vec<u8>) -> Result<Pdf, String> {
 }
 
 fn straight_rgba(src: &[u8]) -> Vec<u8> {
+    if src.chunks_exact(4).all(|px| px[3] == 255) {
+        return src.to_vec();
+    }
     let mut out = Vec::with_capacity(src.len());
     for px in src.chunks_exact(4) {
         let a = px[3];
@@ -495,20 +586,13 @@ mod tests {
     }
 
     #[test]
-    fn a_4x_raster_covers_the_clamped_8x_step() {
-        // Around 190% on a fitted A4, snap jumps 4 → 8, then the 4096 cap
-        // brings 8 back to ~4.9. Keep the 4x page so the cache does not flash
-        // empty paper.
+    fn preview_is_capped_and_full_scale_stays_at_four() {
+        assert_eq!(preview_scale(4.0), 0.25);
+        assert_eq!(preview_scale(0.25), 0.25);
+        assert_eq!(raster_scale(4000.0, 4000.0, 100.0, 100.0, 2.0), 4.0);
         let a4 = clamp_scale(595.0, 842.0, 8.0);
-        assert!(
-            raster_is_sharp_enough(4.0, a4),
-            "4x should cover clamped 8x ({a4})"
-        );
-        let letter = clamp_scale(612.0, 792.0, 8.0);
-        assert!(
-            raster_is_sharp_enough(4.0, letter),
-            "4x should cover clamped 8x letter ({letter})"
-        );
+        assert!(a4 > 2.0 && a4 <= 2.5, "a4 clamped to {a4}");
+        assert!((clamp_scale(595.0, 842.0, 1.0) - 1.0).abs() < 0.001);
         assert!(raster_is_sharp_enough(3.0, 3.0));
         assert!(raster_is_sharp_enough(2.0, 2.04));
         assert!(!raster_is_sharp_enough(2.0, 3.0));
@@ -517,70 +601,33 @@ mod tests {
     }
 
     #[test]
-    fn user_pdf_raster_is_not_blank_paper() {
-        let path = std::path::Path::new(
-            "/home/rain/.local/share/inkarchy/notes/05f522d9-e551-4b1f-8022-a32f09eed561/source.pdf",
-        );
-        if !path.is_file() {
-            return;
-        }
-        let bytes = std::fs::read(path).unwrap();
-        let specs = inspect_pdf(&bytes).expect("inspect user pdf");
-        eprintln!("pages={} first={:?}", specs.len(), specs.first());
-        let rendered = render_pdf_bytes(&bytes, 0, 1.0).expect("render user pdf");
-        for (label, path) in [
-            (
-                "chimie",
-                "/home/rain/.local/share/inkarchy/notes/05f522d9-e551-4b1f-8022-a32f09eed561/source.pdf",
-            ),
-            (
-                "chimie15",
-                "/home/rain/.local/share/inkarchy/notes/acfb46e5-b20d-4e70-a734-acb1aba2cddc/source.pdf",
-            ),
-            (
-                "quiz",
-                "/home/rain/.local/share/inkarchy/notes/245f7593-c0e9-4198-bfdc-0fae5cd70548/source.pdf",
-            ),
-        ] {
-            let bytes = std::fs::read(path).unwrap();
-            let specs = inspect_pdf(&bytes).unwrap();
-            eprintln!("{label} pages {}", specs.len());
-            for i in 0..specs.len().min(2) {
-                let t = std::time::Instant::now();
-                match render_pdf_bytes(&bytes, i as u32, 1.0) {
-                    Ok(rendered) => {
-                        let mut ink = 0usize;
-                        for px in rendered.rgba.chunks_exact(4) {
-                            if px[3] > 16 && (px[0] < 245 || px[1] < 245 || px[2] < 245) {
-                                ink += 1;
-                            }
-                        }
-                        eprintln!(
-                            "  page {i} {}x{} ink {ink} {:?}",
-                            rendered.width,
-                            rendered.height,
-                            t.elapsed()
-                        );
-                    }
-                    Err(err) => eprintln!("  page {i} ERR {err} {:?}", t.elapsed()),
-                }
-            }
-        }
-        let mut ink = 0usize;
-        let mut transparent = 0usize;
-        for px in rendered.rgba.chunks_exact(4) {
-            if px[3] < 16 {
-                transparent += 1;
-            } else if px[0] < 245 || px[1] < 245 || px[2] < 245 {
-                ink += 1;
-            }
-        }
-        let total = rendered.width as usize * rendered.height as usize;
-        eprintln!(
-            "raster {}x{} ink={ink} transparent={transparent} total={total}",
-            rendered.width, rendered.height
-        );
-        assert!(ink > total / 200, "pdf page looks blank");
+    fn raster_cache_roundtrip_skips_hayro() {
+        let dir = std::env::temp_dir().join(format!(
+            "inkarchy-pdf-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("talk.pdf");
+        let bytes = marked_pdf(&[MarkedPage {
+            width: 80.0,
+            height: 120.0,
+            rotate: 0,
+            marker: "C",
+        }]);
+        std::fs::write(&path, bytes).unwrap();
+        let rendered = render_pdf_file(&path, 0, 0.25).unwrap();
+        save_raster_cache(&path, 0, &rendered);
+        assert!(raster_cache_fresh(&path, 0, 0.25));
+        let hit = load_raster_cache(&path, 0, 0.25).expect("cache");
+        assert_eq!(hit.width, rendered.width);
+        assert_eq!(hit.height, rendered.height);
+        assert_eq!(hit.rgba, rendered.rgba);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -630,6 +677,28 @@ mod tests {
         assert_eq!(key, "p1");
         let page = rendered.expect("page 2");
         assert!(page.height >= page.width);
+
+        assert!(hub.request(RasterJob {
+            key: "p0".into(),
+            path: path.clone(),
+            page: 0,
+            scale: 1.0,
+        }));
+        assert!(hub.request(RasterJob {
+            key: "p1b".into(),
+            path,
+            page: 1,
+            scale: 1.0,
+        }));
+        let mut first = None;
+        for _ in 0..200 {
+            if let Some(item) = hub.take_ready().into_iter().next() {
+                first = Some(item.0);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(first.as_deref(), Some("p0"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

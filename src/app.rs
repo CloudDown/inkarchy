@@ -618,6 +618,51 @@ impl InkarchyApp {
             .unwrap_or(0.0)
     }
 
+    fn note_has_pdf(&self) -> bool {
+        self.note.as_ref().is_some_and(|note| {
+            note.pages.iter().any(|page| {
+                page.background
+                    .as_ref()
+                    .is_some_and(|bg| bg.pdf_page.is_some())
+            })
+        })
+    }
+
+    fn kick_pdf_preview(&mut self) {
+        let (key, path, page) = {
+            let Some(note) = self.note.as_ref() else {
+                return;
+            };
+            let Some(bg) = note.pages.first().and_then(|p| p.background.as_ref()) else {
+                return;
+            };
+            let Some(page) = bg.pdf_page else {
+                return;
+            };
+            let path = self.lib.note_dir(note.id).join(&bg.file);
+            let key = format!("{}:{}:{page}", note.id, bg.file);
+            (key, path, page)
+        };
+        let scale = crate::pdf::preview_scale(4.0);
+        if crate::pdf::raster_cache_fresh(&path, page, scale) {
+            return;
+        }
+        if self.bg_pending.contains(&key) || self.bg_failed.contains(&key) {
+            return;
+        }
+        let hub = self
+            .pdf_raster
+            .get_or_insert_with(crate::pdf::RasterHub::new);
+        if hub.request(crate::pdf::RasterJob {
+            key: key.clone(),
+            path,
+            page,
+            scale,
+        }) {
+            self.bg_pending.insert(key);
+        }
+    }
+
     fn origin_of(&self, i: usize) -> Vec2 {
         let cells = self.page_cells();
         let (col, row) = cells.get(i).copied().unwrap_or((0, 0));
@@ -739,12 +784,14 @@ impl InkarchyApp {
             self.clear_shape_hold();
             self.lasso.clear();
             self.editing_text = None;
+            self.camera = Camera::default();
             self.need_fit = false;
             self.land_page = Some(0);
             self.fitted_cell = None;
             self.canvas_rect = Rect::ZERO;
             self.textures.clear();
             self.clear_backgrounds();
+            self.kick_pdf_preview();
             self.tab_held = false;
             self.pdf_lines.clear();
             self.sticky_drag = None;
@@ -6598,9 +6645,16 @@ impl InkarchyApp {
                 .note
                 .as_ref()
                 .map_or(0, |n| n.pages.len().saturating_sub(1));
-            self.camera
-                .show_writing(rect, self.origin_of(page.min(last)), pw, ph);
-            self.fitted_cell = None;
+            let page = page.min(last);
+            let origin = self.origin_of(page);
+            if self.note_has_pdf() {
+                // Cover-fit page 0 and keep it fitted while the dock settles.
+                self.camera.fit_page(rect, origin, pw, ph);
+                self.fitted_cell = self.page_cells().get(page).copied();
+            } else {
+                self.camera.show_writing(rect, origin, pw, ph);
+                self.fitted_cell = None;
+            }
             self.need_fit = false;
         } else if self.need_fit {
             let page = self.page_in_view(reference);
@@ -9376,14 +9430,9 @@ impl InkarchyApp {
             self.bg_pending.remove(&key);
             match result {
                 Ok(rendered) => {
-                    eprintln!(
-                        "pdf raster ok {key} {}x{} scale {}",
-                        rendered.width, rendered.height, rendered.scale
-                    );
                     self.store_background(ctx, key, rendered);
                 }
-                Err(err) => {
-                    eprintln!("pdf raster err {key}: {err}");
+                Err(_) => {
                     self.bg_failed.insert(key);
                 }
             }
@@ -9487,24 +9536,30 @@ impl InkarchyApp {
         }
         let path = self.lib.note_dir(note_id).join(&bg.file);
         if let Some(page) = bg.pdf_page {
+            let preview = crate::pdf::preview_scale(wanted);
+            let mut shown = cached;
+            if shown.is_none() {
+                if let Some(hit) = crate::pdf::load_raster_cache(&path, page, preview) {
+                    shown = self.store_background(ctx, key.clone(), hit);
+                }
+            }
+            let have = self.bg_tex_scale.get(&key).copied().unwrap_or(0.0);
+            if shown.is_some() && crate::pdf::raster_is_sharp_enough(have, wanted) {
+                return shown;
+            }
+            let scale = if shown.is_none() { preview } else { wanted };
             let hub = self
                 .pdf_raster
                 .get_or_insert_with(crate::pdf::RasterHub::new);
-            let sent = hub.request(crate::pdf::RasterJob {
+            if hub.request(crate::pdf::RasterJob {
                 key: key.clone(),
-                path: path.clone(),
+                path,
                 page,
-                scale: wanted,
-            });
-            eprintln!(
-                "pdf request sent={sent} page={page} scale={wanted} path={} exists={}",
-                path.display(),
-                path.exists()
-            );
-            if sent {
+                scale,
+            }) {
                 self.bg_pending.insert(key);
             }
-            return cached;
+            return shown;
         }
         let rendered = image::open(&path).ok().and_then(|img| {
             let img = img.into_rgba8();

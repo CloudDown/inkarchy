@@ -162,63 +162,6 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn pdf_page_paints_its_raster() {
-    let src = std::path::Path::new(
-        "/home/rain/.local/share/inkarchy/notes/05f522d9-e551-4b1f-8022-a32f09eed561/source.pdf",
-    );
-    if !src.is_file() {
-        return;
-    }
-    let bytes = std::fs::read(src).unwrap();
-    let mut fixture = Fixture::new();
-    let note = crate::import::import_new_note(&mut fixture.app.lib, src).expect("import");
-    let id = note.id;
-    assert!(note.pages.iter().any(|p| p.background.is_some()));
-    fixture.app.open_note(id);
-    let mut frames = Frames::new(&fixture.app);
-    for _ in 0..200 {
-        frames.step(&mut fixture.app, vec![]);
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    let shapes = &frames.output.as_ref().unwrap().shapes;
-    let mut big_dark = 0;
-    for (i, shape) in shapes.iter().enumerate() {
-        let bounds = shape.shape.visual_bounding_rect();
-        if bounds.width() < 400.0 || bounds.height() < 400.0 {
-            continue;
-        }
-        let kind = match &shape.shape {
-            Shape::Mesh(mesh) => {
-                let image = frames.textures.get(&mesh.texture_id);
-                let (w, h, dark) = image
-                    .map(|image| {
-                        let dark = image.pixels.iter().any(|px| {
-                            px.a() > 16 && (px.r() < 240 || px.g() < 240 || px.b() < 240)
-                        });
-                        (image.width(), image.height(), dark)
-                    })
-                    .unwrap_or((0, 0, false));
-                if dark && w > 400 {
-                    big_dark += 1;
-                }
-                format!("mesh {w}x{h} dark={dark}")
-            }
-            Shape::Rect(rect) => format!("rect fill {:?} stroke {}", rect.fill, rect.stroke.width),
-            other => format!("{other:?}").chars().take(40).collect(),
-        };
-        eprintln!(
-            "{i:03} {kind} {:.0}x{:.0} @ {:.0},{:.0}",
-            bounds.width(),
-            bounds.height(),
-            bounds.min.x,
-            bounds.min.y
-        );
-    }
-    let _ = bytes.len();
-    assert!(big_dark > 0, "PDF raster was not painted on the page");
-}
-
-#[test]
 fn many_pdf_pages_do_not_block_the_first_frames() {
     let mut fixture = Fixture::new();
     let pages: Vec<_> = (0..40)
@@ -250,6 +193,7 @@ fn many_pdf_pages_do_not_block_the_first_frames() {
     std::fs::create_dir_all(dir.join("media")).unwrap();
     std::fs::write(dir.join("source.pdf"), bytes).unwrap();
     fixture.app.open_note(id);
+    assert_eq!(fixture.app.land_page, Some(0));
     let started = std::time::Instant::now();
     let mut frames = Frames::new(&fixture.app);
     frames.settle(&mut fixture.app);
@@ -259,6 +203,13 @@ fn many_pdf_pages_do_not_block_the_first_frames() {
         "opening 40 PDF pages blocked the UI for {elapsed:?}"
     );
     assert!(matches!(fixture.app.scene, Scene::Desk));
+    assert_eq!(fixture.app.land_page, None);
+    assert_eq!(fixture.app.fitted_cell, Some((0, 0)));
+    let (pw, ph) = fixture.app.note.as_ref().unwrap().page_size();
+    let origin = fixture.app.origin_of(0);
+    let mut fitted = Camera::default();
+    fitted.fit_page(fixture.app.canvas_rect, origin, pw, ph);
+    assert!((fixture.app.camera.zoom - fitted.zoom).abs() < 0.001);
 }
 
 struct Frames {
