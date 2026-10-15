@@ -1,12 +1,15 @@
-//! PDF pages, rendered with [hayro](https://crates.io/crates/hayro).
+//! PDF pages for the lectern.
 //!
-//! hayro is pure Rust and is linked into the binary. Inkarchy does not need
-//! Poppler, MuPDF, or PDFium on the system.
+//! On-screen rasters prefer Poppler (`pdftoppm`) when it is on PATH — fast and
+//! light. [hayro](https://crates.io/crates/hayro) stays linked as the fallback
+//! so Inkarchy still runs without Poppler. Zoom past the display scale stretches
+//! the texture on the GPU; the PDF engine is not run again.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 
 use hayro::hayro_interpret::InterpreterSettings;
@@ -50,6 +53,9 @@ pub fn render_scale(zoom: f32, pixels_per_point: f32) -> f32 {
     snap_scale(zoom.max(0.02) * pixels_per_point.max(0.5) * PAPER_PER_PT)
 }
 
+/// Hard cap for on-screen rasters (≈108 dpi). Further zoom is GPU stretch.
+pub const DISPLAY_SCALE_MAX: f32 = 1.5;
+
 /// Scale from the on-screen rectangle. Tiny sheets still get a thumbnail.
 pub fn raster_scale(
     screen_w: f32,
@@ -61,22 +67,27 @@ pub fn raster_scale(
     let ppp = pixels_per_point.max(0.5);
     let sx = (screen_w.max(1.0) * ppp) / src_w_pt.max(1.0);
     let sy = (screen_h.max(1.0) * ppp) / src_h_pt.max(1.0);
-    snap_scale(sx.max(sy))
+    display_scale(sx.max(sy))
 }
 
-/// First paint: a 0.25× bitmap, then the sharp pass.
+/// On-screen target: snapped and capped so zoom does not re-run the PDF engine.
+pub fn display_scale(wanted: f32) -> f32 {
+    snap_scale(wanted.min(DISPLAY_SCALE_MAX))
+}
+
+/// Cheap first paint when only hayro is available.
 pub fn preview_scale(_wanted: f32) -> f32 {
     0.25
 }
 
 fn snap_scale(want: f32) -> f32 {
-    let want = want.clamp(0.25, 4.0);
-    const STEPS: [f32; 8] = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
+    let want = want.clamp(0.25, DISPLAY_SCALE_MAX);
+    const STEPS: [f32; 5] = [0.25, 0.5, 0.75, 1.0, 1.5];
     STEPS
         .iter()
         .copied()
         .find(|step| *step + 0.08 >= want)
-        .unwrap_or(4.0)
+        .unwrap_or(DISPLAY_SCALE_MAX)
 }
 
 /// One PDF page to raster off the UI thread.
@@ -154,38 +165,108 @@ fn raster_loop(rx: Receiver<RasterJob>, tx: Sender<(String, Result<Rendered, Str
             }
             continue;
         }
-        if cached.as_ref().is_none_or(|(path, _)| path != &job.path) {
-            cached = match std::fs::read(&job.path) {
-                Ok(bytes) => match open_pdf(bytes) {
-                    Ok(pdf) => Some((job.path.clone(), pdf)),
-                    Err(err) => {
-                        if tx.send((job.key, Err(err))).is_err() {
-                            return;
-                        }
-                        continue;
-                    }
-                },
-                Err(err) => {
-                    if tx.send((job.key, Err(err.to_string()))).is_err() {
-                        return;
-                    }
-                    continue;
-                }
-            };
-        }
-        let result = cached
-            .as_ref()
-            .map(|(_, pdf)| render_opened(pdf, job.page, job.scale))
-            .unwrap_or_else(|| Err("This PDF could not be read.".into()));
+        let result = render_screen_page(&job.path, job.page, job.scale, &mut cached);
         if let Ok(rendered) = &result {
-            if rendered.scale <= 0.26 {
-                save_raster_cache(&job.path, job.page, rendered);
-            }
+            save_raster_cache(&job.path, job.page, rendered);
         }
         if tx.send((job.key, result)).is_err() {
             return;
         }
     }
+}
+
+fn render_screen_page(
+    path: &Path,
+    page: u32,
+    scale: f32,
+    cached: &mut Option<(PathBuf, Pdf)>,
+) -> Result<Rendered, String> {
+    if let Some(rendered) = render_poppler(path, page, scale) {
+        return Ok(rendered);
+    }
+    if cached.as_ref().is_none_or(|(p, _)| p != path) {
+        *cached = match std::fs::read(path) {
+            Ok(bytes) => match open_pdf(bytes) {
+                Ok(pdf) => Some((path.to_path_buf(), pdf)),
+                Err(err) => return Err(err),
+            },
+            Err(err) => return Err(err.to_string()),
+        };
+    }
+    cached
+        .as_ref()
+        .map(|(_, pdf)| render_opened(pdf, page, scale))
+        .unwrap_or_else(|| Err("This PDF could not be read.".into()))
+}
+
+pub fn poppler_available() -> bool {
+    static YES: OnceLock<bool> = OnceLock::new();
+    *YES.get_or_init(|| {
+        Command::new("pdftoppm")
+            .arg("-v")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    })
+}
+
+fn render_poppler(path: &Path, page: u32, scale: f32) -> Option<Rendered> {
+    if !poppler_available() {
+        return None;
+    }
+    let dpi = ((scale * 72.0).round() as i32).clamp(18, 144);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = std::env::temp_dir().join(format!(
+        "inkarchy-ppm-{}-{}-{}",
+        std::process::id(),
+        page,
+        stamp
+    ));
+    std::fs::create_dir_all(&tmp).ok()?;
+    let prefix = tmp.join("page");
+    let page_1 = (page + 1).to_string();
+    let ok = Command::new("pdftoppm")
+        .args(["-png", "-f", &page_1, "-l", &page_1, "-r", &dpi.to_string()])
+        .arg(path)
+        .arg(&prefix)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()
+        .is_some_and(|status| status.success());
+    if !ok {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return None;
+    }
+    let png = std::fs::read_dir(&tmp)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|p| p.extension().is_some_and(|ext| ext == "png"))?;
+    let img = match image::open(&png) {
+        Ok(img) => img.into_rgba8(),
+        Err(_) => {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return None;
+        }
+    };
+    let _ = std::fs::remove_dir_all(&tmp);
+    let width = img.width();
+    let height = img.height();
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(Rendered {
+        width,
+        height,
+        rgba: img.into_raw(),
+        scale,
+    })
 }
 
 pub fn inspect_pdf(bytes: &[u8]) -> Result<Vec<PdfPageSpec>, String> {
@@ -312,9 +393,14 @@ fn save_raster_cache(pdf: &Path, page: u32, rendered: &Rendered) {
     );
 }
 
-/// Keep the current raster until the new scale is clearly sharper.
+/// Keep the current raster until the display target is clearly sharper.
+/// Zoom past [`DISPLAY_SCALE_MAX`] stretches the texture; we do not re-raster.
 pub fn raster_is_sharp_enough(have: f32, wanted: f32) -> bool {
-    wanted <= 0.0 || have + 0.05 >= wanted || (have > 0.0 && wanted <= have * 1.3)
+    if have <= 0.0 {
+        return false;
+    }
+    let target = wanted.min(DISPLAY_SCALE_MAX);
+    target <= 0.0 || have + 0.05 >= target || target <= have * 1.3
 }
 
 /// Text baselines in PDF points, origin top-left of the page.
@@ -822,7 +908,7 @@ mod tests {
     fn render_scale_steps_up_with_zoom() {
         assert_eq!(render_scale(0.5, 1.0), 0.75);
         assert_eq!(render_scale(1.0, 1.0), 1.5);
-        assert!(render_scale(3.0, 1.0) >= 4.0);
+        assert_eq!(render_scale(3.0, 1.0), DISPLAY_SCALE_MAX);
         assert_eq!(render_scale(0.05, 1.0), 0.25);
     }
 
@@ -830,22 +916,59 @@ mod tests {
     fn tiny_on_screen_pages_still_get_a_thumbnail() {
         assert_eq!(raster_scale(20.0, 20.0, 600.0, 800.0, 1.0), 0.25);
         let scale = raster_scale(800.0, 600.0, 600.0, 450.0, 1.0);
-        assert!((1.0..=2.0).contains(&scale));
+        assert!((1.0..=DISPLAY_SCALE_MAX).contains(&scale));
     }
 
     #[test]
-    fn preview_is_capped_and_full_scale_stays_at_four() {
+    fn display_scale_caps_and_zoom_stretches_past_it() {
         assert_eq!(preview_scale(4.0), 0.25);
-        assert_eq!(preview_scale(0.25), 0.25);
-        assert_eq!(raster_scale(4000.0, 4000.0, 100.0, 100.0, 2.0), 4.0);
+        assert_eq!(display_scale(4.0), DISPLAY_SCALE_MAX);
+        assert_eq!(
+            raster_scale(4000.0, 4000.0, 100.0, 100.0, 2.0),
+            DISPLAY_SCALE_MAX
+        );
         let a4 = clamp_scale(595.0, 842.0, 8.0);
         assert!(a4 > 2.0 && a4 <= 2.5, "a4 clamped to {a4}");
         assert!((clamp_scale(595.0, 842.0, 1.0) - 1.0).abs() < 0.001);
-        assert!(raster_is_sharp_enough(3.0, 3.0));
-        assert!(raster_is_sharp_enough(2.0, 2.04));
-        assert!(!raster_is_sharp_enough(2.0, 3.0));
-        assert!(!raster_is_sharp_enough(1.0, 2.0));
-        assert!(!raster_is_sharp_enough(3.0, 4.0));
+        assert!(
+            raster_is_sharp_enough(1.5, 4.0),
+            "zoom past display uses GPU"
+        );
+        assert!(raster_is_sharp_enough(1.5, 1.5));
+        assert!(!raster_is_sharp_enough(0.25, 1.5));
+        assert!(!raster_is_sharp_enough(1.0, 1.5));
+    }
+
+    #[test]
+    fn poppler_renders_a_marked_page_when_available() {
+        if !poppler_available() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "inkarchy-poppler-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("talk.pdf");
+        std::fs::write(
+            &path,
+            marked_pdf(&[MarkedPage {
+                width: 200.0,
+                height: 100.0,
+                rotate: 0,
+                marker: "POP",
+            }]),
+        )
+        .unwrap();
+        let rendered = render_poppler(&path, 0, 1.0).expect("pdftoppm");
+        assert!(rendered.width >= 180);
+        assert!(rendered.height >= 80);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

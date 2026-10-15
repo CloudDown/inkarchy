@@ -702,8 +702,18 @@ impl InkarchyApp {
             let key = format!("{}:{}:{page}", note.id, bg.file);
             (key, path, page)
         };
-        let scale = crate::pdf::preview_scale(4.0);
-        if crate::pdf::raster_cache_fresh(&path, page, scale) {
+        let scale = if crate::pdf::poppler_available() {
+            crate::pdf::display_scale(crate::pdf::DISPLAY_SCALE_MAX)
+        } else {
+            crate::pdf::preview_scale(4.0)
+        };
+        if crate::pdf::raster_cache_fresh(&path, page, scale)
+            || crate::pdf::raster_cache_fresh(
+                &path,
+                page,
+                crate::pdf::display_scale(crate::pdf::DISPLAY_SCALE_MAX),
+            )
+        {
             return;
         }
         if self.bg_pending.contains(&key) || self.bg_failed.contains(&key) {
@@ -9169,10 +9179,13 @@ impl InkarchyApp {
         }
         let path = self.lib.note_dir(note_id).join(&bg.file);
         if let Some(page) = bg.pdf_page {
+            let display = crate::pdf::display_scale(wanted);
             let preview = crate::pdf::preview_scale(wanted);
             let mut shown = cached;
             if shown.is_none() {
-                if let Some(hit) = crate::pdf::load_raster_cache(&path, page, preview) {
+                if let Some(hit) = crate::pdf::load_raster_cache(&path, page, display)
+                    .or_else(|| crate::pdf::load_raster_cache(&path, page, preview))
+                {
                     shown = self.store_background(ctx, key.clone(), hit);
                 }
             }
@@ -9180,7 +9193,12 @@ impl InkarchyApp {
             if shown.is_some() && crate::pdf::raster_is_sharp_enough(have, wanted) {
                 return shown;
             }
-            let scale = if shown.is_none() { preview } else { wanted };
+            // Poppler: one display-quality pass. Hayro: tiny preview first.
+            let scale = if shown.is_none() && !crate::pdf::poppler_available() {
+                preview
+            } else {
+                display
+            };
             let hub = self
                 .pdf_raster
                 .get_or_insert_with(crate::pdf::RasterHub::new);
