@@ -1,9 +1,18 @@
 # Changelog
 
-## 0.3.0 — 2026-10-14
+## 0.3.1 — 2026-10-15
 
 ### Added
 - Shelf Search also matches typed text, stickies, and Unicode embedded in PDF backgrounds. A one-line excerpt appears under the spine when the hit is inside the notebook.
+- Pages mode shows green `+` edge tabs and a red centre `−` to tear a page (or the sticky under that mark) without a delete picker.
+- PDF pages paint a 0.25× disk-cached preview first, then a sharper pass, and open cover-fitted.
+- Pushing a new `Cargo.toml` version to `main` auto-tags `v<version>` and publishes the Linux release binary when the CHANGELOG section exists.
+
+### Changed
+- Ink ribbons share strip vertices, skip the mesh on clone, and reject hit-tests outside the stroke box; the dock folds to its grip while held.
+- Colour saucer and thickness taper open together from a held pen or the ink well.
+
+## 0.3.0 — 2026-10-14
 
 ### Changed
 - Renamed to Inkarchy. Binary `inkarchy`, window title Inkarchy, Wayland app id `com.clouddown.inkarchy`, desktop entry `inkarchy.desktop`. Notes move from `~/.local/share/omacourses` to `~/.local/share/inkarchy` on first launch (`$CAHIER_DATA` remains a deprecated alias of `$INKARCHY_DATA`, and `$CAHIER_OPEN` of `$INKARCHY_OPEN`).

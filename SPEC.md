@@ -39,7 +39,7 @@ Inkarchy : app native Rust (egui/eframe) de notes manuscrites au stylet, dans l'
 - [x] Ouvrir PDF (fond non éditable, annotations par-dessus, export PDF qui garde l'original), PNG/JPEG/WEBP/SVG, `.txt`/`.md` ≤ 64 KiB. *(PR #2, brouillon)*
 - [x] « Open with » + deuxième instance qui renvoie les chemins à la fenêtre ouverte. *(PR #2)*
 - [x] `install.sh` : binaire de release, `--from-source`, `--uninstall`, entrée desktop + icône. *(PR #1)*
-- [x] CI : fmt, clippy `-D warnings`, tests ; tag `v*` publie le binaire. *(PR #1)*
+- [x] CI : fmt, clippy `-D warnings`, tests ; section CHANGELOG obligatoire pour la version Cargo.toml ; push sur `main` avec version neuve → tag `v*` + release Linux. *(voir `docs/RELEASING.md`)*
 
 ### Demandé / pas fait
 - [ ] Fusionner PR #1 puis PR #2 dans `main` et publier `v0.2.0`.

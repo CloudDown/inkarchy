@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_call:
+    inputs:
+      tag:
+        description: Tag name such as v0.3.1
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -16,6 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -41,14 +49,49 @@ jobs:
             libxcb-xfixes0-dev \
             fontconfig
 
+      - name: Resolve tag and changelog notes
+        id: meta
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          awk -v ver="$VERSION" '
+            $0 ~ "^## " ver "( |$)" { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "CHANGELOG.md has no body under '## ${VERSION}'." >&2
+            exit 1
+          fi
+          echo "Notes for ${TAG}:"
+          cat release-notes.md
+
       - name: Build release binary
         run: |
           cargo build --locked --release --bin inkarchy
           cp target/release/inkarchy inkarchy-x86_64-unknown-linux-gnu
           strip inkarchy-x86_64-unknown-linux-gnu
+          test -s inkarchy-x86_64-unknown-linux-gnu
 
       - name: Attach binary to the GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.tag }}
           files: inkarchy-x86_64-unknown-linux-gnu
-          generate_release_notes: true
+          body_path: release-notes.md
+          fail_on_unmatched_files: true
+          generate_release_notes: false
+
+      - name: Verify binary is on the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.meta.outputs.tag }}"
+          assets=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+          echo "$assets"
+          echo "$assets" | grep -qx 'inkarchy-x86_64-unknown-linux-gnu'

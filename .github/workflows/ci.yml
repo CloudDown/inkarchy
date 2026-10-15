@@ -42,6 +42,20 @@ jobs:
       - name: install.sh syntax
         run: bash -n install.sh
 
+      - name: CHANGELOG covers Cargo.toml version
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
+          if [ -z "$version" ]; then
+            echo "Could not read version from Cargo.toml" >&2
+            exit 1
+          fi
+          if ! grep -qE "^## ${version}( |$)" CHANGELOG.md; then
+            echo "CHANGELOG.md needs a '## ${version}' section" >&2
+            exit 1
+          fi
+          echo "CHANGELOG.md has ## ${version}"
+
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
