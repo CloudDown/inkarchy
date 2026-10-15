@@ -466,18 +466,6 @@ impl Library {
         self.place_trash_at(moving, dest)
     }
 
-    pub fn bring_front(&mut self, id: Uuid) -> Result<(), SaveError> {
-        if let Some(i) = self.index.notes.iter().position(|m| m.id == id) {
-            if i == 0 {
-                return Ok(());
-            }
-            let m = self.index.notes.remove(i);
-            self.index.notes.insert(0, m);
-            self.save_index()?;
-        }
-        Ok(())
-    }
-
     pub fn insert_new(&mut self, note: &Note) -> Result<(), SaveError> {
         self.save_note(note)
     }

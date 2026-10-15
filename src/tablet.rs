@@ -1,8 +1,49 @@
 //! Wayland bridge for the tablet and the trackpad.
 //!
 //! winit 0.30 does not listen to `zwp_tablet_manager_v2` or to
-//! `zwp_pointer_gestures_v1` pinches (Linux). We attach to eframe's
-//! `wl_display` (guest): stylus tip and pressure, and pinch on the keyboard pad.
+//! `zwp_pointer_gestures_v1` (Linux). We attach to eframe's
+//! `wl_display` (guest): stylus tip and pressure, and two-finger
+//! pinch zoom (armed after a small scale deadzone) with pan.
+//! Three-finger swipe is left to the compositor (Omarchy workspaces).
+
+/// Scale change from pinch begin before zoom engages (noise / scroll false starts).
+/// Very small: waiting here felt like latency before the page reacted.
+const PINCH_ZOOM_ARM: f32 = 0.003;
+/// Linear boost on each frame's scale ratio.
+const PINCH_ZOOM_GAIN: f32 = 2.0;
+/// Cap one Wayland update so a batched first event cannot jump the camera.
+const PINCH_ZOOM_FRAME_MIN: f32 = 0.88;
+const PINCH_ZOOM_FRAME_MAX: f32 = 1.14;
+/// Shared (dx, dy) weight before zoom has armed — hold the page still while
+/// distance is still building (typical of one-finger-moving pinches).
+const PINCH_PAN_BEFORE_ZOOM: f32 = 0.08;
+/// Shared (dx, dy) weight while a zoom frame is applied.
+const PINCH_PAN_WHILE_ZOOM: f32 = 0.12;
+
+/// Frame zoom factor from a Wayland pinch `scale` (1.0 = none this frame).
+///
+/// Wayland `scale` is finger distance vs begin, so a pivot pinch (one finger
+/// still, the other approaching or leaving) is the same signal as a symmetric
+/// pinch. We arm on a small distance change, ease in from begin with linear
+/// gain (no powered dump), and clamp each frame for continuous tracking.
+fn pinch_frame_zoom(armed: &mut bool, last_scale: &mut f32, scale: f32, arm: f32) -> f32 {
+    if !*armed {
+        if (scale - 1.0).abs() < arm {
+            return 1.0;
+        }
+        *armed = true;
+        // Ease from the true begin so the first real distance change is felt,
+        // without the old ^power cliff on a batched update.
+        *last_scale = 1.0;
+    }
+    if *last_scale <= 0.05 {
+        *last_scale = scale;
+        return 1.0;
+    }
+    let raw = (scale / *last_scale).max(0.05);
+    *last_scale = scale;
+    (1.0 + (raw - 1.0) * PINCH_ZOOM_GAIN).clamp(PINCH_ZOOM_FRAME_MIN, PINCH_ZOOM_FRAME_MAX)
+}
 
 use std::collections::HashSet;
 
@@ -48,7 +89,7 @@ pub struct PenSnapshot {
     pub air_toggle: bool,
     pub pressure: Option<f32>,
     pub in_proximity: bool,
-    /// Trackpad pinch zoom factor (1.0 = none), relative to this frame.
+    /// Trackpad two-finger pinch zoom factor (1.0 = none), relative to this frame.
     pub pinch_zoom: f32,
     pub pinch_pan: Vec2,
     pub pinching: bool,
@@ -114,6 +155,7 @@ struct TabletState {
     pinches: Vec<ZwpPointerGesturePinchV1>,
     pinch_bound: HashSet<u32>,
     pinch_last_scale: f32,
+    pinch_zoom_armed: bool,
     pinch_zoom: f32,
     pinch_pan: Vec2,
     pinching: bool,
@@ -231,7 +273,7 @@ impl TabletState {
         }
     }
 
-    fn bind_pinches(&mut self, qh: &QueueHandle<Self>) {
+    fn bind_gestures(&mut self, qh: &QueueHandle<Self>) {
         let Some(gestures) = self.gestures.clone() else {
             return;
         };
@@ -240,9 +282,9 @@ impl TabletState {
                 continue;
             }
             let pointer = seat.get_pointer(qh, ());
-            let pinch = gestures.get_pinch_gesture(&pointer, qh, ());
+            self.pinches
+                .push(gestures.get_pinch_gesture(&pointer, qh, ()));
             self.pointers.push(pointer);
-            self.pinches.push(pinch);
         }
     }
 }
@@ -271,7 +313,7 @@ impl Dispatch<WlRegistry, ()> for TabletState {
                     let seat: WlSeat = registry.bind(name, version.min(1), qh, ());
                     state.seats.push((name, seat));
                     state.bind_tablet_seats(qh);
-                    state.bind_pinches(qh);
+                    state.bind_gestures(qh);
                 }
                 "zwp_tablet_manager_v2" | "wp_tablet_manager_v2" => {
                     if state.manager.is_none() {
@@ -281,7 +323,7 @@ impl Dispatch<WlRegistry, ()> for TabletState {
                 }
                 "zwp_pointer_gestures_v1" if state.gestures.is_none() => {
                     state.gestures = Some(registry.bind(name, version.min(1), qh, ()));
-                    state.bind_pinches(qh);
+                    state.bind_gestures(qh);
                 }
                 _ => {}
             }
@@ -341,20 +383,34 @@ impl Dispatch<ZwpPointerGesturePinchV1, ()> for TabletState {
                 if fingers >= 2 {
                     state.pinching = true;
                     state.pinch_last_scale = 1.0;
+                    state.pinch_zoom_armed = false;
                 }
             }
             zwp_pointer_gesture_pinch_v1::Event::Update { dx, dy, scale, .. } => {
                 let scale = scale as f32;
-                if state.pinch_last_scale > 0.05 {
-                    state.pinch_zoom *= scale / state.pinch_last_scale;
-                }
-                state.pinch_last_scale = scale;
-                state.pinch_pan += Vec2::new(dx as f32, dy as f32);
                 state.pinching = true;
+                let zoom = pinch_frame_zoom(
+                    &mut state.pinch_zoom_armed,
+                    &mut state.pinch_last_scale,
+                    scale,
+                    PINCH_ZOOM_ARM,
+                );
+                state.pinch_zoom *= zoom;
+                // Pivot pinches move the logical center a lot while distance
+                // changes; keep that common-mode pan quiet until / while zooming.
+                let pan_w = if !state.pinch_zoom_armed {
+                    PINCH_PAN_BEFORE_ZOOM
+                } else if (zoom - 1.0).abs() > 0.0005 {
+                    PINCH_PAN_WHILE_ZOOM
+                } else {
+                    1.0
+                };
+                state.pinch_pan += Vec2::new(dx as f32, dy as f32) * pan_w;
             }
             zwp_pointer_gesture_pinch_v1::Event::End { .. } => {
                 state.pinching = false;
                 state.pinch_last_scale = 0.0;
+                state.pinch_zoom_armed = false;
             }
             _ => {}
         }
@@ -554,3 +610,52 @@ impl Dispatch<ZwpTabletPadGroupV2, ()> for TabletState {
 noop_dispatch!(ZwpTabletPadRingV2, zwp_tablet_pad_ring_v2::Event);
 noop_dispatch!(ZwpTabletPadStripV2, zwp_tablet_pad_strip_v2::Event);
 noop_dispatch!(ZwpTabletPadDialV2, zwp_tablet_pad_dial_v2::Event);
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        pinch_frame_zoom, PINCH_ZOOM_ARM, PINCH_ZOOM_FRAME_MAX, PINCH_ZOOM_FRAME_MIN,
+        PINCH_ZOOM_GAIN,
+    };
+
+    #[test]
+    fn pinch_zoom_ignores_scale_inside_deadzone() {
+        let mut armed = false;
+        let mut last = 1.0;
+        assert!(
+            (pinch_frame_zoom(&mut armed, &mut last, 1.001, PINCH_ZOOM_ARM) - 1.0).abs() < 1e-6
+        );
+        assert!(!armed);
+        assert!(
+            (pinch_frame_zoom(&mut armed, &mut last, 1.002, PINCH_ZOOM_ARM) - 1.0).abs() < 1e-6
+        );
+        assert!(!armed);
+    }
+
+    #[test]
+    fn pinch_zoom_arms_with_soft_begin_then_tracks_smoothly() {
+        let mut armed = false;
+        let mut last = 1.0;
+        let arm_z = pinch_frame_zoom(&mut armed, &mut last, 1.03, PINCH_ZOOM_ARM);
+        assert!(armed);
+        // Soft ease from begin: 1 + (1.03 - 1) * GAIN, clamped.
+        let expect =
+            (1.0 + 0.03 * PINCH_ZOOM_GAIN).clamp(PINCH_ZOOM_FRAME_MIN, PINCH_ZOOM_FRAME_MAX);
+        assert!((arm_z - expect).abs() < 1e-5);
+        assert!((last - 1.03).abs() < 1e-6);
+        let z = pinch_frame_zoom(&mut armed, &mut last, 1.133, PINCH_ZOOM_ARM);
+        // raw 1.133/1.03 ≈ 1.1 → 1 + 0.1 * GAIN, may hit the per-frame cap.
+        let expect =
+            (1.0 + 0.1 * PINCH_ZOOM_GAIN).clamp(PINCH_ZOOM_FRAME_MIN, PINCH_ZOOM_FRAME_MAX);
+        assert!((z - expect).abs() < 1e-4);
+        assert!((last - 1.133).abs() < 1e-6);
+    }
+
+    #[test]
+    fn pinch_zoom_clamps_a_batched_jump() {
+        let mut armed = true;
+        let mut last = 1.0;
+        let z = pinch_frame_zoom(&mut armed, &mut last, 1.5, PINCH_ZOOM_ARM);
+        assert!((z - PINCH_ZOOM_FRAME_MAX).abs() < 1e-6);
+    }
+}

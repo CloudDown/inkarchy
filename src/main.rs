@@ -55,7 +55,7 @@ Gestures (inside a notebook):
   2nd button = lasso (hold)
   drag the pencil-case handle → top / bottom / sides
   hold the pen still ~1s ≈ line, arrow, triangle, square, diamond, ellipse, circle
-  drag the sticky pad onto the page   tap a sticky = write   drag its corner = size   hold = color
+  drag the sticky pad onto the page   double-tap sticky = draw   Text tool = type   drag corner = size   hold = color
   delete button = pick objects or pages   drag a zone like the shelf   the list checks them   Delete removes the checked ones   Escape closes
   ctrl+z/y   ctrl+s save   ctrl+e png   ctrl+shift+e pdf
   ctrl+o open a PDF, image, or short text file

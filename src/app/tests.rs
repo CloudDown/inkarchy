@@ -657,6 +657,33 @@ fn manual_scroll_leaves_fitted_mode() {
 }
 
 #[test]
+fn trackpad_two_finger_point_scroll_pans_without_zoom() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Pad pan");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let center = app.canvas_rect.center();
+    let zoom = app.camera.zoom;
+    let pan = app.camera.pan;
+    frames.step(
+        app,
+        vec![
+            Event::PointerMoved(center),
+            Event::MouseWheel {
+                unit: MouseWheelUnit::Point,
+                delta: vec2(0.0, 80.0),
+                modifiers: Modifiers::NONE,
+            },
+        ],
+    );
+    assert_eq!(app.camera.zoom, zoom);
+    assert_ne!(app.camera.pan, pan);
+    assert!((app.camera.pan.y - pan.y).abs() > 1.0);
+}
+
+#[test]
 fn responsive_note_controls_do_not_overlap_through_resizes() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("A very long notebook title that must stay inside its header");
@@ -912,7 +939,6 @@ fn compact_controls_keep_drag_selection_and_wheel_actions_accessible() {
     assert!(app.spine_wheel.is_none());
     assert!(app.emoji_pick.is_none());
     assert!(app.shelf_toss.is_empty());
-    assert!(!app.lib.load_note(id).unwrap().pinned);
     app.open_note(id);
     app.note.as_mut().unwrap().add_unit_at(1, 0);
     frames.settle(app);
@@ -1193,8 +1219,13 @@ fn sticky_pad_drags_a_yellow_note_onto_the_page() {
     let texts = &app.note.as_ref().unwrap().pages[0].texts;
     assert_eq!(texts.len(), 1);
     assert!(texts[0].sticky);
-    assert_eq!(texts[0].color32(), app.look.yellow());
-    assert_eq!(app.editing_text.map(|(p, _)| p), Some(0));
+    assert_eq!(texts[0].color32(), app.look.sticky_yellow());
+    assert!(
+        app.sticky_sheet.is_none(),
+        "drop leaves the sticky on the page; double-click opens the sheet"
+    );
+    assert_eq!(app.sel.len(), 1);
+    assert_eq!(app.sel[0].id, texts[0].id);
 }
 
 #[test]
@@ -1242,7 +1273,7 @@ fn long_press_on_a_sticky_uses_the_folder_cloth_wheel() {
     let drop = canvas.center();
     frames.drag(app, pad.center(), drop);
     frames.settle(app);
-    app.finish_text_edit();
+    assert!(app.sticky_sheet.is_none());
     let screen = {
         let tx = &app.note.as_ref().unwrap().pages[0].texts[0];
         let paper = tx.rect().center() + app.origin_of(0);
@@ -1269,8 +1300,8 @@ fn long_press_on_a_sticky_uses_the_folder_cloth_wheel() {
         .expect("long press opens the wheel");
     assert!(!wheel.secondary);
     let cloth = (0..app.look.cloth.len())
-        .find(|&i| app.look.cloth_at(i as u8) != app.look.yellow())
-        .expect("a cloth color besides yellow") as u8;
+        .find(|&i| app.look.cloth_at(i as u8) != app.look.sticky_yellow())
+        .expect("a cloth color besides sticky yellow") as u8;
     let n = app.look.cloth.len().max(1);
     let (origin, scale) = fitted_wheel(frames.ctx.screen_rect(), wheel.origin);
     let aim = slice_mid(origin, cloth as usize, n, (WHEEL_IN + WHEEL_OUT) * 0.5);
@@ -1302,7 +1333,7 @@ fn finger_hold_on_a_sticky_opens_the_cloth_wheel() {
     app.open_note(id);
     let mut frames = Frames::new(app);
     frames.settle(app);
-    let tx = TextBox::sticky(pos2(400.0, 300.0), app.look.yellow());
+    let tx = TextBox::sticky(pos2(400.0, 300.0), app.look.sticky_yellow());
     app.note.as_mut().unwrap().pages[0].texts.push(tx);
     frames.settle(app);
     let screen = {
@@ -1324,7 +1355,7 @@ fn finger_hold_on_a_sticky_opens_the_cloth_wheel() {
         "lifting in the hole leaves the wheel up for a tap"
     );
     let cloth = (0..app.look.cloth.len())
-        .find(|&i| app.look.cloth_at(i as u8) != app.look.yellow())
+        .find(|&i| app.look.cloth_at(i as u8) != app.look.sticky_yellow())
         .expect("a cloth color besides yellow") as u8;
     let n = app.look.cloth.len().max(1);
     let (origin, scale) = fitted_wheel(
@@ -1348,7 +1379,7 @@ fn sticky_tap_fills_the_sheet_and_a_corner_drag_resizes_it() {
     let id = fixture.notebook("Sticky edit");
     let app = &mut fixture.app;
     app.open_note(id);
-    let tx = TextBox::sticky(pos2(180.0, 160.0), app.look.yellow());
+    let tx = TextBox::sticky(pos2(180.0, 160.0), app.look.sticky_yellow());
     let sticky_id = tx.id;
     app.note.as_mut().unwrap().pages[0].texts.push(tx);
     let mut frames = Frames::new(app);
@@ -1386,6 +1417,22 @@ fn sticky_tap_fills_the_sheet_and_a_corner_drag_resizes_it() {
     );
     click(&mut frames, app);
     assert_eq!(app.sticky_sheet, Some((0, sticky_id)));
+    assert!(
+        app.tool.is_ink(),
+        "sticky sheet opens ready to draw, got {:?}",
+        app.tool
+    );
+    frames.settle(app);
+    frames.step(app, vec![Event::Text("Hello".into())]);
+    frames.settle(app);
+    assert!(
+        !app.note.as_ref().unwrap().pages[0].texts[0]
+            .text
+            .contains("Hello"),
+        "keyboard text is off until the Text tool is chosen"
+    );
+    app.tool = Tool::Text;
+    app.text_focus = true;
     frames.settle(app);
     frames.step(app, vec![Event::Text("Hello".into())]);
     frames.settle(app);
@@ -1393,9 +1440,13 @@ fn sticky_tap_fills_the_sheet_and_a_corner_drag_resizes_it() {
         app.note.as_ref().unwrap().pages[0].texts[0]
             .text
             .contains("Hello"),
-        "the sheet accepts typing"
+        "Text tool accepts typing on the sheet"
     );
-    let done = frames.text_center("Done");
+    // Done is a round check well at the top-right of the sticky sheet.
+    let done = {
+        let screen = frames.ctx.screen_rect();
+        pos2(screen.right() - 34.0, screen.top() + 78.0)
+    };
     frames.step(app, vec![Event::PointerMoved(done)]);
     frames.step(
         app,
@@ -1420,13 +1471,21 @@ fn sticky_tap_fills_the_sheet_and_a_corner_drag_resizes_it() {
         .text
         .contains("Hello"));
 
+    // Resize via selection handles (fold corner is visual only).
+    app.sel = vec![Sel {
+        page: 0,
+        id: sticky_id,
+        kind: SelKind::Text,
+    }];
+    app.tool = Tool::Lasso;
+    frames.settle(app);
     let before = app.note.as_ref().unwrap().pages[0].texts[0].size;
     let corner = {
         let tx = &app.note.as_ref().unwrap().pages[0].texts[0];
         app.camera
             .to_screen(tx.rect().right_bottom() + app.origin_of(0), app.canvas_rect)
     };
-    frames.drag(app, corner - vec2(6.0, 6.0), corner + vec2(70.0, 36.0));
+    frames.drag(app, corner, corner + vec2(70.0, 36.0));
     let after = app.note.as_ref().unwrap().pages[0].texts[0].size;
     assert!(after[0] > before[0] + 20.0, "wider {before:?} -> {after:?}");
     assert!(
@@ -1439,10 +1498,9 @@ fn sticky_tap_fills_the_sheet_and_a_corner_drag_resizes_it() {
         app.camera
             .to_screen(tx.rect().right_bottom() + app.origin_of(0), app.canvas_rect)
     };
-    let finger = corner - vec2(8.0, 8.0);
-    let pull = finger + vec2(40.0, 24.0);
+    let pull = corner + vec2(40.0, 24.0);
     let mid = app.note.as_ref().unwrap().pages[0].texts[0].size;
-    frames.touch(app, TouchPhase::Start, finger);
+    frames.touch(app, TouchPhase::Start, corner);
     frames.touch(app, TouchPhase::Move, pull);
     frames.touch(app, TouchPhase::End, pull);
     let end = app.note.as_ref().unwrap().pages[0].texts[0].size;
@@ -1451,12 +1509,51 @@ fn sticky_tap_fills_the_sheet_and_a_corner_drag_resizes_it() {
 }
 
 #[test]
+fn sticky_ink_follows_move_and_resize() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Sticky ink");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let tx = TextBox::sticky(pos2(100.0, 100.0), app.look.sticky_yellow());
+    let sticky_id = tx.id;
+    let origin = tx.min();
+    app.note.as_mut().unwrap().pages[0].texts.push(tx);
+    let mut stroke = InkStroke::new(Nib::Fineliner, Color32::BLACK, 2.0);
+    stroke.sticky = Some(sticky_id);
+    stroke.push(InkPoint::new(origin + vec2(20.0, 24.0), 1.0));
+    stroke.push(InkPoint::new(origin + vec2(60.0, 70.0), 1.0));
+    app.note.as_mut().unwrap().pages[0].strokes.push(stroke);
+    app.sel = vec![Sel {
+        page: 0,
+        id: sticky_id,
+        kind: SelKind::Text,
+    }];
+    app.translate_sel(vec2(40.0, 15.0));
+    let st = &app.note.as_ref().unwrap().pages[0].strokes[0];
+    assert_eq!(st.sticky, Some(sticky_id));
+    assert!((st.points[0].x - (100.0 + 20.0 + 40.0)).abs() < 0.01);
+    assert!((st.points[0].y - (100.0 + 24.0 + 15.0)).abs() < 0.01);
+    let tx = &app.note.as_ref().unwrap().pages[0].texts[0];
+    assert!((tx.pos[0] - 140.0).abs() < 0.01);
+    app.set_sticky_size(0, sticky_id, vec2(336.0, 336.0));
+    let st = &app.note.as_ref().unwrap().pages[0].strokes[0];
+    // After move, sticky origin is (140, 115); point is 20 past origin in x;
+    // resize 168→336 (×2) → 140 + 40 = 180.
+    assert!(
+        (st.points[0].x - 180.0).abs() < 0.05,
+        "got {}",
+        st.points[0].x
+    );
+    assert!((st.points[0].y - (115.0 + 24.0 * 2.0)).abs() < 0.05);
+}
+
+#[test]
 fn pages_mode_minus_removes_a_sticky() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Sticky minus");
     let app = &mut fixture.app;
     app.open_note(id);
-    let tx = TextBox::sticky(pos2(200.0, 180.0), app.look.yellow());
+    let tx = TextBox::sticky(pos2(200.0, 180.0), app.look.sticky_yellow());
     let sticky_id = tx.id;
     app.note.as_mut().unwrap().pages[0].texts.push(tx);
     let mut frames = Frames::new(app);
@@ -1557,8 +1654,14 @@ fn notebook_menu_keeps_actions_and_keyboard_dismissal() {
     let separate = frames.text_center("Separate pages");
     frames.drag(app, separate, separate);
     assert_eq!(app.note.as_ref().unwrap().sheet_join, SheetJoin::Separate);
-    frames.drag(app, more, more);
-    frames.settle(app);
+    assert!(
+        Popup::is_any_open(&frames.ctx),
+        "toggling a setting keeps the ⋮ menu open until an outside click"
+    );
+    let linked = frames.text_center("Linked pages");
+    frames.drag(app, linked, linked);
+    assert_eq!(app.note.as_ref().unwrap().sheet_join, SheetJoin::Linked);
+    assert!(Popup::is_any_open(&frames.ctx));
     frames.key(app, Key::Escape);
     assert!(!Popup::is_any_open(&frames.ctx));
     assert!(matches!(app.scene, Scene::Desk));
@@ -1701,22 +1804,26 @@ fn nib_ribbon_sets_width_from_one_slot() {
         .ctx
         .data(|d| d.get_temp::<Rect>(Id::new("nib-track")))
         .unwrap();
-    let heavy = if track.width() >= track.height() {
-        pos2(track.right() - 2.0, track.center().y)
-    } else {
-        pos2(track.center().x, track.bottom() - 2.0)
-    };
+    let tin = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("tin-wheel")))
+        .expect("colour saucer");
+    assert!(
+        track.top() >= tin.bottom() - 1.0,
+        "nib slip sits under the colour saucer"
+    );
+    assert!(
+        track.width() > track.height(),
+        "nib slip is a horizontal ribbon"
+    );
+    let heavy = pos2(track.right() - 2.0, track.center().y);
     frames.drag(app, heavy, heavy);
     assert!(
         (app.width - 18.0).abs() < 1.2,
         "the heavy end of the ribbon sets a broad nib, got {}",
         app.width
     );
-    let hair = if track.width() >= track.height() {
-        pos2(track.left() + 2.0, track.center().y)
-    } else {
-        pos2(track.center().x, track.top() + 2.0)
-    };
+    let hair = pos2(track.left() + 2.0, track.center().y);
     frames.drag(app, hair, hair);
     assert!(
         app.width < 2.0,
@@ -1725,6 +1832,26 @@ fn nib_ribbon_sets_width_from_one_slot() {
     );
     frames.key(app, Key::Escape);
     assert!(!app.nib_open);
+}
+
+#[test]
+fn area_eraser_covers_more_paper_when_zoomed_out() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Eraser zoom");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    app.width = 10.0;
+    app.tool = Tool::EraserArea;
+    app.camera.zoom = 2.0;
+    let tight = app.eraser_radius_paper(app.camera.zoom, true);
+    app.camera.zoom = 0.5;
+    let wide = app.eraser_radius_paper(app.camera.zoom, true);
+    assert!(
+        (wide / tight - 4.0).abs() < 0.05,
+        "halving zoom quadruples paper coverage: tight={tight} wide={wide}"
+    );
+    let screen = app.eraser_radius_screen(true);
+    assert!((screen - 18.0).abs() < 0.05, "screen size follows nib width");
 }
 
 #[test]
@@ -1738,12 +1865,7 @@ fn vector_spine_wheel_preserves_mouse_and_touch_actions() {
     app.open_spine_wheel(id, center, &frames.ctx, true);
     frames.settle(app);
     frames.snapshot("wheel-vector-actions");
-    let pin = slice_mid(center, 0, 4, 104.0);
-    frames.drag(app, pin, pin);
-    assert!(app.lib.load_note(id).unwrap().pinned);
-    app.open_spine_wheel(id, center, &frames.ctx, true);
-    frames.settle(app);
-    let color = slice_mid(center, 1, 4, 104.0);
+    let color = slice_mid(center, 0, 3, 104.0);
     frames.drag(app, color, color);
     assert!(app.spine_wheel.as_ref().unwrap().colors);
     frames.settle(app);
@@ -1753,7 +1875,7 @@ fn vector_spine_wheel_preserves_mouse_and_touch_actions() {
     assert_eq!(app.lib.load_note(id).unwrap().cover, 3);
     frames.touch(app, TouchPhase::Start, center);
     app.open_spine_wheel(id, center, &frames.ctx, false);
-    let mark = slice_mid(center, 3, 4, 104.0);
+    let mark = slice_mid(center, 2, 3, 104.0);
     frames.touch(app, TouchPhase::Move, mark);
     frames.touch(app, TouchPhase::End, mark);
     assert_eq!(app.emoji_pick, Some(id));
@@ -2085,24 +2207,41 @@ fn emoji_picker_reopens_above_backdrop_and_accepts_mouse_and_touch() {
     let first = fixture.notebook("First");
     let second = fixture.notebook("Second");
     let app = &mut fixture.app;
-    let expected = app.emoji.catalog().first().expect("emoji font").to_string();
+    app.emoji_group = crate::emoji::EmojiGroup::SmileysPeople;
+    let expected = app
+        .emoji
+        .group_chars(crate::emoji::EmojiGroup::SmileysPeople)
+        .first()
+        .expect("emoji font")
+        .to_string();
     let mut frames = Frames::new(app);
     frames.settle(app);
     for id in [first, second, first] {
         app.emoji_pick = Some(id);
-        frames.settle(app);
+        // Progressive decode fills the first cell within a few frames.
+        for _ in 0..30 {
+            frames.step(app, vec![]);
+            if app
+                .emoji_tex
+                .contains_key(&expected.chars().next().unwrap())
+            {
+                break;
+            }
+        }
         let outside = pos2(4.0, 4.0);
         frames.drag(app, outside, outside);
         assert!(app.emoji_pick.is_none());
         frames.settle(app);
 
         app.emoji_pick = Some(id);
-        frames.settle(app);
-        let sheet = frames
+        for _ in 0..30 {
+            frames.step(app, vec![]);
+        }
+        let cell = frames
             .ctx
-            .memory(|m| m.area_rect(Id::new("emoji-pick")))
-            .unwrap();
-        let cell = sheet.min + vec2(32.0, 32.0);
+            .data(|d| d.get_temp::<Rect>(Id::new("emoji-first-cell")))
+            .expect("first emoji cell")
+            .center();
         assert_eq!(
             frames.ctx.layer_id_at(cell),
             Some(LayerId::new(Order::Foreground, Id::new("emoji-pick")))
@@ -2121,7 +2260,7 @@ fn emoji_picker_reopens_above_backdrop_and_accepts_mouse_and_touch() {
         frames.settle(app);
     }
     assert!(
-        app.emoji_tex.len() < app.emoji.catalog().len() / 2,
+        app.emoji_tex.len() < app.emoji.catalog_len() / 2,
         "opening must not decode the whole catalog"
     );
 }

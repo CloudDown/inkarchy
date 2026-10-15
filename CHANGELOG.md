@@ -11,6 +11,14 @@
 ### Changed
 - Ink ribbons share strip vertices, skip the mesh on clone, and reject hit-tests outside the stroke box; the dock folds to its grip while held.
 - Colour saucer and thickness taper open together from a held pen or the ink well.
+- Shelf emoji sheet uses iPhone category tabs and decodes glyphs progressively so opening stays responsive.
+- Shelf Search is a flat dark capsule (desk-deep fill, 1px edge, mono type) with a thin accent ring on focus.
+
+### Removed
+- Spine pin action (wheel slice, `P` shortcut, ribbon). The `pinned` field stays in saved JSON for compatibility.
+
+### Fixed
+- Shelf search excerpt no longer overlaps the notebook title.
 
 ## 0.3.0 — 2026-10-14
 

@@ -22,7 +22,7 @@ Chrome means the UI frame (shelf, dock, buttons, panels), not a browser. Chrome 
 
 ## Keep
 - Wayland proxies marked `allow(dead_code)` and empty tablet-pad Dispatch impls. Dropping them disconnects the stylus or pinch.
-- Vector glyphs for chrome actions (undo/redo, text, image, open, back). Emoji atlas is for pens, lasso, pin, trash, marks.
+- Vector glyphs for chrome actions (undo/redo, text, image, open, back). Emoji atlas is for pens, lasso, trash, marks.
 - Saves atomic (`atomic_write`). Failed saves surface as a toast.
 
 ## Do not

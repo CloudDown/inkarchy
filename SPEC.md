@@ -13,8 +13,8 @@ Inkarchy : app native Rust (egui/eframe) de notes manuscrites au stylet, dans l'
 
 ## Fonctionnalités
 ### Étagère (shelf)
-- [x] Cahiers sur une grille de cases (trous autorisés), titre et icône emoji modifiables.
-- [x] Roue d'actions autour du dossier : appui long au doigt (glisser puis lâcher pour agir), clic droit à la souris (clic pour agir). Actions : épingler, couleur, corbeille, marque.
+- [x] Cahiers sur une grille de cases (trous autorisés), titre et icône emoji modifiables. Sélecteur emoji : onglets type iPhone, décodage progressif.
+- [x] Roue d'actions autour du dossier : appui long au doigt (glisser puis lâcher pour agir), clic droit à la souris (clic pour agir). Actions : couleur, corbeille, marque.
 - [x] Roue souris : ne se ferme qu'en sortant de la roue ; clic au centre dans la sous-roue couleurs = retour, pas fermeture.
 - [x] Sélection multiple au rectangle (souris) ou appui long (doigt).
 - [x] Corbeille : bouton en bas (emoji), rangée rouge de 10 cases ; glisser sur l'icône corbeille = jeter ; glisser dans une case seulement si la corbeille est ouverte ; glisser hors = restaurer ; bouton Empty visible quand elle est ouverte.
@@ -45,7 +45,7 @@ Inkarchy : app native Rust (egui/eframe) de notes manuscrites au stylet, dans l'
 - [ ] Fusionner PR #1 puis PR #2 dans `main` et publier `v0.2.0`.
 - [x] Nom de produit Inkarchy (dépôt CloudDown/inkarchy).
 - [ ] Icônes de la roue fournies par l'utilisateur (à confirmer : déjà livrées ?).
-- [ ] Raccourcis épingler/emoji/corbeille au clavier listés dans Help (à confirmer).
+- [ ] Raccourcis emoji/corbeille au clavier listés dans Help (à confirmer).
 - [ ] Travail local non commité en cours (app.rs, pdf.rs, tests) : contenu à confirmer.
 
 ## Règles UX à ne jamais casser
@@ -54,7 +54,7 @@ Inkarchy : app native Rust (egui/eframe) de notes manuscrites au stylet, dans l'
 3. L'app détecte seule stylet/main ; pas de bascule manuelle.
 4. Minimalisme : pas de mots inutiles, pas de barre de défilement inutile, pas de fond derrière la corbeille.
 5. Chrome = couleurs `Look` du thème Omarchy ; le papier garde son look ; corbeille en rouge du thème.
-6. Glyphes vectoriels pour les actions de chrome ; atlas emoji pour stylos, lasso, épingle, corbeille, marques.
+6. Glyphes vectoriels pour les actions de chrome ; atlas emoji pour stylos, lasso, corbeille, marques.
 7. Ne jamais supprimer les proxys Wayland `allow(dead_code)` ni les impls Dispatch vides du tablet-pad (sinon stylet/pinch coupés).
 
 ## Données et sauvegarde

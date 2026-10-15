@@ -89,6 +89,9 @@ pub struct InkStroke {
     pub color: [u8; 4],
     pub width: f32,
     pub points: Vec<InkPoint>,
+    /// When set, this ink rides with that sticky (move / resize / delete).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticky: Option<Uuid>,
     #[serde(skip)]
     pub mesh: Option<Mesh>,
 }
@@ -101,6 +104,7 @@ impl InkStroke {
             color: color.to_array(),
             width,
             points: Vec::with_capacity(64),
+            sticky: None,
             mesh: None,
         }
     }
@@ -151,6 +155,19 @@ impl InkStroke {
             p.x += d.x;
             p.y += d.y;
         }
+        self.mesh = None;
+    }
+
+    /// Scale points about `origin` (sticky top-left). Width follows the mean scale.
+    #[allow(dead_code)]
+    pub fn scale_about(&mut self, origin: Pos2, sx: f32, sy: f32) {
+        let sx = sx.max(0.05);
+        let sy = sy.max(0.05);
+        for p in &mut self.points {
+            p.x = origin.x + (p.x - origin.x) * sx;
+            p.y = origin.y + (p.y - origin.y) * sy;
+        }
+        self.width = (self.width * (sx + sy) * 0.5).clamp(0.4, 48.0);
         self.mesh = None;
     }
 
@@ -206,6 +223,7 @@ impl Clone for InkStroke {
             color: self.color,
             width: self.width,
             points: self.points.clone(),
+            sticky: self.sticky,
             mesh: None,
         }
     }

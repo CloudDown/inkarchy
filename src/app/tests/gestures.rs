@@ -224,6 +224,33 @@ fn pinch_takes_over_object_drag_until_both_fingers_lift() {
 }
 
 #[test]
+fn lost_touch_end_does_not_block_later_finger_pan() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Stale touch");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    drawing_view(app, &mut frames);
+    let origin = app.canvas_rect.center();
+    app.plant_stale_canvas_touch(origin);
+    assert!(app.canvas_touch.is_some());
+    frames.step(app, vec![]);
+    assert!(
+        app.canvas_touch.is_none(),
+        "a gesture with no live finger must clear"
+    );
+    let pan_before = app.camera.pan;
+    frames.touch(app, TouchPhase::Start, origin);
+    frames.touch(app, TouchPhase::Move, origin + vec2(48.0, 12.0));
+    frames.touch(app, TouchPhase::End, origin + vec2(48.0, 12.0));
+    assert!(
+        (app.camera.pan - pan_before).length() > 1.0,
+        "finger pan works again after a lost End"
+    );
+    assert!(app.canvas_touch.is_none());
+}
+
+#[test]
 fn image_replacement_is_undoable_and_stale_imports_cannot_change_another_note() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Images");

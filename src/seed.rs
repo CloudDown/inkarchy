@@ -27,7 +27,7 @@ pub fn seed_if_needed(lib: &mut Library) {
 fn note_mentalite() -> Note {
     let mut n = Note::blank("Mindset", 0);
     n.paper = PaperKind::Lined;
-    n.pinned = true;
+    n.pinned = false;
     let ink = Color32::from_rgb(0x1c, 0x18, 0x14);
     let mute = Color32::from_rgb(0x5a, 0x52, 0x48);
     let accent = Color32::from_rgb(0x7f, 0xbb, 0xb3);
@@ -174,7 +174,7 @@ fn note_mentalite() -> Note {
 fn note_direction() -> Note {
     let mut n = Note::blank("Art direction", 3);
     n.paper = PaperKind::Millimetre;
-    n.pinned = true;
+    n.pinned = false;
     let ink = Color32::from_rgb(0x1c, 0x18, 0x14);
     let red = Color32::from_rgb(0xe6, 0x7e, 0x80);
     let body = concat!(

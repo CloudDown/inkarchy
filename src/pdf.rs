@@ -186,10 +186,10 @@ fn render_screen_page(
     }
     if cached.as_ref().is_none_or(|(p, _)| p != path) {
         *cached = match std::fs::read(path) {
-            Ok(bytes) => match open_pdf(bytes) {
-                Ok(pdf) => Some((path.to_path_buf(), pdf)),
-                Err(err) => return Err(err),
-            },
+            Ok(bytes) => {
+                let pdf = open_pdf(bytes)?;
+                Some((path.to_path_buf(), pdf))
+            }
             Err(err) => return Err(err.to_string()),
         };
     }

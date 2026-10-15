@@ -757,6 +757,7 @@ fn split_stroke_across_tiles(stroke: &InkStroke, tw: f32, th: f32) -> Vec<(i32, 
     let mut out = Vec::new();
     let mut cur_cell = cell(stroke.points[0]);
     let mut cur = InkStroke::new(stroke.nib, stroke.color32(), stroke.width);
+    cur.sticky = stroke.sticky;
     cur.points.push(stroke.points[0]);
     for pair in stroke.points.windows(2) {
         let a = pair[0];
@@ -801,10 +802,11 @@ fn split_stroke_across_tiles(stroke: &InkStroke, tw: f32, th: f32) -> Vec<(i32, 
             out.push((
                 cur_cell.0,
                 cur_cell.1,
-                std::mem::replace(
-                    &mut cur,
-                    InkStroke::new(stroke.nib, stroke.color32(), stroke.width),
-                ),
+                std::mem::replace(&mut cur, {
+                    let mut neu = InkStroke::new(stroke.nib, stroke.color32(), stroke.width);
+                    neu.sticky = stroke.sticky;
+                    neu
+                }),
             ));
             cur.points.push(p);
             cur_cell = cell(p);

@@ -33,7 +33,7 @@ Choose lined, Cornell, grid, dotted, graph, or blank paper. Canson paper adds a 
 
 ### Lectern objects
 
-A pin on the shelf is a ribbon on the spine. Drag the sticky pad onto the page; hold a sticky for its color.
+Drag the sticky pad onto the page; hold a sticky for its color.
 
 <p align="center">
   <img src="screens/sticky-notes.png" alt="Sticky notes on a dotted page" width="80%">
@@ -143,15 +143,15 @@ The lectern follows the stylus: in range, the hand pans and the nib writes. Put 
 
 On a touch screen, drag an image or a text box directly with one finger, then use its corner handles to resize it. A short hold on a handwritten stroke selects it. `ctrl+d` duplicates the selection and `delete` removes it. Images are selected as soon as they are inserted.
 
-A finger on empty paper pans the canvas; two fingers pan and zoom even when something is selected. Choose **Draw with finger** in the notebook menu to use the pens by touch. The erasers and lasso work with a finger directly. Double-tap text to type. Double-tap a sticky to open it large; one tap leaves it on the page. Hold a sticky for its colour. Hold a pen, or tap the ink dot, to open the colour saucer and the thickness taper together.
+A finger on empty paper pans the canvas; two fingers pan even when something is selected. On the trackpad, two-finger drag scrolls and two-finger pinch zooms from finger distance (one finger may stay still while the other moves in or out). If the pad ignores a resting finger, use ctrl + two-finger scroll to zoom. Three-finger swipe is left to the desktop (workspace switching). On the screen, pinch still zooms. Choose **Draw with finger** in the notebook menu to use the pens by touch. The erasers and lasso work with a finger directly. Double-tap text to type. Double-tap a sticky to open it large for drawing with the dock; choose the Text tool to type. One tap leaves it on the page. Hold a sticky for its colour. Hold a pen, or tap the ink dot, to open the colour saucer with the thickness ribbon underneath. The area eraser uses that same size; its on-screen brush stays steady, so zooming out covers more of the page.
 
 | | Mouse | Stylus in range |
 |---|---|---|
 | Writes | mouse | stylus |
-| Pan | space + drag, middle-click, trackpad | finger, two-finger drag |
+| Pan | space + drag, middle-click, two-finger trackpad | finger, two-finger drag |
 | Eraser | right-click hold (last kind), `e` / `shift+e` | stylus button hold, air-click to toggle |
 | Undo | `ctrl+z` | two-finger tap |
-| Zoom | pinch, two-finger trackpad, `+` `−` | pinch |
+| Zoom | two-finger pinch (one finger may stay still), ctrl + two-finger scroll, `+` `−` | pinch |
 
 | | |
 |---|---|
@@ -169,7 +169,7 @@ A finger on empty paper pans the canvas; two fingers pan and zoom even when some
 
 | | |
 |---|---|
-| Right-click a spine (or hold a finger) | spine wheel — pin, color, trash, mark |
+| Right-click a spine (or hold a finger) | spine wheel — color, trash, mark |
 | Wastebasket | open / close the bin row |
 | Drag onto the bin (or a bin cell) | trash the notebook |
 | Drag out of the bin | restore to the shelf |

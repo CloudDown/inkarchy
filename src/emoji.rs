@@ -1,11 +1,15 @@
 //! Folder icons. Noto Color Emoji is a CBDT bitmap (PNG), with no outlines:
 //! egui will not rasterize it. We catalog every glyph and decode on demand.
+//!
+//! Picker order follows the iPhone emoji keyboard categories.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 
-const TEX_SIDE: u32 = 72;
+/// Decode size for shelf spines (picker cells scale the same bitmap down).
+/// 96 keeps folder marks sharp; the picker stays light via a per-frame decode budget.
+const TEX_SIDE: u32 = 96;
 
 pub struct Glyph {
     pub width: usize,
@@ -13,11 +17,53 @@ pub struct Glyph {
     pub rgba: Vec<u8>,
 }
 
+/// iPhone emoji keyboard tabs (Recents omitted).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum EmojiGroup {
+    SmileysPeople,
+    AnimalsNature,
+    FoodDrink,
+    Activity,
+    TravelPlaces,
+    Objects,
+    Symbols,
+    Flags,
+}
+
+impl EmojiGroup {
+    pub const ALL: [Self; 8] = [
+        Self::SmileysPeople,
+        Self::AnimalsNature,
+        Self::FoodDrink,
+        Self::Activity,
+        Self::TravelPlaces,
+        Self::Objects,
+        Self::Symbols,
+        Self::Flags,
+    ];
+
+    pub fn tab(self) -> char {
+        match self {
+            Self::SmileysPeople => '😀',
+            Self::AnimalsNature => '🐻',
+            Self::FoodDrink => '🍔',
+            Self::Activity => '⚽',
+            Self::TravelPlaces => '🚗',
+            Self::Objects => '💡',
+            Self::Symbols => '💜',
+            Self::Flags => '🏁',
+        }
+    }
+}
+
 pub struct Atlas {
     font: Option<FontBytes>,
     glyphs: HashMap<char, Glyph>,
-    /// Every available color emoji, in Unicode order.
-    catalog: Vec<char>,
+    /// Membership for `key()` — O(1).
+    catalog_set: HashSet<char>,
+    /// Glyphs split like the iPhone emoji tabs.
+    sections: Vec<(EmojiGroup, Vec<char>)>,
 }
 
 impl Atlas {
@@ -25,7 +71,8 @@ impl Atlas {
         let mut atlas = Self {
             font: None,
             glyphs: HashMap::new(),
-            catalog: Vec::new(),
+            catalog_set: HashSet::new(),
+            sections: Vec::new(),
         };
         let Some(data) = color_emoji_bytes() else {
             return atlas;
@@ -33,29 +80,297 @@ impl Atlas {
         let Some(font) = FontBytes::parse(data) else {
             return atlas;
         };
-        atlas.catalog = font.list_chars();
+        let chars = font.list_chars();
+        atlas.sections = section_chars(&chars);
+        atlas.catalog_set = atlas
+            .sections
+            .iter()
+            .flat_map(|(_, chars)| chars.iter().copied())
+            .collect();
         atlas.font = Some(font);
         atlas
     }
 
-    pub fn catalog(&self) -> &[char] {
-        &self.catalog
+    #[cfg(test)]
+    pub fn catalog_len(&self) -> usize {
+        self.catalog_set.len()
     }
 
-    pub fn ensure(&mut self, ch: char) -> Option<&Glyph> {
+    #[cfg(test)]
+    pub fn catalog(&self) -> Vec<char> {
+        self.sections
+            .iter()
+            .flat_map(|(_, chars)| chars.iter().copied())
+            .collect()
+    }
+
+    pub fn sections(&self) -> &[(EmojiGroup, Vec<char>)] {
+        &self.sections
+    }
+
+    pub fn group_chars(&self, group: EmojiGroup) -> &[char] {
+        self.sections
+            .iter()
+            .find(|(g, _)| *g == group)
+            .map(|(_, chars)| chars.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Decode at most one new glyph when `budget` allows. Returns whether a
+    /// decode was deferred (caller should request a repaint).
+    pub fn ensure_budgeted(&mut self, ch: char, budget: &mut u32) -> (Option<&Glyph>, bool) {
         if self.glyphs.contains_key(&ch) {
-            return self.glyphs.get(&ch);
+            return (self.glyphs.get(&ch), false);
         }
-        let g = self.font.as_ref()?.decode(ch)?;
+        if *budget == 0 {
+            return (None, true);
+        }
+        *budget -= 1;
+        let Some(g) = self.font.as_ref().and_then(|font| font.decode(ch)) else {
+            return (None, false);
+        };
         self.glyphs.insert(ch, g);
-        self.glyphs.get(&ch)
+        (self.glyphs.get(&ch), false)
+    }
+
+    #[cfg(test)]
+    pub fn ensure(&mut self, ch: char) -> Option<&Glyph> {
+        let mut budget = u32::MAX;
+        self.ensure_budgeted(ch, &mut budget).0
     }
 
     pub fn key(&self, emoji: &str) -> Option<char> {
         emoji.chars().find(|ch| {
-            *ch != '\u{fe0f}' && *ch != '\u{fe0e}' && *ch != '\u{200d}' && self.catalog.contains(ch)
+            *ch != '\u{fe0f}'
+                && *ch != '\u{fe0e}'
+                && *ch != '\u{200d}'
+                && self.catalog_set.contains(ch)
         })
     }
+}
+
+fn section_chars(chars: &[char]) -> Vec<(EmojiGroup, Vec<char>)> {
+    let mut buckets: HashMap<EmojiGroup, Vec<char>> = HashMap::new();
+    for &ch in chars {
+        let Some(group) = group_of(ch as u32) else {
+            continue;
+        };
+        buckets.entry(group).or_default().push(ch);
+    }
+    EmojiGroup::ALL
+        .into_iter()
+        .filter_map(|group| {
+            let mut list = buckets.remove(&group)?;
+            if list.is_empty() {
+                return None;
+            }
+            list.sort_by_key(|ch| *ch as u32);
+            Some((group, list))
+        })
+        .collect()
+}
+
+/// Map a code point to an iPhone-style tab. `None` drops components that are
+/// not useful alone (skin tones, lone regional letters, etc.).
+fn group_of(cp: u32) -> Option<EmojiGroup> {
+    // Skin tones and hair components — not standalone icons.
+    if (0x1F3FB..=0x1F3FF).contains(&cp) || (0x1F9B0..=0x1F9B3).contains(&cp) {
+        return None;
+    }
+    // Lone regional-indicator letters need a pair for a flag.
+    if (0x1F1E6..=0x1F1FF).contains(&cp) {
+        return None;
+    }
+    if !usable(cp) {
+        return None;
+    }
+
+    // Flags (complete flag glyphs, not RI pairs).
+    if matches!(cp, 0x1F3C1 | 0x1F3F3 | 0x1F3F4 | 0x1F6A9) || (0x1F38C..=0x1F38C).contains(&cp) {
+        return Some(EmojiGroup::Flags);
+    }
+
+    // Smileys & Emotion + People & Body (one iPhone tab).
+    if (0x1F600..=0x1F64F).contains(&cp)
+        || (0x1F466..=0x1F487).contains(&cp)
+        || (0x1F48B..=0x1F48B).contains(&cp)
+        || (0x1F4A9..=0x1F4A9).contains(&cp)
+        || (0x1F910..=0x1F93A).contains(&cp)
+        || (0x1F970..=0x1F97F).contains(&cp)
+        || (0x1F9B0..=0x1F9B9).contains(&cp)
+        || (0x1F9C0..=0x1F9C0).contains(&cp)
+        || (0x1F9D0..=0x1F9DF).contains(&cp)
+        || (0x1F9E0..=0x1F9E0).contains(&cp)
+        || (0x1FA70..=0x1FA7F).contains(&cp)
+        || (0x1FAF0..=0x1FAFF).contains(&cp)
+        || (0x1F44A..=0x1F44F).contains(&cp)
+        || (0x1F450..=0x1F450).contains(&cp)
+        || (0x1F590..=0x1F590).contains(&cp)
+        || (0x1F595..=0x1F596).contains(&cp)
+        || (0x1F90C..=0x1F90F).contains(&cp)
+        || (0x1F918..=0x1F91F).contains(&cp)
+        || (0x1F574..=0x1F575).contains(&cp)
+        || matches!(
+            cp,
+            0x2639 | 0x263A | 0x1F440 | 0x1F441 | 0x1F445 | 0x1F463 | 0x1F9BE | 0x1F9BF
+        )
+    {
+        return Some(EmojiGroup::SmileysPeople);
+    }
+
+    // Animals & Nature.
+    if (0x1F400..=0x1F43F).contains(&cp)
+        || (0x1F980..=0x1F9AF).contains(&cp)
+        || (0x1F9A0..=0x1F9AE).contains(&cp)
+        || (0x1FAB0..=0x1FABF).contains(&cp)
+        || (0x1F330..=0x1F343).contains(&cp)
+        || (0x1F344..=0x1F344).contains(&cp)
+        || (0x1F394..=0x1F394).contains(&cp)
+        || (0x1F3F5..=0x1F3F5).contains(&cp)
+        || (0x1F490..=0x1F490).contains(&cp)
+        || (0x2618..=0x2618).contains(&cp)
+        || (0x1F4AE..=0x1F4AE).contains(&cp)
+        || matches!(
+            cp,
+            0x1F525 | 0x2600 | 0x2601 | 0x26C5 | 0x1F308 | 0x1F30A | 0x1F30B
+        )
+        || (0x1F300..=0x1F321).contains(&cp)
+        || (0x1F324..=0x1F32C).contains(&cp)
+        || (0x26C8..=0x26C8).contains(&cp)
+        || (0x1F4A5..=0x1F4A7).contains(&cp)
+        || (0x1F4A8..=0x1F4A8).contains(&cp)
+    {
+        return Some(EmojiGroup::AnimalsNature);
+    }
+
+    // Food & Drink.
+    if (0x1F345..=0x1F37F).contains(&cp)
+        || (0x1F950..=0x1F96F).contains(&cp)
+        || (0x1F32D..=0x1F32F).contains(&cp)
+        || (0x1F9C1..=0x1F9CF).contains(&cp)
+        || (0x1FAD0..=0x1FADF).contains(&cp)
+        || matches!(cp, 0x2615 | 0x1F375)
+    {
+        return Some(EmojiGroup::FoodDrink);
+    }
+
+    // Activity (sport, games, music, arts).
+    if (0x1F3A0..=0x1F3C0).contains(&cp)
+        || (0x1F3C2..=0x1F3D3).contains(&cp)
+        || (0x1F3BD..=0x1F3C1).contains(&cp)
+        || (0x1F3C5..=0x1F3CF).contains(&cp)
+        || (0x1F3D0..=0x1F3D3).contains(&cp)
+        || (0x1F3F8..=0x1F3FF).contains(&cp)
+        || (0x1F93A..=0x1F94F).contains(&cp)
+        || (0x1F9E7..=0x1F9E9).contains(&cp)
+        || (0x26BD..=0x26BE).contains(&cp)
+        || (0x26F3..=0x26F3).contains(&cp)
+        || (0x1F004..=0x1F004).contains(&cp)
+        || (0x1F0CF..=0x1F0CF).contains(&cp)
+        || (0x1FA80..=0x1FA8F).contains(&cp)
+        || matches!(cp, 0x265F | 0x1F3B5 | 0x1F3B6 | 0x1F3BC)
+    {
+        return Some(EmojiGroup::Activity);
+    }
+
+    // Travel & Places.
+    if (0x1F680..=0x1F6FF).contains(&cp)
+        || (0x1F3D4..=0x1F3F0).contains(&cp)
+        || (0x1F3E0..=0x1F3F0).contains(&cp)
+        || (0x1F5FB..=0x1F5FF).contains(&cp)
+        || (0x1F30C..=0x1F30F).contains(&cp)
+        || (0x1F310..=0x1F31F).contains(&cp)
+        || (0x1F5FA..=0x1F5FA).contains(&cp)
+        || (0x1F9E6..=0x1F9E6).contains(&cp)
+        || (0x1F9F3..=0x1F9F3).contains(&cp)
+        || (0x1F6D5..=0x1F6DF).contains(&cp)
+        || (0x1F6E0..=0x1F6EC).contains(&cp)
+        || (0x1F6F0..=0x1F6F9).contains(&cp)
+        || (0x1F6FA..=0x1F6FC).contains(&cp)
+        || (0x1F9BC..=0x1F9BD).contains(&cp)
+        || matches!(
+            cp,
+            0x26EA | 0x26F2 | 0x26FA | 0x2668 | 0x1F3A1 | 0x1F3A2 | 0x1F488 | 0x1F492
+        )
+        || (0x1F54B..=0x1F54E).contains(&cp)
+        || (0x26E9..=0x26EA).contains(&cp)
+        || (0x1F5FD..=0x1F5FF).contains(&cp)
+    {
+        return Some(EmojiGroup::TravelPlaces);
+    }
+
+    // Objects.
+    if (0x1F4A0..=0x1F4FF).contains(&cp)
+        || (0x1F500..=0x1F53D).contains(&cp)
+        || (0x1F550..=0x1F567).contains(&cp)
+        || (0x1F56F..=0x1F573).contains(&cp)
+        || (0x1F576..=0x1F579).contains(&cp)
+        || (0x1F57A..=0x1F57A).contains(&cp)
+        || (0x1F587..=0x1F58A).contains(&cp)
+        || (0x1F5A4..=0x1F5FF).contains(&cp)
+        || (0x1F9E0..=0x1F9FF).contains(&cp)
+        || (0x1FA90..=0x1FA9F).contains(&cp)
+        || (0x1FAA0..=0x1FAAF).contains(&cp)
+        || (0x1F321..=0x1F321).contains(&cp)
+        || (0x1F39B..=0x1F39F).contains(&cp)
+        || (0x1F3A7..=0x1F3A7).contains(&cp)
+        || (0x1F4BB..=0x1F4CE).contains(&cp)
+        || (0x231A..=0x231B).contains(&cp)
+        || (0x23F0..=0x23F3).contains(&cp)
+        || (0x260E..=0x260E).contains(&cp)
+        || (0x1F4DE..=0x1F4DF).contains(&cp)
+        || matches!(cp, 0x2709 | 0x270F | 0x2712 | 0x1F4DA | 0x1F4D4 | 0x1F4D3)
+    {
+        return Some(EmojiGroup::Objects);
+    }
+
+    // Symbols (hearts, signs, punctuation emoji, keycaps leftovers).
+    if (0x1F300..=0x1F5FF).contains(&cp)
+        || (0x2600..=0x27BF).contains(&cp)
+        || (0x1F7E0..=0x1F7EB).contains(&cp)
+        || (0x1F90D..=0x1F90E).contains(&cp)
+        || (0x2763..=0x2764).contains(&cp)
+        || (0x1F9E1..=0x1F9E1).contains(&cp)
+        || (0x1FA75..=0x1FA77).contains(&cp)
+        || (0x3030..=0x3030).contains(&cp)
+        || (0x303D..=0x303D).contains(&cp)
+        || (0x3297..=0x3299).contains(&cp)
+        || (0x25AA..=0x25AB).contains(&cp)
+        || (0x25B6..=0x25B6).contains(&cp)
+        || (0x25C0..=0x25C0).contains(&cp)
+        || (0x25FB..=0x25FE).contains(&cp)
+        || (0x2B05..=0x2B07).contains(&cp)
+        || (0x2B1B..=0x2B1C).contains(&cp)
+        || (0x2B50..=0x2B50).contains(&cp)
+        || (0x2B55..=0x2B55).contains(&cp)
+        || matches!(
+            cp,
+            0x00A9
+                | 0x00AE
+                | 0x2122
+                | 0x2139
+                | 0x24C2
+                | 0x2714
+                | 0x2716
+                | 0x274C
+                | 0x274E
+                | 0x2753
+                | 0x2754
+                | 0x2755
+                | 0x2757
+                | 0x2795
+                | 0x2796
+                | 0x2797
+                | 0x27A1
+                | 0x27B0
+                | 0x27BF
+        )
+    {
+        return Some(EmojiGroup::Symbols);
+    }
+
+    // Anything else that survived `usable` — put with Symbols so it stays reachable.
+    Some(EmojiGroup::Symbols)
 }
 
 struct Group {
@@ -266,15 +581,15 @@ fn read_u32(data: &[u8], at: usize) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::Atlas;
+    use super::*;
 
     #[test]
     fn color_emoji_catalog() {
         let mut atlas = Atlas::load();
-        if atlas.catalog().is_empty() {
+        if atlas.catalog_len() == 0 {
             return;
         }
-        assert!(atlas.catalog().len() > 200);
+        assert!(atlas.catalog_len() > 200);
         let key = atlas.key("📝").expect("memo key");
         let g = atlas.ensure(key).expect("memo");
         assert!(g.width >= 24 && g.height >= 24);
@@ -283,7 +598,7 @@ mod tests {
     #[test]
     fn toolbar_emojis_decode() {
         let mut atlas = Atlas::load();
-        if atlas.catalog().is_empty() {
+        if atlas.catalog_len() == 0 {
             return;
         }
         for em in ["🖊️", "🖌️", "✏️", "🖍️", "🧼", "🧽", "🪢", "🗑️"] {
@@ -291,5 +606,48 @@ mod tests {
             let g = atlas.ensure(key).unwrap_or_else(|| panic!("missing {em}"));
             assert!(g.width >= 24 && g.height >= 24, "{em}");
         }
+    }
+
+    #[test]
+    fn sections_follow_iphone_tab_order() {
+        let atlas = Atlas::load();
+        if atlas.catalog_len() == 0 {
+            return;
+        }
+        let groups: Vec<_> = atlas.sections().iter().map(|(g, _)| *g).collect();
+        let mut expected = Vec::new();
+        for g in EmojiGroup::ALL {
+            if atlas.group_chars(g).is_empty() {
+                continue;
+            }
+            expected.push(g);
+        }
+        assert_eq!(groups, expected);
+        assert_eq!(groups.first().copied(), Some(EmojiGroup::SmileysPeople));
+        let smile = atlas.group_chars(EmojiGroup::SmileysPeople);
+        assert!(smile.contains(&'😀') || smile.iter().any(|c| (*c as u32) >= 0x1F600));
+        // Regional-indicator letters stay out of the grid.
+        assert!(!atlas
+            .catalog()
+            .iter()
+            .any(|c| (0x1F1E6..=0x1F1FF).contains(&(*c as u32))));
+    }
+
+    #[test]
+    fn ensure_budgeted_defers_when_empty() {
+        let mut atlas = Atlas::load();
+        if atlas.catalog_len() == 0 {
+            return;
+        }
+        let ch = *atlas.catalog().last().expect("glyph");
+        let mut budget = 0;
+        let (g, deferred) = atlas.ensure_budgeted(ch, &mut budget);
+        assert!(g.is_none());
+        assert!(deferred);
+        budget = 1;
+        let (g, deferred) = atlas.ensure_budgeted(ch, &mut budget);
+        assert!(g.is_some());
+        assert!(!deferred);
+        assert_eq!(budget, 0);
     }
 }

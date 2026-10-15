@@ -207,9 +207,20 @@ impl Look {
         self.inks.get(3).copied().unwrap_or(self.accent)
     }
 
-    /// Theme yellow (Omarchy `yellow`). Default sticky paper.
+    /// Theme yellow (Omarchy `yellow`).
     pub fn yellow(&self) -> Color32 {
         self.inks.get(4).copied().unwrap_or(self.accent)
+    }
+
+    /// Fluorescent sticky paper — theme yellow punched toward neon lemon.
+    pub fn sticky_yellow(&self) -> Color32 {
+        let y = self.yellow();
+        let t = 0.88;
+        Color32::from_rgb(
+            (y.r() as f32 + (255.0 - y.r() as f32) * t).round() as u8,
+            (y.g() as f32 + (242.0 - y.g() as f32) * t).round() as u8,
+            (y.b() as f32 + (46.0 - y.b() as f32) * t).round() as u8,
+        )
     }
 }
 

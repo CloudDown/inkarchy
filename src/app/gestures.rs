@@ -14,12 +14,6 @@ enum CanvasGesture {
         initial: Vec2,
         scale: f32,
     },
-    /// One finger on the sticky's corner. `start` is the size at contact.
-    StickySize {
-        page: usize,
-        id: Uuid,
-        start: Vec2,
-    },
     Text,
     Tool,
 }
@@ -81,6 +75,13 @@ impl InkarchyApp {
         self.lasso.clear();
     }
 
+    fn drop_canvas_touch(&mut self) {
+        if self.canvas_touch.take().is_some() {
+            self.drag_last = None;
+            self.selection_resize = None;
+        }
+    }
+
     /// Returns true when the touch is navigation/object manipulation rather
     /// than input for the currently selected drawing tool.
     pub(super) fn handle_canvas_touch(&mut self, ui: &Ui, canvas: Rect) -> bool {
@@ -101,15 +102,36 @@ impl InkarchyApp {
                 .collect();
             (events, i.any_touches(), i.multi_touch().is_some(), i.time)
         });
-        if events.is_empty() && !touching && self.canvas_touch.is_none() {
+        let pen = self.tablet.snapshot();
+        let pointer_down = ui.input(|i| i.pointer.primary_down()) || pen.down;
+        // egui drops the touch from any_touches before we see End/Cancel, so only
+        // treat a quiet frame as an orphaned gesture (lost End).
+        let closing = events
+            .iter()
+            .any(|(_, _, phase, _)| matches!(phase, TouchPhase::End | TouchPhase::Cancel));
+        if !touching && !closing {
+            self.drop_canvas_touch();
             self.touch_navigation = false;
+            // Mouse release arrives as PointerButton, not Touch End. Leave the
+            // Pages mark for pages_or_pan. Only drop a mark on a quiet frame.
+            let pointer_button = ui.input(|i| {
+                i.events
+                    .iter()
+                    .any(|event| matches!(event, Event::PointerButton { .. }))
+            });
+            if !pointer_down && !pointer_button {
+                self.page_press_owned = false;
+                self.page_mark = None;
+            }
             return false;
+        }
+        if !touching {
+            self.touch_navigation = false;
         }
         if self.sticky_sheet.is_some() {
             self.canvas_touch = None;
             return true;
         }
-        let pen = self.tablet.snapshot();
         if !ui.input(|i| i.focused) {
             self.reset_canvas_gesture();
             if !self.live_from_pen {
@@ -149,6 +171,16 @@ impl InkarchyApp {
             return false;
         }
         for (device, id, phase, screen) in events {
+            if phase == TouchPhase::Start {
+                // A new finger replaces a gesture whose End never arrived.
+                if self
+                    .canvas_touch
+                    .as_ref()
+                    .is_some_and(|g| g.device != device || g.id != id)
+                {
+                    self.drop_canvas_touch();
+                }
+            }
             if phase == TouchPhase::Start && self.canvas_touch.is_none() {
                 if !canvas.contains(screen) || Self::pen_over_chrome(ui.ctx(), screen) {
                     continue;
@@ -178,10 +210,6 @@ impl InkarchyApp {
                 {
                     self.sel.clear();
                     CanvasGesture::Tool
-                } else if let Some((page, id, start)) = self.sticky_corner(screen, canvas) {
-                    self.finish_text_edit();
-                    self.sel.clear();
-                    CanvasGesture::StickySize { page, id, start }
                 } else if let Some((corner, anchor)) = self.selection_corner(screen, canvas) {
                     CanvasGesture::Resize {
                         anchor,
@@ -260,44 +288,36 @@ impl InkarchyApp {
                         initial,
                         scale,
                     } => {
-                        // Offset the handle by finger travel: a generous hit area
-                        // must not make the image jump when grabbed off-centre.
-                        let travel = self.camera.screen_to_paper_delta(screen - gesture.origin);
-                        let next = ((initial + travel).dot(initial) / initial.length_sq().max(1.0))
+                        if !gesture.snapshot {
+                            self.push_snapshot();
+                            gesture.snapshot = true;
+                        }
+                        if self.selection_is_sticky_only() {
+                            let free = self.camera.to_paper(screen, canvas);
+                            self.apply_sticky_diagonal_resize(anchor, free);
+                            self.selection_resize = Some((anchor, initial, scale));
+                        } else {
+                            // Offset the handle by finger travel: a generous hit area
+                            // must not make the image jump when grabbed off-centre.
+                            let travel = self.camera.screen_to_paper_delta(screen - gesture.origin);
+                            let next = ((initial + travel).dot(initial)
+                                / initial.length_sq().max(1.0))
                             .clamp(0.1, 10.0);
-                        if (next - scale).abs() > 0.0001 {
-                            if !gesture.snapshot {
-                                self.push_snapshot();
-                                gesture.snapshot = true;
+                            if (next - scale).abs() > 0.0001 {
+                                self.scale_selection(anchor, next / scale);
+                                gesture.mode = CanvasGesture::Resize {
+                                    anchor,
+                                    initial,
+                                    scale: next,
+                                };
+                                self.selection_resize = Some((anchor, initial, next));
+                                self.mark_dirty();
                             }
-                            self.scale_selection(anchor, next / scale);
-                            gesture.mode = CanvasGesture::Resize {
-                                anchor,
-                                initial,
-                                scale: next,
-                            };
-                            self.selection_resize = Some((anchor, initial, next));
-                            self.mark_dirty();
                         }
                     }
                     CanvasGesture::Pan(_) | CanvasGesture::Text => {
                         self.camera.pan += screen - previous;
                         self.fitted_cell = None;
-                    }
-                    CanvasGesture::StickySize { page, id, start } => {
-                        let travel = self.camera.screen_to_paper_delta(screen - gesture.origin);
-                        let size = vec2(
-                            (start.x + travel.x).max(Self::STICKY_MIN),
-                            (start.y + travel.y).max(Self::STICKY_MIN),
-                        );
-                        if size != start {
-                            if !gesture.snapshot {
-                                self.push_snapshot();
-                                gesture.snapshot = true;
-                            }
-                            self.set_sticky_size(page, id, size);
-                            self.mark_dirty();
-                        }
                     }
                     CanvasGesture::Tool => {}
                 }
@@ -387,6 +407,20 @@ impl InkarchyApp {
                 .collect();
             painter.add(Shape::line(points, Stroke::new(2.0, self.look.accent)));
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn plant_stale_canvas_touch(&mut self, origin: Pos2) {
+        self.canvas_touch = Some(TouchGesture {
+            device: TouchDeviceId(1),
+            id: TouchId(99),
+            origin,
+            last: origin,
+            since: 0.0,
+            mode: CanvasGesture::Pan(None),
+            moved: true,
+            snapshot: false,
+        });
     }
 
     pub(super) fn edit_selected_text(&mut self) {
