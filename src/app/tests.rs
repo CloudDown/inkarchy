@@ -815,7 +815,7 @@ fn pages_mode_adds_a_sheet_and_toggle_hides_the_pluses() {
     assert!(!tabs.is_empty(), "Pages mode shows the + tabs");
     let hit = tabs
         .iter()
-        .map(|(_, _, rect)| rect.center())
+        .map(|(_, _, rect, ..)| rect.center())
         .find(|pos| canvas.contains(*pos))
         .expect("a + tab sits on the canvas");
     frames.drag(app, hit, hit);
@@ -1143,10 +1143,22 @@ fn dock_turns_onto_the_edge_while_carried_then_springs_home() {
     );
     assert_eq!(app.dock_edge, DockEdge::Right);
     assert!(app.dock_float.is_some(), "release starts the slide");
+    assert!(app.dock_fold > 0.8, "the case stays folded while traveling");
+    assert!(
+        app.dock_slide.is_some_and(|slide| !slide.arrived),
+        "the destination move starts before the case unfolds"
+    );
     for _ in 0..50 {
         frames.step(app, vec![]);
     }
-    assert!(app.dock_float.is_none(), "slide settles");
+    assert!(
+        app.dock_float.is_none(),
+        "slide settles: slide={:?}, fold={}, velocity={}",
+        app.dock_slide
+            .map(|slide| (slide.arrived, slide.shown, slide.vel)),
+        app.dock_fold,
+        app.dock_fold_vel
+    );
     assert_eq!(app.dock_edge, DockEdge::Right);
     let landed = frames
         .ctx
@@ -1704,6 +1716,18 @@ fn ink_tin_keeps_color_picking_and_fits_after_resize() {
     app.tin_open = true;
     let mut frames = Frames::new(app);
     frames.settle(app);
+    assert!(frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("tin-wheel")))
+        .is_none());
+    frames.snapshot("ink-swatches");
+    let add = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("ink-add-color")))
+        .unwrap();
+    frames.drag(app, add.center(), add.center());
+    frames.settle(app);
+    assert!(app.color_mixer_open);
     let wheel = frames
         .ctx
         .data(|d| d.get_temp::<Rect>(Id::new("tin-wheel")))
@@ -1745,9 +1769,130 @@ fn ink_tin_keeps_color_picking_and_fits_after_resize() {
         .unwrap();
     assert!(Rect::from_min_size(Pos2::ZERO, frames.size).contains_rect(tin));
     frames.snapshot("ink-tin-short");
+    frames.size = vec2(1280.0, 860.0);
+    frames.settle(app);
+    let save = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("ink-save-color")))
+        .unwrap();
+    frames.touch(app, TouchPhase::Start, save.center());
+    frames.touch(app, TouchPhase::End, save.center());
+    frames.settle(app);
+    assert!(!app.color_mixer_open);
+    assert_eq!(
+        app.lib.index.custom_inks,
+        vec![[expect.r(), expect.g(), expect.b()]]
+    );
+    app.save_ink_swatch();
+    assert_eq!(
+        app.lib.index.custom_inks.len(),
+        1,
+        "duplicate colors are not added"
+    );
+    let persisted: crate::library::Index =
+        serde_json::from_slice(&std::fs::read(app.lib.root.join("library.json")).unwrap()).unwrap();
+    assert_eq!(persisted.custom_inks, app.lib.index.custom_inks);
+    let custom = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("ink-swatch", app.look.inks.len()))))
+        .unwrap();
+    app.pick_free_ink(Color32::RED);
+    frames.drag(app, custom.center(), custom.center());
+    assert_eq!(app.ink, expect, "saved colors can be selected again");
+    frames.snapshot("ink-custom-swatch");
     frames.key(app, Key::Escape);
     assert!(!app.tin_open);
     assert!(matches!(app.scene, Scene::Desk));
+}
+
+#[test]
+fn tools_can_be_stored_and_restored_by_dragging_between_panel_and_dock() {
+    for touch in [false, true] {
+        let mut fixture = Fixture::new();
+        let id = fixture.notebook("Tool storage");
+        let app = &mut fixture.app;
+        app.open_note(id);
+        let mut frames = Frames::new(app);
+        frames.settle(app);
+        assert!(!app.ink_panel_open());
+        let source = frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", Tool::Fineliner))))
+            .unwrap()
+            .center();
+        if touch {
+            frames.touch(app, TouchPhase::Start, source);
+            frames.touch(app, TouchPhase::Move, source - vec2(0.0, 30.0));
+        } else {
+            frames.step(
+                app,
+                vec![
+                    Event::PointerMoved(source),
+                    Event::PointerButton {
+                        pos: source,
+                        button: PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Modifiers::NONE,
+                    },
+                ],
+            );
+            frames.step(app, vec![Event::PointerMoved(source - vec2(0.0, 30.0))]);
+        }
+        frames.settle(app);
+        assert!(app.ink_panel_open(), "drag opens storage, touch={touch}");
+        let storage = frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new("dock-tool-storage-rect")))
+            .unwrap();
+        if touch {
+            frames.touch(app, TouchPhase::Move, storage.center());
+            frames.touch(app, TouchPhase::End, storage.center());
+        } else {
+            frames.step(app, vec![Event::PointerMoved(storage.center())]);
+            frames.step(
+                app,
+                vec![Event::PointerButton {
+                    pos: storage.center(),
+                    button: PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Modifiers::NONE,
+                }],
+            );
+        }
+        assert!(
+            app.parked_tools.contains(&Tool::Fineliner),
+            "store touch={touch}"
+        );
+        assert_eq!(app.lib.index.parked_tools, vec![Tool::Fineliner]);
+        frames.settle(app);
+        frames.snapshot(if touch {
+            "storage-touch"
+        } else {
+            "storage-mouse"
+        });
+        let stored = frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", Tool::Fineliner))))
+            .unwrap()
+            .center();
+        let dock = frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
+            .unwrap();
+        if touch {
+            frames.touch(app, TouchPhase::Start, stored);
+            frames.touch(app, TouchPhase::Move, dock.center());
+            frames.touch(app, TouchPhase::End, dock.center());
+        } else {
+            frames.drag(app, stored, dock.center());
+        }
+        assert!(
+            !app.parked_tools.contains(&Tool::Fineliner),
+            "restore touch={touch}"
+        );
+        assert!(app.lib.index.parked_tools.is_empty());
+        assert!(app.dock_tool_drag.is_none());
+    }
 }
 
 #[test]
@@ -1791,7 +1936,7 @@ fn ink_fields_use_continuous_meshes() {
 }
 
 #[test]
-fn nib_ribbon_sets_width_from_one_slot() {
+fn nib_slider_sets_width_below_color_presets() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Nib");
     let app = &mut fixture.app;
@@ -1806,8 +1951,8 @@ fn nib_ribbon_sets_width_from_one_slot() {
         .unwrap();
     let tin = frames
         .ctx
-        .data(|d| d.get_temp::<Rect>(Id::new("tin-wheel")))
-        .expect("colour saucer");
+        .data(|d| d.get_temp::<Rect>(Id::new(("ink-swatch", 8))))
+        .expect("color preset");
     assert!(
         track.top() >= tin.bottom() - 1.0,
         "nib slip sits under the colour saucer"
@@ -1830,6 +1975,23 @@ fn nib_ribbon_sets_width_from_one_slot() {
         "the thin end stays a hairline, got {}",
         app.width
     );
+    let nib = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("nib-rect")))
+        .unwrap();
+    let storage = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-tool-storage-rect")))
+        .unwrap();
+    assert!(
+        nib.bottom() <= storage.top(),
+        "storage must not cover the width slider"
+    );
+    let preset = nib.min + vec2(2.0 * 52.0 + 22.0, 22.0);
+    frames.touch(app, TouchPhase::Start, preset);
+    frames.touch(app, TouchPhase::End, preset);
+    assert_eq!(app.width, 6.0);
+    assert_eq!(app.last_ink_width, 6.0);
     frames.key(app, Key::Escape);
     assert!(!app.nib_open);
 }
@@ -1851,7 +2013,10 @@ fn area_eraser_covers_more_paper_when_zoomed_out() {
         "halving zoom quadruples paper coverage: tight={tight} wide={wide}"
     );
     let screen = app.eraser_radius_screen(true);
-    assert!((screen - 18.0).abs() < 0.05, "screen size follows nib width");
+    assert!(
+        (screen - 18.0).abs() < 0.05,
+        "screen size follows nib width"
+    );
 }
 
 #[test]
@@ -2155,6 +2320,7 @@ fn long_press_on_page_enters_pages_mode() {
         app.sheet_tabs_on,
         "long press on empty paper opens Pages manage mode"
     );
+    assert_eq!(app.pages_jiggle_cell, Some((0, 0)));
     assert!(!app.sheet_tabs(app.canvas_rect).is_empty());
     frames.step(
         app,
@@ -2164,6 +2330,38 @@ fn long_press_on_page_enters_pages_mode() {
             pressed: false,
             modifiers: Modifiers::NONE,
         }],
+    );
+}
+
+#[test]
+fn finger_long_press_on_page_shows_progress_ring() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Finger hold progress");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let screen = app
+        .camera
+        .to_screen(pos2(PAGE_W * 0.5, PAGE_H * 0.5), app.canvas_rect);
+
+    frames.touch(app, TouchPhase::Start, screen);
+
+    assert!(
+        frames.output.as_ref().unwrap().shapes.iter().any(|shape| {
+            matches!(
+                &shape.shape,
+                Shape::Circle(circle)
+                    if circle.center.distance(screen) < 0.5
+                        && (circle.radius - 20.0).abs() < 0.5
+                        && (circle.stroke.width - 2.5).abs() < 0.1
+            )
+        }),
+        "a stationary finger shows the hold progress track"
+    );
+    assert!(
+        !app.sheet_tabs_on,
+        "the hold must complete before Pages mode"
     );
 }
 
@@ -2211,6 +2409,11 @@ fn pages_mode_long_press_drags_page_into_neighbour_slot() {
             },
         ],
     );
+    assert_eq!(
+        app.pages_jiggle_cell,
+        Some((1, 0)),
+        "pressing a page makes it the only animated sheet"
+    );
     for _ in 0..30 {
         frames.step(app, vec![Event::PointerMoved(from)]);
     }
@@ -2234,6 +2437,42 @@ fn pages_mode_long_press_drags_page_into_neighbour_slot() {
     let moved = note.pages.iter().find(|p| p.col == 2).unwrap();
     assert!(moved.texts.iter().any(|t| t.text.contains("Right")));
     assert!(app.page_drag.is_none());
+}
+
+#[test]
+fn pages_mode_keeps_selected_sheet_still_and_stops_highlighting_when_left() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Jiggle");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    {
+        let note = app.note.as_mut().unwrap();
+        note.sheet_join = SheetJoin::Separate;
+        note.pages.push(crate::document::Page::at(1, 0));
+    }
+    let t = 0.42;
+    assert_eq!(app.page_jiggle_offset(0, 0, t), Vec2::ZERO);
+    app.enter_pages_mode();
+    assert_eq!(app.page_jiggle_offset(0, 0, t), Vec2::ZERO);
+    assert_eq!(app.page_jiggle_offset(1, 0, t), Vec2::ZERO);
+    app.pages_jiggle_cell = Some((1, 0));
+    assert_eq!(app.page_jiggle_offset(0, 0, t), Vec2::ZERO);
+    assert_eq!(app.page_jiggle_offset(1, 0, t), Vec2::ZERO);
+    app.page_drag = Some(PageDrag {
+        col: 1,
+        row: 0,
+        grab: Vec2::ZERO,
+        screen: Pos2::ZERO,
+    });
+    assert_eq!(
+        app.page_jiggle_offset(1, 0, t),
+        Vec2::ZERO,
+        "the lifted sheet follows the pointer"
+    );
+    assert_eq!(app.page_jiggle_offset(0, 0, t), Vec2::ZERO);
+    app.page_drag = None;
+    app.leave_pages_mode();
+    assert_eq!(app.page_jiggle_offset(0, 0, t), Vec2::ZERO);
 }
 
 #[test]
@@ -2726,4 +2965,98 @@ fn assert_uniform_page_fit(app: &InkarchyApp, origin: Vec2, page_w: f32, page_h:
         assert!(page.min.y < rect.min.y && page.max.y > rect.max.y);
         assert!((page.center().y - rect.center().y).abs() < 0.05);
     }
+}
+
+#[test]
+fn dock_expands_around_its_destination_without_a_second_slide() {
+    for edge in [
+        DockEdge::Top,
+        DockEdge::Bottom,
+        DockEdge::Left,
+        DockEdge::Right,
+    ] {
+        let mut fixture = Fixture::new();
+        let id = fixture.notebook("Dock expansion");
+        let app = &mut fixture.app;
+        app.open_note(id);
+        app.dock_edge = edge;
+        let mut frames = Frames::new(app);
+        frames.settle(app);
+        app.dock_fold = 1.0;
+        app.dock_float = Some(dock_rest_min(
+            edge,
+            app.dock_pill_size(edge.vertical()),
+            note_controls_bounds(&frames.ctx),
+        ));
+        app.dock_slide = Some(DockSlide {
+            vel: Vec2::ZERO,
+            shown: true,
+            arrived: true,
+        });
+        for _ in 0..40 {
+            frames.step(app, vec![]);
+            let rect = frames
+                .ctx
+                .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
+                .unwrap();
+            let expected = dock_rest_min(edge, rect.size(), note_controls_bounds(&frames.ctx));
+            assert!(
+                rect.min.distance(expected) < 1.5,
+                "{edge:?}: expansion lost its anchor: {rect:?}, expected {expected:?}, fold {}",
+                app.dock_fold
+            );
+        }
+        assert_eq!(app.dock_fold, 0.0);
+        assert!(app.dock_slide.is_none());
+    }
+}
+
+#[test]
+fn tool_storage_handles_small_screens_cancel_and_tap_to_restore() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Small tool case");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.size = vec2(360.0, 400.0);
+    frames.settle(app);
+    let source = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", Tool::Fineliner))))
+        .unwrap()
+        .center();
+    frames.touch(app, TouchPhase::Start, source);
+    frames.touch(app, TouchPhase::Move, source - vec2(0.0, 40.0));
+    frames.settle(app);
+    let storage = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-tool-storage-rect")))
+        .unwrap();
+    assert!(
+        storage.height() > 80.0,
+        "tray scrolls into view while carrying a tool: {storage:?}"
+    );
+    frames.touch(app, TouchPhase::Move, storage.center());
+    frames.touch(app, TouchPhase::Cancel, storage.center());
+    assert!(app.parked_tools.is_empty(), "cancel never parks a tool");
+    assert!(app.dock_tool_drag.is_none());
+    frames.settle(app);
+    let source = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", Tool::Fineliner))))
+        .unwrap()
+        .center();
+    frames.touch(app, TouchPhase::Start, source);
+    frames.touch(app, TouchPhase::Move, storage.center());
+    frames.touch(app, TouchPhase::End, storage.center());
+    frames.settle(app);
+    assert!(app.parked_tools.contains(&Tool::Fineliner));
+    let stored = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", Tool::Fineliner))))
+        .unwrap()
+        .center();
+    frames.touch(app, TouchPhase::Start, stored);
+    frames.touch(app, TouchPhase::End, stored);
+    assert!(app.parked_tools.is_empty(), "tap restores the stored tool");
 }

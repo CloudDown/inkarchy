@@ -386,16 +386,19 @@ impl InkarchyApp {
                 && matches!(gesture.mode, CanvasGesture::Pan(None)))
             .then_some((gesture.origin, gesture.since))
         });
-        if let Some((_origin, since)) = manage_hold {
+        if let Some((origin, since)) = manage_hold {
             let held = time - since;
             if held >= super::WHEEL_HOLD {
                 self.canvas_touch = None;
                 self.drag_last = None;
-                self.enter_pages_mode();
+                if let Some((col, row)) = self.page_unit_at(origin, canvas) {
+                    self.enter_pages_mode_at(Some((col, row)));
+                    self.start_page_drag(col, row, origin, canvas);
+                } else {
+                    self.enter_pages_mode();
+                }
             } else {
-                ui.ctx().request_repaint_after(Duration::from_secs_f64(
-                    (super::WHEEL_HOLD - held).max(0.001),
-                ));
+                ui.ctx().request_repaint_after(Duration::from_millis(16));
             }
         }
 
@@ -418,6 +421,17 @@ impl InkarchyApp {
 
     pub(super) fn paint_touch_hold(&self, ui: &Ui, painter: &Painter) {
         let Some(g) = &self.canvas_touch else { return };
+        if !self.sheet_tabs_on && !g.moved && matches!(g.mode, CanvasGesture::Pan(None)) {
+            let progress =
+                ((ui.input(|i| i.time) - g.since) / super::WHEEL_HOLD).clamp(0.0, 1.0) as f32;
+            paint_hold_progress(
+                painter,
+                g.origin,
+                progress,
+                self.look.accent,
+                self.look.paper,
+            );
+        }
         if !g.moved && matches!(g.mode, CanvasGesture::Pan(Some(_))) {
             let progress = ((ui.input(|i| i.time) - g.since) / HOLD_TIME).clamp(0.0, 1.0) as f32;
             if progress < 0.2 {
@@ -460,5 +474,25 @@ impl InkarchyApp {
             self.tool = Tool::Text;
             self.sel.clear();
         }
+    }
+}
+
+fn paint_hold_progress(
+    painter: &Painter,
+    center: Pos2,
+    progress: f32,
+    accent: Color32,
+    paper: Color32,
+) {
+    painter.circle_stroke(center, 20.0, Stroke::new(2.5, paper.gamma_multiply(0.75)));
+    let points: Vec<Pos2> = (0..=32)
+        .map(|step| {
+            let angle = -std::f32::consts::FRAC_PI_2
+                + std::f32::consts::TAU * progress * step as f32 / 32.0;
+            center + Vec2::angled(angle) * 20.0
+        })
+        .collect();
+    if points.len() > 1 {
+        painter.add(Shape::line(points, Stroke::new(3.5, accent)));
     }
 }

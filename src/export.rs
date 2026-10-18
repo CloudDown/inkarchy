@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use crate::document::{Note, PageBackground, PaperKind, CORNELL_CUE, CORNELL_SUMMARY};
+use crate::document::{Note, PageBackground, PaperKind, PaperTone, CORNELL_CUE, CORNELL_SUMMARY};
 use crate::ink::{ribbon_outline, InkStroke};
 use crate::look::Look;
 use flate2::write::ZlibEncoder;
@@ -32,18 +32,22 @@ pub fn raster_page(
     let mut pm = Pixmap::new(w, h)?;
     let t = Transform::from_scale(scale, scale);
     if mode == RasterMode::Full {
-        let paper = if note.paper == PaperKind::Slate {
-            rgb(look.desk_deep)
-        } else {
-            rgb(look.paper)
-        };
+        let paper = rgb(look.paper_surface(note.paper_tone));
         pm.fill(paper);
         let drew_bg = page
             .background
             .as_ref()
             .is_some_and(|bg| draw_background(&mut pm, note, bg, scale, note_dir));
         if !drew_bg {
-            draw_template(&mut pm, note.paper, look, t, page_w, page_h);
+            draw_template(
+                &mut pm,
+                note.paper,
+                note.paper_tone,
+                look,
+                t,
+                page_w,
+                page_h,
+            );
         }
     }
     for im in &page.images {
@@ -64,11 +68,7 @@ pub fn raster_page(
         fill_stroke(&mut pm, s, t);
     }
     if let Some(font) = serif_font() {
-        let ink = if note.paper == PaperKind::Slate {
-            rgb(look.fg)
-        } else {
-            rgb(look.ink)
-        };
+        let ink = rgb(look.paper_ink(note.paper_tone));
         for tx in &page.texts {
             if tx.sticky {
                 fill_rect(
@@ -89,7 +89,13 @@ pub fn raster_page(
                 tx.pos[1] * scale,
                 tx.size[0] * scale,
                 tx.size_pt * scale,
-                if tx.sticky { rgb(look.ink) } else { ink },
+                if tx.sticky {
+                    rgb(look.ink)
+                } else if note.paper_tone == PaperTone::Black && tx.color32() == look.ink {
+                    ink
+                } else {
+                    rgb(tx.color32())
+                },
             );
         }
     }
@@ -214,6 +220,7 @@ fn poly_path(pts: &[egui::Pos2]) -> Option<Path> {
 fn draw_template(
     pm: &mut Pixmap,
     kind: PaperKind,
+    tone: PaperTone,
     look: &Look,
     t: Transform,
     page_w: f32,
@@ -224,28 +231,23 @@ fn draw_template(
         ..Paint::default()
     };
     let mut stroke = SkStroke::default();
+    let rule = look.paper_rule(tone);
+    let strong = look.paper_rule_strong(tone);
     match kind {
-        PaperKind::Blank | PaperKind::Slate => {}
+        PaperKind::Blank => {}
         PaperKind::Lined => {
-            paint.set_color(rgb(look.paper_rule));
+            paint.set_color(rgb(rule));
             stroke.width = 0.8;
             let mut y = 88.0;
             while y < page_h - 24.0 {
                 line(pm, 56.0, y, page_w - 24.0, y, &paint, &stroke, t);
                 y += 28.0;
             }
-            let red = look.rust();
-            let paper = look.paper;
-            paint.set_color(Color::from_rgba8(
-                (paper.r() as f32 * 0.62 + red.r() as f32 * 0.38) as u8,
-                (paper.g() as f32 * 0.62 + red.g() as f32 * 0.38) as u8,
-                (paper.b() as f32 * 0.62 + red.b() as f32 * 0.38) as u8,
-                255,
-            ));
+            paint.set_color(rgb(look.paper_margin(tone)));
             line(pm, 64.0, 24.0, 64.0, page_h - 24.0, &paint, &stroke, t);
         }
         PaperKind::Cornell => {
-            paint.set_color(rgb(look.paper_rule_strong));
+            paint.set_color(rgb(strong));
             stroke.width = 1.0;
             line(
                 pm,
@@ -267,7 +269,7 @@ fn draw_template(
                 &stroke,
                 t,
             );
-            paint.set_color(rgb(look.paper_rule));
+            paint.set_color(rgb(rule));
             stroke.width = 0.8;
             let mut y = 88.0;
             let last = page_h - CORNELL_SUMMARY - 8.0;
@@ -286,7 +288,7 @@ fn draw_template(
             }
         }
         PaperKind::Grid => {
-            paint.set_color(rgb(look.paper_rule));
+            paint.set_color(rgb(rule));
             stroke.width = 0.6;
             let mut x = 24.0;
             while x < page_w {
@@ -300,7 +302,7 @@ fn draw_template(
             }
         }
         PaperKind::Dots => {
-            paint.set_color(rgb(look.paper_rule_strong));
+            paint.set_color(rgb(strong));
             let mut y = 32.0;
             while y < page_h - 16.0 {
                 let mut x = 32.0;
@@ -322,11 +324,7 @@ fn draw_template(
             let mut y = 40.0;
             let mut i = 0i32;
             while y < page_h - 20.0 {
-                paint.set_color(if i % 5 == 0 {
-                    rgb(look.paper_rule_strong)
-                } else {
-                    rgb(look.paper_rule)
-                });
+                paint.set_color(if i % 5 == 0 { rgb(strong) } else { rgb(rule) });
                 line(pm, 48.0, y, page_w - 20.0, y, &paint, &stroke, t);
                 y += 8.0;
                 i += 1;
@@ -334,11 +332,7 @@ fn draw_template(
             let mut x = 48.0;
             let mut i = 0i32;
             while x < page_w - 20.0 {
-                paint.set_color(if i % 5 == 0 {
-                    rgb(look.paper_rule_strong)
-                } else {
-                    rgb(look.paper_rule)
-                });
+                paint.set_color(if i % 5 == 0 { rgb(strong) } else { rgb(rule) });
                 line(pm, x, 40.0, x, page_h - 20.0, &paint, &stroke, t);
                 x += 8.0;
                 i += 1;

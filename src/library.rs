@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::document::Note;
+use crate::ink::Tool;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -75,6 +76,12 @@ pub struct Index {
     /// Column count used when `slot` was written. Missing field = the old 5-wide shelf.
     #[serde(default = "default_old_shelf_cols")]
     pub shelf_cols: u32,
+    /// Tools hidden from the note dock and shown in its storage tray.
+    #[serde(default)]
+    pub parked_tools: Vec<Tool>,
+    /// User-mixed opaque RGB inks, appended to the theme palette.
+    #[serde(default)]
+    pub custom_inks: Vec<[u8; 3]>,
 }
 
 fn default_true() -> bool {
@@ -96,6 +103,8 @@ impl Default for Index {
             fiche_pliee: true,
             finger_draw: false,
             shelf_cols: SHELF_COLS,
+            parked_tools: Vec::new(),
+            custom_inks: Vec::new(),
         }
     }
 }
@@ -680,6 +689,22 @@ mod tests {
         assert_eq!(remap(9), 14);
         assert_eq!(remap(10), 20);
         assert_eq!(remap(14), 24);
+    }
+
+    #[test]
+    fn parked_tools_default_for_old_indexes_and_round_trip() {
+        let old: Index = serde_json::from_str(r#"{"seeded":false,"notes":[]}"#)
+            .expect("load an index written before tool storage existed");
+        assert!(old.parked_tools.is_empty());
+        assert!(old.custom_inks.is_empty());
+
+        let mut index = Index::default();
+        index.parked_tools = vec![Tool::Text, Tool::EraserStroke];
+        index.custom_inks = vec![[25, 80, 160]];
+        let encoded = serde_json::to_vec(&index).expect("encode index");
+        let decoded: Index = serde_json::from_slice(&encoded).expect("decode index");
+        assert_eq!(decoded.parked_tools, index.parked_tools);
+        assert_eq!(decoded.custom_inks, index.custom_inks);
     }
 
     #[test]

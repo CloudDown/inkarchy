@@ -6,6 +6,7 @@ use std::process::Command;
 use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
+use crate::document::PaperTone;
 use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, Style, Visuals};
 
 /// Shared serif family. Cloning the `Arc` avoids building a new name every label.
@@ -190,6 +191,52 @@ impl Look {
 
     pub fn cloth_at(&self, i: u8) -> Color32 {
         self.cloth[i as usize % self.cloth.len()]
+    }
+
+    pub fn paper_surface(&self, tone: PaperTone) -> Color32 {
+        match tone {
+            PaperTone::White => Color32::WHITE,
+            PaperTone::Default => self.paper,
+            PaperTone::Black => Color32::BLACK,
+        }
+    }
+
+    pub fn paper_ink(&self, tone: PaperTone) -> Color32 {
+        if tone == PaperTone::Black {
+            Color32::WHITE
+        } else {
+            self.ink
+        }
+    }
+
+    pub fn paper_rule(&self, tone: PaperTone) -> Color32 {
+        if tone == PaperTone::Black {
+            Color32::from_gray(72)
+        } else if tone == PaperTone::White {
+            Color32::from_gray(218)
+        } else {
+            self.paper_rule
+        }
+    }
+
+    pub fn paper_rule_strong(&self, tone: PaperTone) -> Color32 {
+        if tone == PaperTone::Black {
+            Color32::from_gray(112)
+        } else if tone == PaperTone::White {
+            Color32::from_gray(190)
+        } else {
+            self.paper_rule_strong
+        }
+    }
+
+    pub fn paper_margin(&self, tone: PaperTone) -> Color32 {
+        let red = self.rust();
+        let surface = self.paper_surface(tone);
+        if tone == PaperTone::Black {
+            mix(red, Color32::WHITE, 0.30)
+        } else {
+            mix(surface, red, 0.38)
+        }
     }
 
     /// Theme red (ink 3 / Omarchy `red`).

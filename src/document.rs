@@ -52,24 +52,23 @@ pub struct UnitTab {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PaperKind {
+    #[serde(alias = "Slate")]
     Blank,
     Lined,
     Grid,
     Dots,
     #[default]
     Millimetre,
-    Slate,
     Cornell,
 }
 
 impl PaperKind {
-    pub const ALL: [PaperKind; 7] = [
+    pub const ALL: [PaperKind; 6] = [
         PaperKind::Blank,
         PaperKind::Lined,
         PaperKind::Grid,
         PaperKind::Dots,
         PaperKind::Millimetre,
-        PaperKind::Slate,
         PaperKind::Cornell,
     ];
 
@@ -80,7 +79,6 @@ impl PaperKind {
             PaperKind::Grid => "Grid",
             PaperKind::Dots => "Dots",
             PaperKind::Millimetre => "Millimeter",
-            PaperKind::Slate => "Slate",
             PaperKind::Cornell => "Cornell",
         }
     }
@@ -91,8 +89,7 @@ impl PaperKind {
             PaperKind::Lined => PaperKind::Grid,
             PaperKind::Grid => PaperKind::Dots,
             PaperKind::Dots => PaperKind::Millimetre,
-            PaperKind::Millimetre => PaperKind::Slate,
-            PaperKind::Slate => PaperKind::Cornell,
+            PaperKind::Millimetre => PaperKind::Cornell,
             PaperKind::Cornell => PaperKind::Blank,
         }
     }
@@ -104,13 +101,22 @@ impl PaperKind {
             PaperKind::Cornell => Some((88.0, 28.0, page_h - CORNELL_SUMMARY - 8.0)),
             PaperKind::Grid => Some((24.0, 24.0, page_h - 24.0)),
             PaperKind::Millimetre => Some((40.0, 8.0, page_h - 20.0)),
-            PaperKind::Blank | PaperKind::Dots | PaperKind::Slate => None,
+            PaperKind::Blank | PaperKind::Dots => None,
         }
     }
 
     pub fn has_margin_punches(self) -> bool {
         matches!(self, PaperKind::Lined | PaperKind::Cornell)
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PaperTone {
+    White,
+    #[default]
+    Default,
+    Black,
 }
 
 /// Closest ruled y, or `y` if the paper has no rules.
@@ -350,6 +356,8 @@ pub struct Note {
     pub id: Uuid,
     pub title: String,
     pub paper: PaperKind,
+    #[serde(default)]
+    pub paper_tone: PaperTone,
     pub cover: u8,
     #[serde(default)]
     pub emoji: String,
@@ -372,6 +380,7 @@ impl Note {
             id: Uuid::new_v4(),
             title: title.into(),
             paper: PaperKind::Millimetre,
+            paper_tone: PaperTone::Default,
             cover,
             emoji: String::new(),
             created: now,
@@ -394,6 +403,7 @@ impl Note {
             id: self.id,
             title: self.title.clone(),
             paper: self.paper,
+            paper_tone: self.paper_tone,
             cover: self.cover,
             emoji: self.emoji.clone(),
             created: self.created,
@@ -1186,7 +1196,7 @@ mod tests {
 
     #[test]
     fn paper_cycle_includes_cornell() {
-        let mut k = PaperKind::Slate;
+        let mut k = PaperKind::Millimetre;
         k = k.cycle();
         assert_eq!(k, PaperKind::Cornell);
         assert_eq!(k.cycle(), PaperKind::Blank);

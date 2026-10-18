@@ -25,7 +25,7 @@ Open **Pages** (header well, or a long press on empty paper) to add a sheet on a
 
 ### Paper for every idea
 
-Choose lined, Cornell, grid, dotted, graph, or blank paper. Canson paper adds a subtle texture to notes and sketches. Cycle paper with `M`.
+Choose lined, Cornell, grid, dotted, graph, or blank paper. The paper panel also lets you choose white, the theme default, or black for every paper style. Canson paper adds a subtle texture to white and default notes. Cycle paper with `M`.
 
 <p align="center">
   <img src="screens/millimetre.png" alt="Graph paper and drawing tools" width="80%">
@@ -143,7 +143,7 @@ The lectern follows the stylus: in range, the hand pans and the nib writes. Put 
 
 On a touch screen, drag an image or a text box directly with one finger, then use its corner handles to resize it. A short hold on a handwritten stroke selects it. `ctrl+d` duplicates the selection and `delete` removes it. Images are selected as soon as they are inserted.
 
-A finger on empty paper pans the canvas; two fingers pan even when something is selected. On the trackpad, two-finger drag scrolls and two-finger pinch zooms from finger distance (one finger may stay still while the other moves in or out). If the pad ignores a resting finger, use ctrl + two-finger scroll to zoom. Three-finger swipe is left to the desktop (workspace switching). On the screen, pinch still zooms. Choose **Draw with finger** in the notebook menu to use the pens by touch. The erasers and lasso work with a finger directly. Double-tap text to type. Double-tap a sticky to open it large for drawing with the dock; choose the Text tool to type. One tap leaves it on the page. Hold a sticky for its colour. Hold a pen, or tap the ink dot, to open the colour saucer with the thickness ribbon underneath. The area eraser uses that same size; its on-screen brush stays steady, so zooming out covers more of the page.
+A finger on empty paper pans the canvas; two fingers pan even when something is selected. On the trackpad, two-finger drag scrolls and two-finger pinch zooms from finger distance (one finger may stay still while the other moves in or out). If the pad ignores a resting finger, use ctrl + two-finger scroll to zoom. Three-finger swipe is left to the desktop (workspace switching). On the screen, pinch still zooms. Choose **Draw with finger** in the notebook menu to use the pens by touch. The erasers and lasso work with a finger directly. Double-tap text to type. Double-tap a sticky to open it large for drawing with the dock; choose the Text tool to type. One tap leaves it on the page. Hold a sticky for its colour. Hold a pen, or tap the ink dot, to open the ink case. Tap a color swatch to use it, or **+** to mix and save a custom color. Choose one of four stroke widths or use the slider for precise adjustment. Drag a tool into the storage tray below to hide it; drag it back to the toolbar, or tap the stored tool, to restore it. Dragging a tool opens the tray automatically. Custom colors and stored tools are remembered across restarts. The area eraser uses that same size; its on-screen brush stays steady, so zooming out covers more of the page.
 
 | | Mouse | Stylus in range |
 |---|---|---|
@@ -159,7 +159,7 @@ A finger on empty paper pans the canvas; two fingers pan even when something is 
 | `e` / `shift+e` | stroke (whole stroke) / area (under cursor) |
 | `l` `t` `i` | lasso, text, image |
 | `[` `]` `1-9` | thickness, ink |
-| `m` | cycle paper (blank, lined, grid, dotted, graph, slate) |
+| `m` | cycle paper (blank, lined, grid, dotted, graph, Cornell) |
 | corners / `0` / click on % | fit to screen |
 | hold the pen still ~1s | line / arrow / triangle / square / diamond / ellipse / circle |
 | `ctrl+s` | save |
