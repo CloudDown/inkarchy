@@ -4,9 +4,28 @@ Stylus notes on an **Omarchy lectern**. Inkarchy is a native Rust and egui app f
 
 The **shelf** holds your notebooks; each notebook opens onto a page with paper, drawing tools, and a ruler. The interface follows the active Omarchy theme, while the paper keeps its own look.
 
-Your notes stay on your computer in `~/.local/share/inkarchy`. Inkarchy needs no account or network connection. Notes from Cahier (`~/.local/share/omacourses`) are moved there on first launch.
+Your notes stay on your computer in `~/.local/share/inkarchy`. Writing needs no account or network connection. The optional exercise coach can use a local model or an API provider you configure. Notes from Cahier (`~/.local/share/omacourses`) are moved there on first launch.
 
 ## What's New
+
+### Exercise coach
+
+Click the **graduation cap** beside the paper style button, or **Notebook menu → Exercise coach**. Enable it for the current notebook; the choice is remembered. The long, thin bar beside the cap shows feedback on the latest completed, readable maths or physics step. Click the bar to see what it read and a short explanation, without revealing the solution. If the statement is on another page, select that page in the coach panel. On narrow windows, the notebook title can be edited from the notebook menu.
+
+- **Local · Ollama:** run Ollama on this computer and install a vision model with `ollama pull qwen3-vl:4b-instruct`. Enter its name and click **Test connection**, then **Apply settings**. Use an explicit Instruct variant: Thinking variants may consume the short response budget before producing a verdict. The first analysis includes model loading; CPU-only inference can be too slow for continuous feedback. There is no automatic switch to a remote provider.
+- **API · Gemini:** select the provider, enter a Gemini API key and choose **Use for session** or **Save in keyring**, then apply the settings. The default model is `gemini-3.5-flash-lite`. Enabled notebooks send the current page, response crops and any selected reference to Google; provider charges and data policies apply. Keys are never stored in notebook files or `library.json`. Saving a key uses Secret Service through `secret-tool` (`libsecret` on Arch); if the keyring is unavailable, the session option still works.
+
+The meter is a qualitative estimate, not a grade or probability. Unfinished formulas, unclear handwriting and missing statements stay neutral. Corrections invalidate the previous evaluation. Analysis runs in the background, starts after a short writing pause and samples continuous writing at most once every 1.2 seconds, using completed strokes. It makes no further requests while the page is unchanged. Provider errors suspend requests until **Retry analysis**; they do not interrupt writing. Timing details are available in the panel.
+
+The optional local smoke test uses a synthetic vector-ink exercise, never your notebooks:
+
+```bash
+INKARCHY_AI_TEST_MODEL=qwen3-vl:4b-instruct cargo test --offline live_local_coach_smoke -- --ignored --nocapture
+```
+
+It measures image preparation and model latency on a first and a subsequent request. Real handwriting, fractions, units, corrections and PDF exercises still need checking on the selected model; fast feedback is a target rather than a guaranteed delay.
+
+Model selection and the limits of the current measurements are documented in [Exercise coach models](EXERCISE_COACH_MODELS.md).
 
 ### Multi-page notebooks, two ways to read them
 
@@ -141,7 +160,7 @@ windowrule = float, class:^(com\.clouddown\.inkarchy)$
 
 The lectern follows the stylus: in range, the hand pans and the nib writes. Put it down, the mouse writes again.
 
-On a touch screen, drag an image or a text box directly with one finger, then use its corner handles to resize it. A short hold on a handwritten stroke selects it. `ctrl+d` duplicates the selection and `delete` removes it. Images are selected as soon as they are inserted.
+Choose the Hand tool (`v`) to select, move, and resize page objects with the mouse or one finger. Its corner handles resize the selection. The Lasso tool only selects a group by drawing around it. `ctrl+d` duplicates the selection and `delete` removes it. Images switch to the Hand tool and are selected as soon as they are inserted. In Pages mode, tap an image’s red `−` mark to remove it, like a sticky note.
 
 A finger on empty paper pans the canvas; two fingers pan even when something is selected. On the trackpad, two-finger drag scrolls and two-finger pinch zooms from finger distance (one finger may stay still while the other moves in or out). If the pad ignores a resting finger, use ctrl + two-finger scroll to zoom. Three-finger swipe is left to the desktop (workspace switching). On the screen, pinch still zooms. Choose **Draw with finger** in the notebook menu to use the pens by touch. The erasers and lasso work with a finger directly. Double-tap text to type. Double-tap a sticky to open it large for drawing with the dock; choose the Text tool to type. One tap leaves it on the page. Hold a sticky for its colour. Hold a pen, or tap the ink dot, to open the ink case. Tap a color swatch to use it, or **+** to mix and save a custom color. Choose one of four stroke widths or use the slider for precise adjustment. Drag a tool into the storage tray below to hide it; drag it back to the toolbar, or tap the stored tool, to restore it. Dragging a tool opens the tray automatically. Custom colors and stored tools are remembered across restarts. The area eraser uses that same size; its on-screen brush stays steady, so zooming out covers more of the page.
 

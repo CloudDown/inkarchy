@@ -34,6 +34,9 @@ lopdf = "0.36"
 resvg = "0.45"
 usvg = "0.45"
 kurbo = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+base64 = "0.22"
+tokio = { version = "1", features = ["rt", "time"] }
 
 # Strip symbols only. LTO and codegen-units = 1 saved about 5 Mo
 # and made every release build rebuild the whole dependency graph.

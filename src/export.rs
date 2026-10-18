@@ -12,6 +12,8 @@ use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, Pixmap, Stroke as SkS
 pub enum RasterMode {
     /// Paper, background, and ink.
     Full,
+    /// Full page, but missing/corrupt exercise assets must not be silently omitted.
+    Analysis,
     /// Ink, text, and placed images on a transparent page.
     Annotations,
 }
@@ -31,7 +33,7 @@ pub fn raster_page(
     let h = (page_h * scale).round().max(1.0) as u32;
     let mut pm = Pixmap::new(w, h)?;
     let t = Transform::from_scale(scale, scale);
-    if mode == RasterMode::Full {
+    if mode != RasterMode::Annotations {
         let paper = rgb(look.paper_surface(note.paper_tone));
         pm.fill(paper);
         let drew_bg = page
@@ -39,6 +41,9 @@ pub fn raster_page(
             .as_ref()
             .is_some_and(|bg| draw_background(&mut pm, note, bg, scale, note_dir));
         if !drew_bg {
+            if mode == RasterMode::Analysis && page.background.is_some() {
+                return None;
+            }
             draw_template(
                 &mut pm,
                 note.paper,
@@ -62,6 +67,21 @@ pub fn raster_page(
                 ih,
                 &rgba,
             );
+        } else if mode == RasterMode::Analysis {
+            return None;
+        }
+    }
+    if mode == RasterMode::Analysis {
+        for tx in page.texts.iter().filter(|tx| tx.sticky) {
+            fill_rect(
+                &mut pm,
+                tx.pos[0],
+                tx.pos[1],
+                tx.size[0],
+                tx.size[1],
+                tx.color32(),
+                t,
+            );
         }
     }
     for s in &page.strokes {
@@ -70,7 +90,7 @@ pub fn raster_page(
     if let Some(font) = serif_font() {
         let ink = rgb(look.paper_ink(note.paper_tone));
         for tx in &page.texts {
-            if tx.sticky {
+            if tx.sticky && mode != RasterMode::Analysis {
                 fill_rect(
                     &mut pm,
                     tx.pos[0] * scale,
@@ -98,6 +118,8 @@ pub fn raster_page(
                 },
             );
         }
+    } else if mode == RasterMode::Analysis && !page.texts.is_empty() {
+        return None;
     }
     Some(pm)
 }

@@ -82,6 +82,9 @@ pub struct Index {
     /// User-mixed opaque RGB inks, appended to the theme palette.
     #[serde(default)]
     pub custom_inks: Vec<[u8; 3]>,
+    /// Optional exercise coaching; credentials are stored in the system keyring.
+    #[serde(default)]
+    pub ai: crate::ai::AiSettings,
 }
 
 fn default_true() -> bool {
@@ -105,6 +108,7 @@ impl Default for Index {
             shelf_cols: SHELF_COLS,
             parked_tools: Vec::new(),
             custom_inks: Vec::new(),
+            ai: crate::ai::AiSettings::default(),
         }
     }
 }

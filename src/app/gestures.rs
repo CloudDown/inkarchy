@@ -192,6 +192,7 @@ impl InkarchyApp {
                     && (self.sheet_tab_at(screen, canvas).is_some()
                         || self.page_minus_at(screen, canvas).is_some()
                         || self.sticky_minus_at(screen, canvas).is_some()
+                        || self.image_minus_at(screen, canvas).is_some()
                         || self.page_unit_at(screen, canvas).is_some())
                 {
                     // Marks and page bodies stay with pages_or_pan (reorder / pan).
@@ -215,21 +216,24 @@ impl InkarchyApp {
                 {
                     self.sel.clear();
                     CanvasGesture::Tool
-                } else if let Some((corner, anchor)) = self.selection_corner(screen, canvas) {
-                    CanvasGesture::Resize {
-                        anchor,
-                        initial: corner - anchor,
-                        scale: 1.0,
+                } else if self.tool == Tool::Hand {
+                    if let Some((corner, anchor)) = self.selection_corner(screen, canvas) {
+                        CanvasGesture::Resize {
+                            anchor,
+                            initial: corner - anchor,
+                            scale: 1.0,
+                        }
+                    } else if self.selection_bounds().is_some_and(|b| b.contains(paper)) {
+                        self.finish_text_edit();
+                        CanvasGesture::Move
+                    } else if let Some(hit) = hit {
+                        self.finish_text_edit();
+                        self.sel = vec![hit];
+                        CanvasGesture::Move
+                    } else {
+                        self.sel.clear();
+                        CanvasGesture::Pan(None)
                     }
-                } else if self.selection_bounds().is_some_and(|b| b.contains(paper)) {
-                    self.finish_text_edit();
-                    CanvasGesture::Move
-                } else if let Some(hit) =
-                    hit.filter(|s| s.kind != SelKind::Stroke || self.tool == Tool::Lasso)
-                {
-                    self.finish_text_edit();
-                    self.sel = vec![hit];
-                    CanvasGesture::Move
                 } else if self.tool == Tool::Lasso {
                     CanvasGesture::Tool
                 } else if self.tool == Tool::Text {
@@ -402,35 +406,25 @@ impl InkarchyApp {
             }
         }
 
-        // Holding over ink selects the stroke; moving before the threshold pans.
-        if let Some(gesture) = &mut self.canvas_touch {
-            if let CanvasGesture::Pan(Some(hit)) = gesture.mode {
-                if !gesture.moved {
-                    if time - gesture.since >= HOLD_TIME {
-                        gesture.mode = CanvasGesture::Move;
-                        self.sel = vec![hit];
-                        self.finish_text_edit();
-                    } else {
-                        ui.ctx().request_repaint_after(Duration::from_millis(16));
-                    }
-                }
-            }
-        }
         !tool_input
     }
 
     pub(super) fn paint_touch_hold(&self, ui: &Ui, painter: &Painter) {
         let Some(g) = &self.canvas_touch else { return };
         if !self.sheet_tabs_on && !g.moved && matches!(g.mode, CanvasGesture::Pan(None)) {
-            let progress =
-                ((ui.input(|i| i.time) - g.since) / super::WHEEL_HOLD).clamp(0.0, 1.0) as f32;
-            paint_hold_progress(
-                painter,
-                g.origin,
-                progress,
-                self.look.accent,
-                self.look.paper,
-            );
+            let elapsed = ui.input(|i| i.time) - g.since;
+            if elapsed >= super::HOLD_RING_DELAY {
+                let progress = ((elapsed - super::HOLD_RING_DELAY)
+                    / (super::WHEEL_HOLD - super::HOLD_RING_DELAY))
+                    .clamp(0.0, 1.0) as f32;
+                paint_hold_progress(
+                    painter,
+                    g.origin,
+                    progress,
+                    self.look.accent,
+                    self.look.paper,
+                );
+            }
         }
         if !g.moved && matches!(g.mode, CanvasGesture::Pan(Some(_))) {
             let progress = ((ui.input(|i| i.time) - g.since) / HOLD_TIME).clamp(0.0, 1.0) as f32;

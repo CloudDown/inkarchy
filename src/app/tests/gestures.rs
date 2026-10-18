@@ -24,19 +24,19 @@ fn drawing_view(app: &mut InkarchyApp, frames: &mut Frames) {
 }
 
 #[test]
-fn finger_moves_and_resizes_images_without_switching_tools_or_panning() {
+fn hand_moves_and_resizes_images_without_panning() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Direct images");
     let app = &mut fixture.app;
     app.open_note(id);
     app.insert_png(&png(240, 120), 0, pos2(180.0, 180.0), None);
-    assert_eq!(app.tool, Tool::Lasso);
+    assert_eq!(app.tool, Tool::Hand);
     assert_eq!(app.sel.len(), 1, "new image is ready to manipulate");
     let mut frames = Frames::new(app);
     drawing_view(app, &mut frames);
     let camera = app.camera;
     app.sel.clear();
-    app.tool = Tool::Brush;
+    app.tool = Tool::Hand;
     app.undo.clear();
     let start = app.camera.to_screen(pos2(280.0, 235.0), app.canvas_rect);
     frames.touch(app, TouchPhase::Start, start);
@@ -47,7 +47,7 @@ fn finger_moves_and_resizes_images_without_switching_tools_or_panning() {
         [240.0, 220.0]
     );
     assert_eq!(app.camera.pan, camera.pan);
-    assert_eq!(app.tool, Tool::Brush);
+    assert_eq!(app.tool, Tool::Hand);
     assert!(app.canvas_touch.is_none() && app.drag_last.is_none());
     frames.settle(app);
     let before = app.note.as_ref().unwrap().pages[0].images[0].clone();
@@ -136,7 +136,7 @@ fn finger_pan_ink_eraser_and_text_have_distinct_gestures() {
 }
 
 #[test]
-fn long_hold_selects_ink_but_dragging_it_pans() {
+fn hand_selects_and_moves_ink_while_a_brush_pans() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Hold stroke");
     let app = &mut fixture.app;
@@ -148,11 +148,10 @@ fn long_hold_selects_ink_but_dragging_it_pans() {
     app.note.as_mut().unwrap().pages[0].strokes.push(stroke);
     let mut frames = Frames::new(app);
     drawing_view(app, &mut frames);
+    app.tool = Tool::Hand;
     let camera = app.camera;
     let p = camera.to_screen(pos2(300.0, 235.0), app.canvas_rect);
     frames.touch(app, TouchPhase::Start, p);
-    frames.time += 0.4;
-    frames.step(app, vec![]);
     assert_eq!(app.sel.len(), 1);
     assert_eq!(app.sel[0].id, id);
     frames.touch(app, TouchPhase::Move, p + vec2(32.0, 48.0));
@@ -163,6 +162,7 @@ fn long_hold_selects_ink_but_dragging_it_pans() {
         pos2(232.0, 268.0)
     );
     app.sel.clear();
+    app.tool = Tool::Brush;
     let p = p + vec2(32.0, 48.0);
     frames.touch(app, TouchPhase::Start, p);
     frames.touch(app, TouchPhase::Move, p + vec2(45.0, 10.0));
@@ -407,6 +407,7 @@ fn finger_text_selection_offers_edit_and_cancel_releases_object_grab() {
     text.size = [260.0, 90.0];
     let text_id = text.id;
     app.note.as_mut().unwrap().pages[0].texts.push(text);
+    app.tool = Tool::Hand;
     let mut frames = Frames::new(app);
     drawing_view(app, &mut frames);
     let p = app.camera.to_screen(pos2(300.0, 240.0), app.canvas_rect);
@@ -439,6 +440,7 @@ fn finger_lasso_selects_a_group_of_images_and_keeps_camera_still() {
     app.insert_png(&png(100, 80), 0, pos2(200.0, 200.0), None);
     app.insert_png(&png(100, 80), 0, pos2(400.0, 200.0), None);
     app.sel.clear();
+    app.tool = Tool::Lasso;
     let mut frames = Frames::new(app);
     drawing_view(app, &mut frames);
     let camera = app.camera;

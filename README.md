@@ -24,6 +24,8 @@ Uninstall: `curl -fsSL https://raw.githubusercontent.com/CloudDown/inkarchy/main
 
 ## Usage
 
+Optional **Exercise coach**: use the graduation cap beside the paper style button to connect a local Ollama vision model or Gemini with your own API key. A slim bar shows a qualitative evaluation of handwritten maths and physics steps. Disabled by default; activation is remembered per notebook. [Setup and data handling](docs/GUIDE.md#exercise-coach).
+
 ```bash
 inkarchy                      # open the shelf
 inkarchy ~/Downloads/x.pdf    # open a PDF (or PNG, JPEG, WEBP, SVG, .txt, .md) as a notebook

@@ -2,6 +2,108 @@ use super::*;
 mod gestures;
 
 #[test]
+fn coach_settings_remember_notebook_and_do_not_shift_the_canvas() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Exercise coach");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let canvas = app.canvas_rect;
+    assert!(!app.coach_enabled());
+    frames.snapshot("exercise-coach-header");
+    let cap = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("coach-button-rect")))
+        .unwrap();
+    frames.drag(app, cap.center(), cap.center());
+    assert!(app.coach.open);
+    frames.settle(app);
+    frames.snapshot("exercise-coach-settings");
+    let toggle = frames.text_center("Enable in this notebook");
+    frames.drag(app, toggle, toggle);
+    assert!(app.coach_enabled());
+    assert_eq!(canvas, app.canvas_rect);
+    let saved: crate::library::Index =
+        serde_json::from_slice(&std::fs::read(app.lib.root.join("library.json")).unwrap()).unwrap();
+    assert!(saved.ai.enabled_notebooks.contains(&id));
+    frames.size = vec2(360.0, 480.0);
+    frames.settle(app);
+    frames.snapshot("exercise-coach-compact");
+    frames.key(app, Key::Escape);
+    frames.settle(app);
+    frames.snapshot("exercise-coach-header-compact");
+    let bar = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("coach-meter-rect")))
+        .unwrap();
+    frames.drag(app, bar.center(), bar.center());
+    assert!(app.coach.open, "the bar opens the explanation too");
+    frames.size = vec2(1280.0, 860.0);
+    frames.settle(app);
+    app.close_desk();
+    app.open_note(id);
+    frames.settle(app);
+    assert!(app.coach_enabled());
+    assert!(app.coach.session.result.is_none());
+    assert_eq!(canvas, app.canvas_rect);
+}
+
+#[test]
+fn coach_keeps_completed_step_during_ink_but_discards_it_on_undo() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Exercise");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    app.coach.session.result = Some(crate::ai::Analysis {
+        exercise_found: true,
+        readable: true,
+        complete_step: true,
+        verdict: crate::ai::Verdict::OnTrack,
+        statement: "Solve 2x+3=11".into(),
+        recognized_step: "2x=8".into(),
+        explanation: "Valid subtraction.".into(),
+        region: None,
+    });
+    let mut stroke = InkStroke::new(Nib::Fineliner, Color32::BLACK, 2.0);
+    stroke.push(InkPoint::new(pos2(100.0, 100.0), 0.7));
+    app.push_snapshot();
+    app.live = Some((0, stroke));
+    app.finish_live();
+    assert!(app.coach.session.result.is_some());
+    assert!(app.undo.undo(app.note.as_mut().unwrap()));
+    app.mark_dirty();
+    assert!(app.coach.session.result.is_none());
+}
+
+#[test]
+fn coach_fields_keep_typing_shortcuts_out_of_the_document_and_escape_closes_panel() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Coach fields");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    app.tool = Tool::Brush;
+    let mut frames = Frames::new(app);
+    app.open_coach();
+    frames.settle(app);
+    let connection = frames.text_center("Model & connection");
+    frames.drag(app, connection, connection);
+    frames.settle(app);
+    let field = frames.text_center("qwen3-vl:4b-instruct");
+    frames.drag(app, field, field);
+    assert!(frames.ctx.wants_keyboard_input());
+    frames.key(app, Key::P);
+    frames.key(app, Key::Backspace);
+    assert_eq!(app.tool, Tool::Brush);
+    assert!(app.note.as_ref().unwrap().pages[0].strokes.is_empty());
+    frames.key(app, Key::Escape);
+    assert!(!app.coach.open);
+    assert!(matches!(app.scene, Scene::Desk));
+}
+
+#[test]
 fn object_selection_moves_resizes_and_offers_actions_with_mouse_and_touch() {
     for touch in [false, true] {
         let mut fixture = Fixture::new();
@@ -13,7 +115,7 @@ fn object_selection_moves_resizes_and_offers_actions_with_mouse_and_touch() {
         text.size = [160.0, 100.0];
         let text_id = text.id;
         app.note.as_mut().unwrap().pages[0].texts.push(text);
-        app.tool = Tool::Lasso;
+        app.tool = Tool::Hand;
         let mut frames = Frames::new(app);
         frames.settle(app);
         app.camera = Camera {
@@ -752,6 +854,42 @@ fn responsive_note_controls_do_not_overlap_through_resizes() {
                         assert!(!face.intersects(*other), "header buttons overlap");
                     }
                 }
+                let [paper, cap, meter] =
+                    ["paper-button-rect", "coach-button-rect", "coach-meter-rect"].map(|key| {
+                        frames
+                            .ctx
+                            .data(|d| d.get_temp::<Rect>(Id::new(key)))
+                            .unwrap()
+                    });
+                if edge == DockEdge::Bottom && size.x == 1024.0 && accessory == 1 {
+                    frames.snapshot("exercise-coach-header-1024");
+                }
+                for rect in [paper, cap, meter] {
+                    assert!(
+                        screen.contains_rect(rect),
+                        "header control outside {size:?}: {rect:?}"
+                    );
+                }
+                assert!(
+                    cap.left() < paper.left(),
+                    "coach and page-style icons sit in the right cluster"
+                );
+                if size.x >= 760.0 {
+                    assert!(
+                        meter
+                            .center()
+                            .distance(pos2(size.x * 0.5, meter.center().y))
+                            < 1.0
+                    );
+                    assert!(
+                        meter.right() < cap.left(),
+                        "center bar stays left of the right icon cluster"
+                    );
+                    assert!(
+                        meter.width() >= 80.0,
+                        "wide screens keep a visible centered evaluation bar: {meter:?}"
+                    );
+                }
                 if edge == DockEdge::Bottom && size.x == 320.0 && accessory == 1 {
                     frames.snapshot("responsive-note-small");
                 }
@@ -1347,6 +1485,7 @@ fn finger_hold_on_a_sticky_opens_the_cloth_wheel() {
     frames.settle(app);
     let tx = TextBox::sticky(pos2(400.0, 300.0), app.look.sticky_yellow());
     app.note.as_mut().unwrap().pages[0].texts.push(tx);
+    app.tool = Tool::Hand;
     frames.settle(app);
     let screen = {
         let tx = &app.note.as_ref().unwrap().pages[0].texts[0];
@@ -1489,7 +1628,7 @@ fn sticky_tap_fills_the_sheet_and_a_corner_drag_resizes_it() {
         id: sticky_id,
         kind: SelKind::Text,
     }];
-    app.tool = Tool::Lasso;
+    app.tool = Tool::Hand;
     frames.settle(app);
     let before = app.note.as_ref().unwrap().pages[0].texts[0].size;
     let corner = {
@@ -1594,6 +1733,46 @@ fn pages_mode_minus_removes_a_sticky() {
         .texts
         .iter()
         .any(|t| t.id == sticky_id));
+}
+
+#[test]
+fn pages_mode_minus_removes_an_image_with_undo() {
+    for touch in [false, true] {
+        let mut fixture = Fixture::new();
+        let id = fixture.notebook("Image minus");
+        let app = &mut fixture.app;
+        app.open_note(id);
+        let image_id = Uuid::new_v4();
+        app.note.as_mut().unwrap().pages[0].images.push(ImageObj {
+            id: image_id,
+            pos: [220.0, 180.0],
+            size: [120.0, 90.0],
+            file: "missing.png".into(),
+        });
+        let mut frames = Frames::new(app);
+        frames.settle(app);
+        app.enter_pages_mode();
+        frames.settle(app);
+        let image = app.image_screen_rect(
+            app.canvas_rect,
+            0,
+            &app.note.as_ref().unwrap().pages[0].images[0],
+        );
+        let minus = image_minus_band(image).center();
+        assert_eq!(
+            app.image_minus_at(minus, app.canvas_rect),
+            Some((0, image_id))
+        );
+        if touch {
+            frames.touch(app, TouchPhase::Start, minus);
+            frames.touch(app, TouchPhase::End, minus);
+        } else {
+            frames.drag(app, minus, minus);
+        }
+        assert!(app.note.as_ref().unwrap().pages[0].images.is_empty());
+        assert!(app.undo.undo(app.note.as_mut().unwrap()));
+        assert_eq!(app.note.as_ref().unwrap().pages[0].images[0].id, image_id);
+    }
 }
 
 #[test]
@@ -1893,6 +2072,49 @@ fn tools_can_be_stored_and_restored_by_dragging_between_panel_and_dock() {
         assert!(app.lib.index.parked_tools.is_empty());
         assert!(app.dock_tool_drag.is_none());
     }
+}
+
+#[test]
+fn hand_tool_is_available_and_owns_object_manipulation() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Hand tool");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+
+    let hand = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", Tool::Hand))))
+        .expect("hand is present in the toolbar");
+    frames.drag(app, hand.center(), hand.center());
+    assert_eq!(app.tool, Tool::Hand);
+
+    let mut text = TextBox::new(pos2(180.0, 180.0), Color32::BLACK);
+    text.text = "Move with hand".into();
+    text.size = [160.0, 80.0];
+    app.note.as_mut().unwrap().pages[0].texts.push(text);
+    app.camera = Camera {
+        pan: vec2(30.0, 30.0),
+        zoom: 1.0,
+        stretch_y: None,
+    };
+    app.fitted_cell = None;
+    frames.settle(app);
+    let start = app.camera.to_screen(pos2(240.0, 220.0), app.canvas_rect);
+    frames.drag(app, start, start + vec2(50.0, 25.0));
+    assert_eq!(
+        app.note.as_ref().unwrap().pages[0].texts[0].pos,
+        [230.0, 205.0]
+    );
+
+    app.tool = Tool::Lasso;
+    app.sel.clear();
+    frames.settle(app);
+    let before = app.note.as_ref().unwrap().pages[0].texts[0].pos;
+    let start = app.camera.to_screen(pos2(260.0, 230.0), app.canvas_rect);
+    frames.drag(app, start, start + vec2(40.0, 20.0));
+    assert_eq!(app.note.as_ref().unwrap().pages[0].texts[0].pos, before);
 }
 
 #[test]
@@ -2348,6 +2570,19 @@ fn finger_long_press_on_page_shows_progress_ring() {
     frames.touch(app, TouchPhase::Start, screen);
 
     assert!(
+        !frames.output.as_ref().unwrap().shapes.iter().any(|shape| {
+            matches!(
+                &shape.shape,
+                Shape::Circle(circle)
+                    if circle.center.distance(screen) < 0.5
+                        && (circle.radius - 20.0).abs() < 0.5
+            )
+        }),
+        "a normal touch does not immediately draw the hold indicator"
+    );
+    frames.time += HOLD_RING_DELAY + 0.02;
+    frames.step(app, vec![]);
+    assert!(
         frames.output.as_ref().unwrap().shapes.iter().any(|shape| {
             matches!(
                 &shape.shape,
@@ -2357,7 +2592,7 @@ fn finger_long_press_on_page_shows_progress_ring() {
                         && (circle.stroke.width - 2.5).abs() < 0.1
             )
         }),
-        "a stationary finger shows the hold progress track"
+        "the hold indicator appears only after the finger has paused"
     );
     assert!(
         !app.sheet_tabs_on,
