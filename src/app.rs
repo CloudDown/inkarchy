@@ -411,6 +411,12 @@ pub struct InkarchyApp {
     pages_marks_ready: bool,
     /// Press on a `+` or `−` that commits only if the finger lifts in place.
     page_mark: Option<PageMarkPress>,
+    /// Long-press on empty paper to enter Pages manage mode.
+    pages_manage_hold: Option<PagesManageHold>,
+    /// Long-press on a page body in manage mode, before the drag starts.
+    page_drag_hold: Option<PageDragHold>,
+    /// Dragging a page toward a neighbour slot (or swap).
+    page_drag: Option<PageDrag>,
 }
 
 /// A page mark under the pointer. `travel` is how far the press has moved.
@@ -425,6 +431,29 @@ enum PageMark {
     Add(i32, i32),
     Tear(i32, i32),
     TearSticky(usize, Uuid),
+}
+
+#[derive(Clone, Copy)]
+struct PagesManageHold {
+    screen: Pos2,
+    t0: f64,
+}
+
+#[derive(Clone, Copy)]
+struct PageDragHold {
+    col: i32,
+    row: i32,
+    screen: Pos2,
+    t0: f64,
+}
+
+#[derive(Clone, Copy)]
+struct PageDrag {
+    col: i32,
+    row: i32,
+    /// Pointer offset from the page screen origin when the drag armed.
+    grab: Vec2,
+    screen: Pos2,
 }
 
 impl InkarchyApp {
@@ -589,6 +618,9 @@ impl InkarchyApp {
             sheet_tabs_on: false,
             pages_marks_ready: false,
             page_mark: None,
+            pages_manage_hold: None,
+            page_drag_hold: None,
+            page_drag: None,
         }
     }
 
@@ -834,6 +866,7 @@ impl InkarchyApp {
         self.sheet_tabs_on = false;
         self.pages_marks_ready = false;
         self.page_mark = None;
+        self.clear_page_drag_state();
         self.page_press_owned = false;
         self.autosave();
         if let Some(n) = self.lib.load_note(id) {
@@ -875,6 +908,7 @@ impl InkarchyApp {
         self.sheet_tabs_on = false;
         self.pages_marks_ready = false;
         self.page_mark = None;
+        self.clear_page_drag_state();
         self.page_press_owned = false;
         // Save exactly once on the way out. Calling autosave first could
         // serialize a large notebook twice before the shelf became visible.
@@ -4704,6 +4738,70 @@ impl InkarchyApp {
         }
     }
 
+    /// Long-press on empty page paper opens Pages manage mode.
+    /// True means this frame belongs to the hold, not the tool.
+    fn take_pages_manage_hold(
+        &mut self,
+        ui: &Ui,
+        rect: Rect,
+        screen: &mut Pos2,
+        primary_down: bool,
+        primary_pressed: &mut bool,
+        primary_released: &mut bool,
+    ) -> bool {
+        if self.sheet_tabs_on || self.sticky_sheet.is_some() {
+            self.pages_manage_hold = None;
+            return false;
+        }
+        if self.tablet.snapshot().eraser {
+            self.pages_manage_hold = None;
+            return false;
+        }
+        let time = ui.input(|i| i.time);
+        if *primary_pressed {
+            let paper = self.camera.to_paper(*screen, rect);
+            let on_page = self.page_unit_at(*screen, rect).is_some();
+            let blocked = self.sticky_at(paper).is_some() || self.hit_object(paper).is_some();
+            if on_page && !blocked {
+                self.pages_manage_hold = Some(PagesManageHold {
+                    screen: *screen,
+                    t0: time,
+                });
+                ui.ctx()
+                    .request_repaint_after(Duration::from_secs_f64(WHEEL_HOLD));
+                return true;
+            }
+            self.pages_manage_hold = None;
+        }
+        let Some(hold) = self.pages_manage_hold else {
+            return false;
+        };
+        if screen.distance(hold.screen) > 8.0 {
+            let origin = hold.screen;
+            self.pages_manage_hold = None;
+            *screen = origin;
+            *primary_pressed = true;
+            return false;
+        }
+        if time - hold.t0 >= WHEEL_HOLD {
+            self.pages_manage_hold = None;
+            self.enter_pages_mode();
+            return true;
+        }
+        if *primary_released || !primary_down {
+            let origin = hold.screen;
+            self.pages_manage_hold = None;
+            *screen = origin;
+            *primary_pressed = true;
+            *primary_released = true;
+            return false;
+        }
+        let left = WHEEL_HOLD - (time - hold.t0);
+        ui.ctx()
+            .request_repaint_after(Duration::from_secs_f64(left.max(0.001)));
+        true
+    }
+
     /// Long-press on the sticky body. A short tap falls through as a normal press.
     /// True means this frame belongs to the hold, not the pen.
     fn take_sticky_hold(
@@ -6961,6 +7059,7 @@ impl InkarchyApp {
         if self.sheet_tabs_on {
             self.paint_page_minuses(ui, &painter, rect);
             self.paint_sticky_minuses(ui, &painter, rect);
+            self.paint_page_drag(ui, &painter, rect);
             self.cursor_for_tool(ui, &resp);
             return;
         }
@@ -7260,6 +7359,16 @@ impl InkarchyApp {
             }
         }
         if self.take_sticky_hold(
+            ui,
+            rect,
+            &mut screen,
+            primary_down,
+            &mut primary_pressed,
+            &mut primary_released,
+        ) {
+            return;
+        }
+        if self.take_pages_manage_hold(
             ui,
             rect,
             &mut screen,
@@ -8517,11 +8626,18 @@ impl InkarchyApp {
         }
     }
 
+    fn clear_page_drag_state(&mut self) {
+        self.pages_manage_hold = None;
+        self.page_drag_hold = None;
+        self.page_drag = None;
+    }
+
     fn leave_pages_mode(&mut self) {
         self.tab_held = false;
         self.page_press_owned = false;
         self.page_mark = None;
         self.pages_marks_ready = false;
+        self.clear_page_drag_state();
         self.sheet_tabs_on = false;
     }
 
@@ -8540,6 +8656,7 @@ impl InkarchyApp {
         self.tin_open = false;
         self.nib_open = false;
         self.page_mark = None;
+        self.clear_page_drag_state();
         self.page_press_owned = false;
         self.pages_marks_ready = false;
         self.sheet_tabs_on = true;
@@ -8727,7 +8844,69 @@ impl InkarchyApp {
         }
     }
 
-    /// Fold, or a tap on a `+` / `−`. A longer drag pans and does not add or delete.
+    /// Page under the pointer in screen space (unit cell).
+    fn page_unit_at(&self, screen: Pos2, canvas: Rect) -> Option<(i32, i32)> {
+        let note = self.note.as_ref()?;
+        if canvas.width() < 10.0 {
+            return None;
+        }
+        let mut best: Option<(f32, i32, i32)> = None;
+        for page in &note.pages {
+            let paper = self.unit_screen_rect(canvas, page.col, page.row);
+            if !paper.is_positive() || !paper.contains(screen) {
+                continue;
+            }
+            let distance = screen.distance(paper.center());
+            if best.is_none_or(|(best_d, _, _)| distance < best_d) {
+                best = Some((distance, page.col, page.row));
+            }
+        }
+        best.map(|(_, col, row)| (col, row))
+    }
+
+    /// Neighbour slots (+ destinations) and other pages — drop targets while dragging.
+    fn page_drop_target(&self, screen: Pos2, canvas: Rect, from_col: i32, from_row: i32) -> Option<(i32, i32)> {
+        let note = self.note.as_ref()?;
+        if let Some((col, row)) = self.page_unit_at(screen, canvas) {
+            if col != from_col || row != from_row {
+                return Some((col, row));
+            }
+        }
+        let mut best: Option<(f32, i32, i32)> = None;
+        for tab in note.unit_tabs() {
+            let hole = self.unit_screen_rect(canvas, tab.dest_col, tab.dest_row);
+            if !hole.is_positive() || !hole.contains(screen) {
+                continue;
+            }
+            let distance = screen.distance(hole.center());
+            if best.is_none_or(|(best_d, _, _)| distance < best_d) {
+                best = Some((distance, tab.dest_col, tab.dest_row));
+            }
+        }
+        best.map(|(_, col, row)| (col, row))
+    }
+
+    fn move_page_unit(&mut self, from_col: i32, from_row: i32, to_col: i32, to_row: i32) {
+        let ok = self.note.as_ref().is_some_and(|n| {
+            n.cell_taken(from_col, from_row)
+                && (from_col != to_col || from_row != to_row)
+                && (n.cell_taken(to_col, to_row)
+                    || n.unit_tabs()
+                        .iter()
+                        .any(|t| t.dest_col == to_col && t.dest_row == to_row))
+        });
+        if !ok {
+            return;
+        }
+        self.push_snapshot();
+        if let Some(note) = &mut self.note {
+            note.move_unit(from_col, from_row, to_col, to_row);
+        }
+        self.fitted_cell = None;
+        self.mark_dirty();
+    }
+
+    /// Tap `+` / `−`, long-press then drag a page into a neighbour slot, or pan.
     fn pages_or_pan(&mut self, ui: &Ui, resp: &Response, rect: Rect) {
         if self.tab_held {
             let down = ui.input(|i| i.pointer.primary_down()) || self.tablet.snapshot().down;
@@ -8745,6 +8924,7 @@ impl InkarchyApp {
         let pressed = pen.pressed || ui.input(|i| i.pointer.primary_pressed());
         let released = pen.released || ui.input(|i| i.pointer.primary_released());
         let down = pen.down || ui.input(|i| i.pointer.primary_down());
+        let time = ui.input(|i| i.time);
         let pan = |app: &mut Self| {
             if chrome {
                 return;
@@ -8755,6 +8935,58 @@ impl InkarchyApp {
                 app.fitted_cell = None;
             }
         };
+
+        if let Some(mut drag) = self.page_drag.take() {
+            if let Some(p) = pos {
+                drag.screen = p;
+            }
+            if released || !down {
+                if let Some(p) = pos {
+                    if let Some((to_col, to_row)) =
+                        self.page_drop_target(p, rect, drag.col, drag.row)
+                    {
+                        self.move_page_unit(drag.col, drag.row, to_col, to_row);
+                    }
+                }
+                self.page_press_owned = false;
+                return;
+            }
+            self.page_drag = Some(drag);
+            self.page_press_owned = true;
+            return;
+        }
+
+        if let Some(hold) = self.page_drag_hold.take() {
+            if let Some(p) = pos {
+                if p.distance(hold.screen) > 8.0 {
+                    pan(self);
+                    self.page_press_owned = true;
+                    return;
+                }
+            }
+            if time - hold.t0 >= WHEEL_HOLD {
+                let paper = self.unit_screen_rect(rect, hold.col, hold.row);
+                let screen = pos.unwrap_or(hold.screen);
+                self.page_drag = Some(PageDrag {
+                    col: hold.col,
+                    row: hold.row,
+                    grab: screen - paper.min,
+                    screen,
+                });
+                self.page_press_owned = true;
+                return;
+            }
+            if released || !down {
+                self.page_press_owned = false;
+                return;
+            }
+            ui.ctx().request_repaint_after(Duration::from_secs_f64(
+                (WHEEL_HOLD - (time - hold.t0)).max(0.001),
+            ));
+            self.page_drag_hold = Some(hold);
+            self.page_press_owned = true;
+            return;
+        }
 
         if let Some(mut mark) = self.page_mark.take() {
             if let Some(p) = pos {
@@ -8808,6 +9040,18 @@ impl InkarchyApp {
                 self.page_press_owned = true;
                 return;
             }
+            if let Some((col, row)) = self.page_unit_at(p, rect) {
+                self.page_drag_hold = Some(PageDragHold {
+                    col,
+                    row,
+                    screen: p,
+                    t0: time,
+                });
+                ui.ctx()
+                    .request_repaint_after(Duration::from_secs_f64(WHEEL_HOLD));
+                self.page_press_owned = true;
+                return;
+            }
         }
         if down && !chrome {
             pan(self);
@@ -8815,6 +9059,92 @@ impl InkarchyApp {
         if released || !down {
             self.page_press_owned = false;
         }
+    }
+
+    fn paint_page_drag(&self, ui: &Ui, painter: &Painter, canvas: Rect) {
+        let Some(drag) = self.page_drag else {
+            return;
+        };
+        let note = match self.note.as_ref() {
+            Some(n) => n,
+            None => return,
+        };
+        let hover = ui.input(|i| i.pointer.hover_pos()).or(Some(drag.screen));
+        let accent = self.look.accent;
+        for tab in note.unit_tabs() {
+            let hole = self.unit_screen_rect(canvas, tab.dest_col, tab.dest_row);
+            if !hole.is_positive() {
+                continue;
+            }
+            let hot = hover.is_some_and(|p| hole.contains(p));
+            painter.rect_stroke(
+                hole.shrink(6.0),
+                10.0,
+                Stroke::new(
+                    if hot { 3.0 } else { 1.6 },
+                    accent.gamma_multiply(if hot { 1.0 } else { 0.55 }),
+                ),
+                StrokeKind::Inside,
+            );
+        }
+        for page in &note.pages {
+            if page.col == drag.col && page.row == drag.row {
+                continue;
+            }
+            let paper = self.unit_screen_rect(canvas, page.col, page.row);
+            if !paper.is_positive() {
+                continue;
+            }
+            let hot = hover.is_some_and(|p| paper.contains(p));
+            if hot {
+                painter.rect_stroke(
+                    paper.shrink(4.0),
+                    8.0,
+                    Stroke::new(2.4, accent),
+                    StrokeKind::Inside,
+                );
+            }
+        }
+        let home = self.unit_screen_rect(canvas, drag.col, drag.row);
+        if home.is_positive() {
+            painter.rect_filled(
+                home,
+                6.0,
+                Color32::from_rgba_unmultiplied(
+                    self.look.desk.r(),
+                    self.look.desk.g(),
+                    self.look.desk.b(),
+                    90,
+                ),
+            );
+        }
+        let ghost = Rect::from_min_size(drag.screen - drag.grab, home.size());
+        painter.rect_filled(
+            ghost.translate(vec2(0.0, 4.0)),
+            8.0,
+            Color32::from_rgba_unmultiplied(
+                self.look.shadow.r(),
+                self.look.shadow.g(),
+                self.look.shadow.b(),
+                70,
+            ),
+        );
+        painter.rect_filled(
+            ghost,
+            8.0,
+            Color32::from_rgba_unmultiplied(
+                self.look.paper.r(),
+                self.look.paper.g(),
+                self.look.paper.b(),
+                210,
+            ),
+        );
+        painter.rect_stroke(
+            ghost,
+            8.0,
+            Stroke::new(1.6, accent.gamma_multiply(0.85)),
+            StrokeKind::Inside,
+        );
     }
 
     fn paint_template(&self, painter: &Painter, paper: Rect, kind: PaperKind, scale: Vec2) {

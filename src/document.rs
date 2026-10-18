@@ -556,6 +556,48 @@ impl Note {
         true
     }
 
+    /// Move a unit to an empty neighbour slot, or swap with the unit already there.
+    pub fn move_unit(&mut self, from_col: i32, from_row: i32, to_col: i32, to_row: i32) -> bool {
+        if from_col == to_col && from_row == to_row {
+            return false;
+        }
+        if !self.cell_taken(from_col, from_row) {
+            return false;
+        }
+        if self.is_grown_single() {
+            self.explode_grown_units();
+        }
+        let from_i = self
+            .pages
+            .iter()
+            .position(|p| p.col == from_col && p.row == from_row);
+        let Some(from_i) = from_i else {
+            return false;
+        };
+        if let Some(to_i) = self
+            .pages
+            .iter()
+            .position(|p| p.col == to_col && p.row == to_row)
+        {
+            self.pages[from_i].col = to_col;
+            self.pages[from_i].row = to_row;
+            self.pages[to_i].col = from_col;
+            self.pages[to_i].row = from_row;
+            return true;
+        }
+        // Empty destination must be a defined neighbour slot (current + tab dest).
+        let allowed = self
+            .unit_tabs()
+            .iter()
+            .any(|t| t.dest_col == to_col && t.dest_row == to_row);
+        if !allowed {
+            return false;
+        }
+        self.pages[from_i].col = to_col;
+        self.pages[from_i].row = to_row;
+        true
+    }
+
     /// Old notes stacked pages by vec index with no col/row. Spread them vertically.
     pub fn normalize_page_grid(&mut self) {
         if self.pages.len() <= 1 {
@@ -1026,6 +1068,27 @@ mod tests {
         assert!(!n.can_tear_unit());
         assert!(!n.remove_unit(0, 0));
         assert_eq!(n.pages.len(), 1);
+    }
+
+    #[test]
+    fn move_unit_to_neighbour_and_swap() {
+        let mut n = Note::blank("t", 0);
+        n.sheet_join = SheetJoin::Separate;
+        n.pages = vec![Page::at(0, 0), Page::at(1, 0)];
+        n.pages[0].strokes.push(mark(1.0, 2.0));
+        n.pages[1].strokes.push(mark(3.0, 4.0));
+        assert!(n.move_unit(1, 0, 2, 0), "slide into a free neighbour slot");
+        assert!(n.cell_taken(0, 0));
+        assert!(!n.cell_taken(1, 0));
+        assert!(n.cell_taken(2, 0));
+        let moved = n.pages.iter().find(|p| p.col == 2).unwrap();
+        assert_eq!(moved.strokes[0].points[0].x, 3.0);
+        assert!(n.move_unit(0, 0, 2, 0), "swap with the occupied neighbour");
+        let a = n.pages.iter().find(|p| p.col == 0).unwrap();
+        let b = n.pages.iter().find(|p| p.col == 2).unwrap();
+        assert_eq!(a.strokes[0].points[0].x, 3.0);
+        assert_eq!(b.strokes[0].points[0].x, 1.0);
+        assert!(!n.move_unit(0, 0, 5, 5), "far empty cells are not slots");
     }
 
     #[test]

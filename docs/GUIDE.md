@@ -17,7 +17,7 @@ Add pages around the current sheet. Display them edge to edge in *Linked* mode, 
   <img src="screens/separees.png" alt="Separate pages with a gap" width="49%">
 </p>
 
-Open **Pages** to add a sheet on a free edge, or tap the centre `−` to tear a page off.
+Open **Pages** (header well, or a long press on empty paper) to add a sheet on a free edge, tap the centre `−` to tear a page off, or long-press a page and drop it on a neighbour slot to move or swap it.
 
 <p align="center">
   <img src="screens/onglets.png" alt="Tabs for adding a page" width="80%">
@@ -180,8 +180,10 @@ A finger on empty paper pans the canvas; two fingers pan even when something is 
 | | |
 |---|---|
 | Pages | show or hide the green `+` tabs and the red `−` on each page |
+| Long press empty paper | open Pages manage mode |
 | Tap a `+` | add a unit page on that edge |
 | Tap a `−` | tear that page off, or the sticky under that mark. A drag pans instead, and the press that opened Pages does not count |
+| Long press a page, then drag | move it into a neighbour `+` slot, or swap with another page |
 | Escape, or Pages again | hide the marks |
 | ⋯ → Linked / Separate | flush sheet vs gutter between pages |
 

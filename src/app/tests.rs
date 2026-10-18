@@ -2125,6 +2125,118 @@ fn pages_mode_tear_badge_removes_a_page_and_leaves_ink() {
 }
 
 #[test]
+fn long_press_on_page_enters_pages_mode() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Long press pages");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    assert!(!app.sheet_tabs_on);
+    let screen = app
+        .camera
+        .to_screen(pos2(PAGE_W * 0.5, PAGE_H * 0.5), app.canvas_rect);
+    frames.step(
+        app,
+        vec![
+            Event::PointerMoved(screen),
+            Event::PointerButton {
+                pos: screen,
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            },
+        ],
+    );
+    for _ in 0..30 {
+        frames.step(app, vec![Event::PointerMoved(screen)]);
+    }
+    assert!(
+        app.sheet_tabs_on,
+        "long press on empty paper opens Pages manage mode"
+    );
+    assert!(!app.sheet_tabs(app.canvas_rect).is_empty());
+    frames.step(
+        app,
+        vec![Event::PointerButton {
+            pos: screen,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+}
+
+#[test]
+fn pages_mode_long_press_drags_page_into_neighbour_slot() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Reorder pages");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    {
+        let note = app.note.as_mut().unwrap();
+        note.sheet_join = SheetJoin::Separate;
+        note.pages.push(crate::document::Page::at(1, 0));
+        note.pages[1].texts.push({
+            let mut t = TextBox::new(pos2(40.0, 40.0), Color32::BLACK);
+            t.text = "Right".into();
+            t
+        });
+    }
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    app.camera = Camera {
+        pan: vec2(40.0, 80.0),
+        zoom: 0.35,
+        stretch_y: None,
+    };
+    app.fitted_cell = None;
+    app.enter_pages_mode();
+    frames.settle(app);
+    assert!(app.pages_marks_ready);
+    let canvas = app.canvas_rect;
+    let paper = app.unit_screen_rect(canvas, 1, 0);
+    // Stay off the center − badge so the press arms a page drag, not a tear.
+    let from = paper.left_top() + vec2(paper.width() * 0.22, paper.height() * 0.22);
+    assert!(!page_minus_band(paper).contains(from));
+    frames.step(
+        app,
+        vec![
+            Event::PointerMoved(from),
+            Event::PointerButton {
+                pos: from,
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            },
+        ],
+    );
+    for _ in 0..30 {
+        frames.step(app, vec![Event::PointerMoved(from)]);
+    }
+    assert!(app.page_drag.is_some(), "long press lifts the page");
+    let dest = app.unit_screen_rect(canvas, 2, 0).center();
+    frames.step(app, vec![Event::PointerMoved(dest)]);
+    frames.step(
+        app,
+        vec![Event::PointerButton {
+            pos: dest,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    frames.settle(app);
+    let note = app.note.as_ref().unwrap();
+    assert!(note.unit_occupied(0, 0));
+    assert!(!note.unit_occupied(1, 0));
+    assert!(note.unit_occupied(2, 0));
+    let moved = note.pages.iter().find(|p| p.col == 2).unwrap();
+    assert!(moved.texts.iter().any(|t| t.text.contains("Right")));
+    assert!(app.page_drag.is_none());
+}
+
+#[test]
 fn pages_mode_finger_drag_pans_without_tearing() {
     for touch in [false, true] {
         let mut fixture = Fixture::new();

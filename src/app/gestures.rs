@@ -122,6 +122,8 @@ impl InkarchyApp {
             if !pointer_down && !pointer_button {
                 self.page_press_owned = false;
                 self.page_mark = None;
+                self.page_drag_hold = None;
+                self.page_drag = None;
             }
             return false;
         }
@@ -185,12 +187,15 @@ impl InkarchyApp {
                 if !canvas.contains(screen) || Self::pen_over_chrome(ui.ctx(), screen) {
                     continue;
                 }
-                if self.pages_marks_ready
+                if self.sheet_tabs_on
+                    && self.pages_marks_ready
                     && (self.sheet_tab_at(screen, canvas).is_some()
                         || self.page_minus_at(screen, canvas).is_some()
-                        || self.sticky_minus_at(screen, canvas).is_some())
+                        || self.sticky_minus_at(screen, canvas).is_some()
+                        || self.page_unit_at(screen, canvas).is_some())
                 {
-                    return false; // Page marks own their press.
+                    // Marks and page bodies stay with pages_or_pan (reorder / pan).
+                    return false;
                 }
                 let paper = self.camera.to_paper(screen, canvas);
                 if self.editing_text.is_some_and(|(page, id)| {
@@ -371,6 +376,26 @@ impl InkarchyApp {
                         (super::WHEEL_HOLD - held).max(0.001),
                     ));
                 }
+            }
+        }
+
+        // Still finger on empty paper opens Pages manage mode.
+        let manage_hold = self.canvas_touch.as_ref().and_then(|gesture| {
+            (!self.sheet_tabs_on
+                && !gesture.moved
+                && matches!(gesture.mode, CanvasGesture::Pan(None)))
+            .then_some((gesture.origin, gesture.since))
+        });
+        if let Some((_origin, since)) = manage_hold {
+            let held = time - since;
+            if held >= super::WHEEL_HOLD {
+                self.canvas_touch = None;
+                self.drag_last = None;
+                self.enter_pages_mode();
+            } else {
+                ui.ctx().request_repaint_after(Duration::from_secs_f64(
+                    (super::WHEEL_HOLD - held).max(0.001),
+                ));
             }
         }
 
