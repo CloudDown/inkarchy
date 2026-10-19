@@ -20,7 +20,7 @@ fn coach_settings_remember_notebook_and_do_not_shift_the_canvas() {
     assert!(app.coach.open);
     frames.settle(app);
     frames.snapshot("exercise-coach-settings");
-    let toggle = frames.text_center("Enable in this notebook");
+    let toggle = frames.text_center("Enable AI");
     frames.drag(app, toggle, toggle);
     assert!(app.coach_enabled());
     assert_eq!(canvas, app.canvas_rect);
@@ -79,7 +79,7 @@ fn coach_keeps_completed_step_during_ink_but_discards_it_on_undo() {
 }
 
 #[test]
-fn coach_fields_keep_typing_shortcuts_out_of_the_document_and_escape_closes_panel() {
+fn coach_panel_shows_connection_control_and_escape_closes_without_changing_document() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Coach fields");
     let app = &mut fixture.app;
@@ -88,14 +88,7 @@ fn coach_fields_keep_typing_shortcuts_out_of_the_document_and_escape_closes_pane
     let mut frames = Frames::new(app);
     app.open_coach();
     frames.settle(app);
-    let connection = frames.text_center("Model & connection");
-    frames.drag(app, connection, connection);
-    frames.settle(app);
-    let field = frames.text_center("qwen3-vl:4b-instruct");
-    frames.drag(app, field, field);
-    assert!(frames.ctx.wants_keyboard_input());
-    frames.key(app, Key::P);
-    frames.key(app, Key::Backspace);
+    frames.text_center("Test connection");
     assert_eq!(app.tool, Tool::Brush);
     assert!(app.note.as_ref().unwrap().pages[0].strokes.is_empty());
     frames.key(app, Key::Escape);
@@ -430,6 +423,100 @@ fn many_pdf_pages_do_not_block_the_first_frames() {
     let mut fitted = Camera::default();
     fitted.fit_page(fixture.app.canvas_rect, origin, pw, ph);
     assert!((fixture.app.camera.zoom - fitted.zoom).abs() < 0.001);
+}
+
+#[test]
+fn pdf_page_chip_opens_a_finger_scrubber_and_jumps_on_release() {
+    let mut fixture = Fixture::new();
+    let mut note = Note::blank("Pages", 0);
+    note.sheet_join = SheetJoin::Separate;
+    note.pages = (0..4).map(|i| {
+        let mut page = crate::document::Page::at(0, i);
+        page.background = Some(PageBackground {
+            file: "source.pdf".into(), pdf_page: Some(i as u32), source_size: None,
+        });
+        page
+    }).collect();
+    let id = note.id;
+    fixture.app.lib.insert_new(&note).unwrap();
+    fixture.app.open_note(id);
+    let app = &mut fixture.app;
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let chip = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("pdf-page-number-rect")));
+    let chip = chip.expect("PDF page chip is visible");
+    frames.drag(app, chip.center(), chip.center());
+    frames.settle(app);
+    let next = frames.text_center("+");
+    frames.drag(app, next, next);
+    frames.settle(app);
+    assert_eq!(app.pdf_page_target, 2);
+}
+
+#[test]
+fn pdf_detail_replaces_preview_without_late_results_downgrading_it() {
+    let mut fixture = Fixture::new();
+    let ctx = Context::default();
+    let key = "pdf:page:0".to_string();
+    let raster = |side: usize, scale| crate::pdf::RasterImage {
+        image: ColorImage::new([side, side], vec![Color32::WHITE; side * side]),
+        scale,
+    };
+    fixture.app.bg_hot.insert(key.clone());
+    fixture
+        .app
+        .store_background(&ctx, key.clone(), raster(10, 0.5));
+    fixture
+        .app
+        .store_background(&ctx, key.clone(), raster(60, 3.0));
+    fixture
+        .app
+        .store_background(&ctx, key.clone(), raster(10, 0.5));
+    assert_eq!(fixture.app.bg_textures[&key].size(), [60, 60]);
+    assert_eq!(fixture.app.bg_tex_scale[&key], 3.0);
+    assert_eq!(fixture.app.bg_order.len(), 1);
+    assert_eq!(fixture.app.bg_bytes, 60 * 60 * 4);
+}
+
+#[test]
+fn pdf_background_loads_asynchronously_and_rerenders_at_zoom_resolution() {
+    let mut fixture = Fixture::new();
+    let note = Note::blank("Zoom", 0);
+    let id = note.id;
+    fixture.app.lib.insert_new(&note).unwrap();
+    let path = fixture.app.lib.note_dir(id).join("source.pdf");
+    std::fs::write(&path, crate::pdf::text_pdf("Sharp zoom")).unwrap();
+    let bg = PageBackground {
+        file: "source.pdf".into(),
+        pdf_page: Some(0),
+        source_size: Some([200.0, 100.0]),
+    };
+    let ctx = Context::default();
+    let key = format!("{id}:source.pdf:0");
+    for (screen, wanted) in [(vec2(200.0, 100.0), 1.0), (vec2(800.0, 400.0), 4.0)] {
+        let started = Instant::now();
+        loop {
+            fixture.app.ingest_pdf_rasters(&ctx);
+            fixture
+                .app
+                .background_tex(&ctx, id, &bg, Rect::from_min_size(Pos2::ZERO, screen), 1.0);
+            if fixture
+                .app
+                .bg_tex_scale
+                .get(&key)
+                .is_some_and(|scale| *scale >= wanted)
+            {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "PDF detail never arrived"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    assert_eq!(fixture.app.bg_textures[&key].size(), [800, 400]);
+    assert!(fixture.app.bg_pending.is_empty());
 }
 
 struct Frames {
@@ -970,6 +1057,48 @@ fn pages_mode_adds_a_sheet_and_toggle_hides_the_pluses() {
         app.sheet_tabs(app.canvas_rect).is_empty(),
         "leaving Pages mode hides the + tabs"
     );
+}
+
+#[test]
+fn pages_mode_arranges_six_pages_without_losing_the_visible_page_or_its_content() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Six pages");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut pages: Vec<_> = (0..6)
+        .map(|row| crate::document::Page::at(0, row))
+        .collect();
+    let mut label = TextBox::new(pos2(80.0, 120.0), Color32::BLACK);
+    label.text = "Keep with page five".into();
+    let label_id = label.id;
+    pages[4].texts.push(label);
+    app.note.as_mut().unwrap().pages = pages;
+    app.note.as_mut().unwrap().sheet_join = SheetJoin::Separate;
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let (pw, ph) = app.note.as_ref().unwrap().page_size();
+    app.camera
+        .fit_page(app.canvas_rect, app.origin_of(4), pw, ph);
+    app.fitted_cell = Some((0, 4));
+    app.enter_pages_mode();
+    frames.settle(app);
+    let button = frames
+        .ctx
+        .data(|data| data.get_temp::<Rect>(Id::new("page-layout-button-rect")))
+        .expect("arrangement control appears in Pages mode");
+    frames.drag(app, button.center(), button.center());
+    frames.settle(app);
+    let choice = frames.text_center("Two columns");
+    frames.drag(app, choice, choice);
+    frames.settle(app);
+    let note = app.note.as_ref().unwrap();
+    let cells: Vec<_> = note.pages.iter().map(|page| (page.col, page.row)).collect();
+    assert_eq!(cells, vec![(0, 0), (1, 0), (0, 1), (1, 1), (0, 2), (1, 2)]);
+    assert_eq!(note.pages[4].texts[0].id, label_id);
+    assert_eq!(app.fitted_cell, Some((0, 2)));
+    assert_eq!(app.page_in_view(app.canvas_rect), 4);
+    assert!(app.undo.undo(app.note.as_mut().unwrap()));
+    assert_eq!(app.note.as_ref().unwrap().pages[4].row, 4);
 }
 
 #[test]

@@ -151,7 +151,7 @@ impl std::error::Error for SaveError {
 
 /// Write `bytes` by creating a temp file in the same directory, fsyncing it, then renaming.
 /// A failed write leaves the previous file in place.
-fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = match path.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir,
         _ => Path::new("."),

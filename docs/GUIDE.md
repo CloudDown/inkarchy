@@ -124,7 +124,11 @@ PNG, JPEG, WEBP, and SVG become a page background when you open them from the sh
 
 Open is the sheet button at the top right of the shelf, and a row in the notebook menu. `Ctrl+O` opens the same dialog.
 
-PDF rendering uses [hayro](https://crates.io/crates/hayro), linked into the `inkarchy` binary. Install does not add Poppler, MuPDF, or PDFium.
+PDFs appear progressively: a quick preview is replaced by a sharp render matched to zoom and display density, up to 432 dpi within a per-page pixel budget. Existing pixels stay visible during zoom; detail is refreshed after the gesture settles. Rendering, cache decoding and pixel preparation run in the background, with visible pages prioritized and obsolete queued pages discarded. A texture LRU and a lossless disk cache speed up revisiting pages.
+
+Rendering prefers Poppler (`pdftoppm`) when already installed, streaming pixels directly without temporary PNG files. [hayro](https://crates.io/crates/hayro) is linked into the binary as the fallback. Installation does not add a PDF engine dependency.
+
+[PDF rendering budgets and reproducible performance measurements](PDF-PERFORMANCE.md).
 
 ### Open with Inkarchy
 

@@ -6,7 +6,10 @@ use std::time::{Duration, Instant};
 
 pub enum CredentialAction {
     Load,
+    // Keep keyring operations available even while the compact AI panel only loads keys.
+    #[allow(dead_code)]
     Save(String),
+    #[allow(dead_code)]
     Delete,
 }
 pub struct CredentialJob {

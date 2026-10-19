@@ -1,15 +1,18 @@
 //! PDF pages for the lectern.
 //!
-//! On-screen rasters prefer Poppler (`pdftoppm`) when it is on PATH — fast and
-//! light. [hayro](https://crates.io/crates/hayro) stays linked as the fallback
-//! so Inkarchy still runs without Poppler. Zoom past the display scale stretches
-//! the texture on the GPU; the PDF engine is not run again.
+//! Progressive, zoom-aware PDF backgrounds. Poppler sends uncompressed pixels
+//! through a pipe; hayro is the built-in fallback. Decoding, rasterization and
+//! texture preparation stay on a worker, with a viewport-pruned work queue.
 
-use std::collections::HashMap;
+#[cfg(test)]
+#[path = "pdf/bench.rs"]
+mod bench;
+
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, OnceLock};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 
 use hayro::hayro_interpret::InterpreterSettings;
@@ -33,6 +36,25 @@ pub struct Rendered {
     pub scale: f32,
 }
 
+/// Prepared on the worker, so uploading a result does not convert millions of
+/// pixels in the drawing/event loop.
+pub struct RasterImage {
+    pub image: egui::ColorImage,
+    pub scale: f32,
+}
+
+impl From<&Rendered> for RasterImage {
+    fn from(rendered: &Rendered) -> Self {
+        Self {
+            image: egui::ColorImage::from_rgba_unmultiplied(
+                [rendered.width as usize, rendered.height as usize],
+                &rendered.rgba,
+            ),
+            scale: rendered.scale,
+        }
+    }
+}
+
 /// Logical page size for a PDF page, clamped so a poster still fits the lectern.
 pub fn logical_size(width_pt: f32, height_pt: f32) -> (f32, f32) {
     let mut w = width_pt.max(1.0) * PAPER_PER_PT;
@@ -53,8 +75,10 @@ pub fn render_scale(zoom: f32, pixels_per_point: f32) -> f32 {
     snap_scale(zoom.max(0.02) * pixels_per_point.max(0.5) * PAPER_PER_PT)
 }
 
-/// Hard cap for on-screen rasters (≈108 dpi). Further zoom is GPU stretch.
-pub const DISPLAY_SCALE_MAX: f32 = 1.5;
+/// Up to 432 dpi, subject to the per-page pixel budget below.
+pub const DISPLAY_SCALE_MAX: f32 = 6.0;
+const MAX_RASTER_SIDE: f32 = 4096.0;
+const MAX_RASTER_PIXELS: f32 = 8.0 * 1024.0 * 1024.0;
 
 /// Scale from the on-screen rectangle. Tiny sheets still get a thumbnail.
 pub fn raster_scale(
@@ -70,23 +94,23 @@ pub fn raster_scale(
     display_scale(sx.max(sy))
 }
 
-/// On-screen target: snapped and capped so zoom does not re-run the PDF engine.
+/// Discrete resolution levels avoid re-rendering for every pinch increment.
 pub fn display_scale(wanted: f32) -> f32 {
     snap_scale(wanted.min(DISPLAY_SCALE_MAX))
 }
 
-/// Cheap first paint when only hayro is available.
-pub fn preview_scale(_wanted: f32) -> f32 {
-    0.25
+/// Readable first paint before the full-resolution pass, for either engine.
+pub fn preview_scale(wanted: f32) -> f32 {
+    wanted.min(0.5)
 }
 
 fn snap_scale(want: f32) -> f32 {
     let want = want.clamp(0.25, DISPLAY_SCALE_MAX);
-    const STEPS: [f32; 5] = [0.25, 0.5, 0.75, 1.0, 1.5];
+    const STEPS: [f32; 10] = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 6.0];
     STEPS
         .iter()
         .copied()
-        .find(|step| *step + 0.08 >= want)
+        .find(|step| *step >= want)
         .unwrap_or(DISPLAY_SCALE_MAX)
 }
 
@@ -96,81 +120,141 @@ pub struct RasterJob {
     pub path: PathBuf,
     pub page: u32,
     pub scale: f32,
+    /// Try the full-size disk cache first; otherwise return a cheap first paint.
+    pub preview: bool,
 }
 
-/// Background hayro worker. Keeps the last opened PDF so turning pages does not re-parse.
+#[derive(Default)]
+struct RasterQueue {
+    jobs: VecDeque<RasterJob>,
+    repaint: Option<egui::Context>,
+    stopped: bool,
+}
+
+impl RasterQueue {
+    fn pop(&mut self) -> Option<RasterJob> {
+        // Blank visible pages get their preview before any detail upgrades.
+        let i = self.jobs.iter().position(|job| job.preview).unwrap_or(0);
+        self.jobs.remove(i)
+    }
+
+    fn retain(&mut self, visible: &HashSet<String>) -> Vec<String> {
+        let mut removed = Vec::new();
+        self.jobs.retain(|job| {
+            if visible.contains(&job.key) {
+                true
+            } else {
+                removed.push(job.key.clone());
+                false
+            }
+        });
+        removed
+    }
+}
+
+type SharedRasterQueue = Arc<(Mutex<RasterQueue>, Condvar)>;
+type RasterResult = (String, Result<RasterImage, String>);
+
+/// One bounded worker: a large document cannot queue unlimited pixel buffers.
 pub struct RasterHub {
-    tx: Sender<RasterJob>,
-    rx: Receiver<(String, Result<Rendered, String>)>,
+    queue: SharedRasterQueue,
+    rx: Receiver<RasterResult>,
 }
 
 impl RasterHub {
     pub fn new() -> Self {
-        let (job_tx, job_rx) = mpsc::channel();
-        let (done_tx, done_rx) = mpsc::channel();
-        let _ = thread::Builder::new()
+        let queue = Arc::new((Mutex::new(RasterQueue::default()), Condvar::new()));
+        let worker_queue = queue.clone();
+        let (done_tx, done_rx) = mpsc::sync_channel(2);
+        if thread::Builder::new()
             .name("inkarchy-pdf".into())
-            .spawn(move || raster_loop(job_rx, done_tx));
-        Self {
-            tx: job_tx,
-            rx: done_rx,
+            .spawn(move || raster_loop(worker_queue, done_tx))
+            .is_err()
+        {
+            queue.0.lock().unwrap().stopped = true;
         }
+        Self { queue, rx: done_rx }
     }
 
     pub fn request(&self, job: RasterJob) -> bool {
-        self.tx.send(job).is_ok()
+        let mut queue = self.queue.0.lock().unwrap();
+        if queue.stopped {
+            return false;
+        }
+        if let Some(i) = queue.jobs.iter().position(|old| old.key == job.key) {
+            queue.jobs.remove(i);
+        }
+        if queue.jobs.len() >= 64 {
+            return false;
+        }
+        queue.jobs.push_back(job);
+        self.queue.1.notify_one();
+        true
     }
 
-    pub fn take_ready(&self) -> Vec<(String, Result<Rendered, String>)> {
-        let mut out = Vec::new();
-        while let Ok(item) = self.rx.try_recv() {
-            out.push(item);
-        }
-        out
+    pub fn set_repaint_context(&self, ctx: &egui::Context) {
+        self.queue.0.lock().unwrap().repaint = Some(ctx.clone());
+    }
+
+    pub fn retain_visible(&self, visible: &HashSet<String>) -> Vec<String> {
+        self.queue.0.lock().unwrap().retain(visible)
+    }
+
+    pub fn take_ready(&self) -> Vec<RasterResult> {
+        // At most one texture upload per frame. The worker wakes the next frame.
+        self.rx.try_recv().into_iter().collect()
     }
 }
 
-fn raster_loop(rx: Receiver<RasterJob>, tx: Sender<(String, Result<Rendered, String>)>) {
+impl Drop for RasterHub {
+    fn drop(&mut self) {
+        let mut queue = self.queue.0.lock().unwrap();
+        queue.stopped = true;
+        queue.jobs.clear();
+        self.queue.1.notify_one();
+    }
+}
+
+fn raster_loop(queue: SharedRasterQueue, tx: SyncSender<RasterResult>) {
     let mut cached: Option<(PathBuf, Pdf)> = None;
-    let mut queued: HashMap<(PathBuf, u32), RasterJob> = HashMap::new();
     loop {
-        if queued.is_empty() {
-            match rx.recv() {
-                Ok(job) => {
-                    queued.insert((job.path.clone(), job.page), job);
-                }
-                Err(_) => return,
+        let job = {
+            let mut state = queue.0.lock().unwrap();
+            while state.jobs.is_empty() && !state.stopped {
+                state = queue.1.wait(state).unwrap();
             }
-        }
-        while let Ok(job) = rx.try_recv() {
-            queued.insert((job.path.clone(), job.page), job);
-        }
-        let next = queued
-            .iter()
-            .min_by(|a, b| {
-                a.1.page
-                    .cmp(&b.1.page)
-                    .then(a.1.scale.total_cmp(&b.1.scale))
-            })
-            .map(|(key, _)| key.clone());
-        let Some(key) = next else {
-            continue;
-        };
-        let Some(job) = queued.remove(&key) else {
-            continue;
-        };
-        if let Some(hit) = load_raster_cache(&job.path, job.page, job.scale) {
-            if tx.send((job.key, Ok(hit))).is_err() {
+            if state.stopped {
                 return;
             }
-            continue;
-        }
-        let result = render_screen_page(&job.path, job.page, job.scale, &mut cached);
-        if let Ok(rendered) = &result {
-            save_raster_cache(&job.path, job.page, rendered);
-        }
-        if tx.send((job.key, result)).is_err() {
+            state.pop().unwrap()
+        };
+        let result = load_raster_cache(&job.path, job.page, job.scale)
+            .map(Ok)
+            .unwrap_or_else(|| {
+                let scale = if job.preview {
+                    preview_scale(job.scale)
+                } else {
+                    job.scale
+                };
+                if let Some(hit) = load_raster_cache(&job.path, job.page, scale) {
+                    return Ok(hit);
+                }
+                render_screen_page(&job.path, job.page, scale, &mut cached)
+            });
+        let image = result.as_ref().map(RasterImage::from).map_err(Clone::clone);
+        if tx.send((job.key, image)).is_err() {
             return;
+        }
+        let ctx = queue.0.lock().unwrap().repaint.clone();
+        if let Some(ctx) = ctx {
+            ctx.request_repaint();
+        }
+        // Publish pixels before compression/fsync, so disk latency does not
+        // delay first paint. Existing cache hits do not need to be rewritten.
+        if let Ok(rendered) = &result {
+            if !raster_cache_fresh(&job.path, job.page, rendered.scale) {
+                save_raster_cache(&job.path, job.page, rendered);
+            }
         }
     }
 }
@@ -181,9 +265,6 @@ fn render_screen_page(
     scale: f32,
     cached: &mut Option<(PathBuf, Pdf)>,
 ) -> Result<Rendered, String> {
-    if let Some(rendered) = render_poppler(path, page, scale) {
-        return Ok(rendered);
-    }
     if cached.as_ref().is_none_or(|(p, _)| p != path) {
         *cached = match std::fs::read(path) {
             Ok(bytes) => {
@@ -195,7 +276,17 @@ fn render_screen_page(
     }
     cached
         .as_ref()
-        .map(|(_, pdf)| render_opened(pdf, page, scale))
+        .map(|(_, pdf)| {
+            let pdf_page = pdf
+                .pages()
+                .get(page as usize)
+                .ok_or_else(|| format!("PDF page {} is missing.", page + 1))?;
+            let (w, h) = pdf_page.render_dimensions();
+            let scale = clamp_scale(w, h, scale);
+            render_poppler(path, page, scale)
+                .map(Ok)
+                .unwrap_or_else(|| render_opened(pdf, page, scale))
+        })
         .unwrap_or_else(|| Err("This PDF could not be read.".into()))
 }
 
@@ -216,46 +307,35 @@ fn render_poppler(path: &Path, page: u32, scale: f32) -> Option<Rendered> {
     if !poppler_available() {
         return None;
     }
-    let dpi = ((scale * 72.0).round() as i32).clamp(18, 144);
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp = std::env::temp_dir().join(format!(
-        "inkarchy-ppm-{}-{}-{}",
-        std::process::id(),
-        page,
-        stamp
-    ));
-    std::fs::create_dir_all(&tmp).ok()?;
-    let prefix = tmp.join("page");
-    let page_1 = (page + 1).to_string();
-    let ok = Command::new("pdftoppm")
-        .args(["-png", "-f", &page_1, "-l", &page_1, "-r", &dpi.to_string()])
+    // Omitting the output prefix streams PPM to stdout: no temporary file,
+    // PNG compression, directory scan, or subsequent PNG decompression.
+    let dpi = (scale * 72.0).to_string();
+    let page_1 = page.checked_add(1)?.to_string();
+    let output = Command::new("pdftoppm")
+        .args([
+            "-singlefile",
+            "-cropbox",
+            "-f",
+            &page_1,
+            "-l",
+            &page_1,
+            "-r",
+            &dpi,
+            "-aa",
+            "yes",
+            "-aaVector",
+            "yes",
+        ])
         .arg(path)
-        .arg(&prefix)
-        .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .ok()
-        .is_some_and(|status| status.success());
-    if !ok {
-        let _ = std::fs::remove_dir_all(&tmp);
+        .output()
+        .ok()?;
+    if !output.status.success() {
         return None;
     }
-    let png = std::fs::read_dir(&tmp)
+    let img = image::load_from_memory_with_format(&output.stdout, image::ImageFormat::Pnm)
         .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|p| p.extension().is_some_and(|ext| ext == "png"))?;
-    let img = match image::open(&png) {
-        Ok(img) => img.into_rgba8(),
-        Err(_) => {
-            let _ = std::fs::remove_dir_all(&tmp);
-            return None;
-        }
-    };
-    let _ = std::fs::remove_dir_all(&tmp);
+        .into_rgba8();
     let width = img.width();
     let height = img.height();
     if width == 0 || height == 0 {
@@ -327,22 +407,32 @@ fn render_opened(pdf: &Pdf, page: u32, scale: f32) -> Result<Rendered, String> {
 }
 
 pub fn clamp_scale(pt_w: f32, pt_h: f32, scale: f32) -> f32 {
-    let scale = scale.clamp(0.25, 4.0);
-    let long = pt_w.max(pt_h).max(1.0) * scale;
-    const MAX: f32 = 2048.0;
-    if long > MAX {
-        (scale * (MAX / long)).max(0.25)
-    } else {
-        scale
-    }
+    let w = pt_w.max(1.0);
+    let h = pt_h.max(1.0);
+    // Never restore a minimum scale after bounding a poster: that used to
+    // defeat the allocation limit for very large PDF page dimensions.
+    // Leave rounding room: engines ceil dimensions after converting to dpi.
+    scale
+        .clamp(0.001, DISPLAY_SCALE_MAX)
+        .min((MAX_RASTER_SIDE - 1.0) / w.max(h))
+        .min(((MAX_RASTER_PIXELS - 2.0 * MAX_RASTER_SIDE) / (w * h)).sqrt())
 }
 
 fn raster_cache_path(pdf: &Path, page: u32, scale: f32) -> PathBuf {
-    let cents = (scale * 100.0).round() as u32;
-    pdf.parent()
-        .unwrap_or(pdf)
-        .join("raster")
-        .join(format!("p{page}-{cents}.png"))
+    // Scope to the source file, including size and mtime. Different PDFs in
+    // one directory must never share pixels, nor reuse pre-cropbox rasters.
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    pdf.file_name().hash(&mut hash);
+    if let Ok(meta) = std::fs::metadata(pdf) {
+        meta.len().hash(&mut hash);
+        meta.modified().ok().hash(&mut hash);
+    }
+    pdf.parent().unwrap_or(pdf).join("raster").join(format!(
+        "v2-{:016x}-p{page}-{:08x}.png",
+        hash.finish(),
+        scale.to_bits()
+    ))
 }
 
 pub fn raster_cache_fresh(pdf: &Path, page: u32, scale: f32) -> bool {
@@ -380,27 +470,38 @@ pub fn load_raster_cache(pdf: &Path, page: u32, scale: f32) -> Option<Rendered> 
 }
 
 fn save_raster_cache(pdf: &Path, page: u32, rendered: &Rendered) {
+    // High zoom levels live in the GPU LRU, not in a growing stack of disk
+    // images. Keep previews and normal reading resolutions for fast reopen.
+    if rendered.scale > 2.0 {
+        return;
+    }
     let path = raster_cache_path(pdf, page, rendered.scale);
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = image::save_buffer(
-        &path,
-        &rendered.rgba,
-        rendered.width,
-        rendered.height,
-        image::ExtendedColorType::Rgba8,
-    );
+    use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+    use image::ImageEncoder;
+    let mut encoded = Vec::new();
+    if PngEncoder::new_with_quality(&mut encoded, CompressionType::Fast, FilterType::Sub)
+        .write_image(
+            &rendered.rgba,
+            rendered.width,
+            rendered.height,
+            image::ExtendedColorType::Rgba8,
+        )
+        .is_ok()
+    {
+        let _ = crate::library::atomic_write(&path, &encoded);
+    }
 }
 
 /// Keep the current raster until the display target is clearly sharper.
-/// Zoom past [`DISPLAY_SCALE_MAX`] stretches the texture; we do not re-raster.
 pub fn raster_is_sharp_enough(have: f32, wanted: f32) -> bool {
     if have <= 0.0 {
         return false;
     }
     let target = wanted.min(DISPLAY_SCALE_MAX);
-    target <= 0.0 || have + 0.05 >= target || target <= have * 1.3
+    target <= 0.0 || target <= have * 1.05
 }
 
 /// Text baselines in PDF points, origin top-left of the page.
@@ -833,6 +934,140 @@ fn push_obj(body: &mut Vec<u8>, offsets: &mut [u32], id: u32, payload: &str) {
 mod tests {
     use super::*;
 
+    struct TempPdf(PathBuf);
+
+    impl TempPdf {
+        fn new(bytes: &[u8]) -> Self {
+            let dir = std::env::temp_dir().join(format!("inkarchy-pdf-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("source.pdf");
+            std::fs::write(&path, bytes).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempPdf {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(self.0.parent().unwrap());
+        }
+    }
+
+    fn receive(hub: &RasterHub) -> (String, RasterImage) {
+        let (key, result) = hub
+            .rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("PDF worker");
+        (key, result.expect("rendered page"))
+    }
+
+    #[test]
+    fn worker_returns_preview_then_real_zoom_detail_and_uses_disk_cache() {
+        let file = TempPdf::new(&text_pdf("Small text must stay sharp"));
+        let hub = RasterHub::new();
+        assert!(hub.request(RasterJob {
+            key: "visible".into(),
+            path: file.0.clone(),
+            page: 0,
+            scale: 3.0,
+            preview: true,
+        }));
+        let (_, preview) = receive(&hub);
+        assert_eq!(preview.scale, 0.5);
+        assert!(hub.request(RasterJob {
+            key: "visible".into(),
+            path: file.0.clone(),
+            page: 0,
+            scale: 3.0,
+            preview: false,
+        }));
+        let (_, detail) = receive(&hub);
+        assert_eq!(detail.scale, 3.0);
+        assert_eq!(detail.image.width(), preview.image.width() * 6);
+        assert!(detail.image.pixels.iter().any(|px| px.r() < 100));
+
+        // A cached full-quality page bypasses the preview, even when the job
+        // is the first request for a page without a resident texture.
+        let cached = render_pdf_file(&file.0, 0, 1.5).unwrap();
+        save_raster_cache(&file.0, 0, &cached);
+        assert!(hub.request(RasterJob {
+            key: "reopened".into(),
+            path: file.0.clone(),
+            page: 0,
+            scale: 1.5,
+            preview: true,
+        }));
+        let (_, reopened) = receive(&hub);
+        assert_eq!(reopened.scale, 1.5);
+        assert_eq!(
+            reopened.image.pixels,
+            RasterImage::from(&cached).image.pixels
+        );
+    }
+
+    #[test]
+    fn viewport_discards_old_pages_and_previews_precede_detail() {
+        let job = |key: &str, page, preview| RasterJob {
+            key: key.into(),
+            path: "source.pdf".into(),
+            page,
+            scale: 2.0,
+            preview,
+        };
+        let mut queue = RasterQueue::default();
+        queue.jobs.extend([
+            job("old-page", 0, true),
+            job("detail", 1, false),
+            job("new-page", 90, true),
+        ]);
+        let visible = ["detail".to_string(), "new-page".to_string()]
+            .into_iter()
+            .collect();
+        assert_eq!(queue.retain(&visible), vec!["old-page"]);
+        assert_eq!(queue.pop().unwrap().key, "new-page");
+        assert_eq!(queue.pop().unwrap().key, "detail");
+        assert!(queue.pop().is_none());
+    }
+
+    #[test]
+    fn cache_is_scoped_to_source_and_invalidated_when_source_changes() {
+        let file = TempPdf::new(&text_pdf("First"));
+        let rendered = render_pdf_file(&file.0, 0, 1.0).unwrap();
+        save_raster_cache(&file.0, 0, &rendered);
+        assert!(load_raster_cache(&file.0, 0, 1.0).is_some());
+        let other = file.0.with_file_name("other.pdf");
+        std::fs::write(&other, text_pdf("Second")).unwrap();
+        assert!(load_raster_cache(&other, 0, 1.0).is_none());
+        std::fs::write(
+            &file.0,
+            text_pdf("Changed document with a different length"),
+        )
+        .unwrap();
+        assert!(load_raster_cache(&file.0, 0, 1.0).is_none());
+    }
+
+    #[test]
+    fn poppler_and_hayro_agree_on_rotated_crop_and_fractional_dpi() {
+        if !poppler_available() {
+            return;
+        }
+        let mut doc = lopdf::Document::load_mem(&text_pdf("Crop")).unwrap();
+        let page_id = doc.get_pages()[&1];
+        let page = doc.get_object_mut(page_id).unwrap().as_dict_mut().unwrap();
+        page.set("CropBox", vec![10.into(), 10.into(), 170.into(), 90.into()]);
+        page.set("Rotate", 90);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        let file = TempPdf::new(&bytes);
+        for scale in [0.5, 1.337, 3.0] {
+            let poppler = render_poppler(&file.0, 0, scale).unwrap();
+            let hayro = render_pdf_bytes(&bytes, 0, scale).unwrap();
+            assert!(poppler.width.abs_diff(hayro.width) <= 1);
+            assert!(poppler.height.abs_diff(hayro.height) <= 1);
+            assert!(poppler.height > poppler.width);
+            assert!(poppler.rgba.chunks_exact(4).any(|px| px[0] < 100));
+        }
+    }
+
     #[test]
     fn extract_text_reads_helvetica_glyphs() {
         let bytes = text_pdf("Fourier");
@@ -908,7 +1143,7 @@ mod tests {
     fn render_scale_steps_up_with_zoom() {
         assert_eq!(render_scale(0.5, 1.0), 0.75);
         assert_eq!(render_scale(1.0, 1.0), 1.5);
-        assert_eq!(render_scale(3.0, 1.0), DISPLAY_SCALE_MAX);
+        assert_eq!(render_scale(3.0, 1.0), 4.0);
         assert_eq!(render_scale(0.05, 1.0), 0.25);
     }
 
@@ -920,20 +1155,23 @@ mod tests {
     }
 
     #[test]
-    fn display_scale_caps_and_zoom_stretches_past_it() {
-        assert_eq!(preview_scale(4.0), 0.25);
-        assert_eq!(display_scale(4.0), DISPLAY_SCALE_MAX);
+    fn zoom_and_hidpi_get_real_detail_with_bounded_allocations() {
+        assert_eq!(preview_scale(4.0), 0.5);
+        assert_eq!(display_scale(4.0), 4.0);
+        assert_eq!(raster_scale(800.0, 1100.0, 595.0, 842.0, 2.0), 3.0);
         assert_eq!(
             raster_scale(4000.0, 4000.0, 100.0, 100.0, 2.0),
             DISPLAY_SCALE_MAX
         );
         let a4 = clamp_scale(595.0, 842.0, 8.0);
-        assert!(a4 > 2.0 && a4 <= 2.5, "a4 clamped to {a4}");
+        assert!(a4 > 4.0 && a4 < 4.1, "a4 clamped to {a4}");
         assert!((clamp_scale(595.0, 842.0, 1.0) - 1.0).abs() < 0.001);
-        assert!(
-            raster_is_sharp_enough(1.5, 4.0),
-            "zoom past display uses GPU"
-        );
+        assert!(!raster_is_sharp_enough(1.5, 4.0));
+        for (w, h) in [(595.0, 842.0), (14400.0, 14400.0), (100000.0, 1000.0)] {
+            let scale = clamp_scale(w, h, 6.0);
+            assert!((w.max(h) * scale).ceil() <= MAX_RASTER_SIDE);
+            assert!((w * scale).ceil() * (h * scale).ceil() <= MAX_RASTER_PIXELS);
+        }
         assert!(raster_is_sharp_enough(1.5, 1.5));
         assert!(!raster_is_sharp_enough(0.25, 1.5));
         assert!(!raster_is_sharp_enough(1.0, 1.5));
@@ -1035,6 +1273,7 @@ mod tests {
             path: path.clone(),
             page: 1,
             scale: 1.0,
+            preview: false,
         }));
         let mut got = None;
         for _ in 0..200 {
@@ -1047,19 +1286,21 @@ mod tests {
         let (key, rendered) = got.expect("worker result");
         assert_eq!(key, "p1");
         let page = rendered.expect("page 2");
-        assert!(page.height >= page.width);
+        assert!(page.image.height() >= page.image.width());
 
         assert!(hub.request(RasterJob {
             key: "p0".into(),
             path: path.clone(),
             page: 0,
             scale: 1.0,
+            preview: false,
         }));
         assert!(hub.request(RasterJob {
             key: "p1b".into(),
             path,
             page: 1,
             scale: 1.0,
+            preview: false,
         }));
         let mut first = None;
         for _ in 0..200 {

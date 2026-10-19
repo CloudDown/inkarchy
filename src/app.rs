@@ -140,6 +140,34 @@ enum DosAct {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum PageArrangement {
+    Column,
+    Row,
+    TwoColumns,
+}
+
+impl PageArrangement {
+    const ALL: [Self; 3] = [Self::Column, Self::Row, Self::TwoColumns];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Column => "Column",
+            Self::Row => "Row",
+            Self::TwoColumns => "Two columns",
+        }
+    }
+
+    fn cell(self, index: usize) -> (i32, i32) {
+        let index = index as i32;
+        match self {
+            Self::Column => (0, index),
+            Self::Row => (index, 0),
+            Self::TwoColumns => (index % 2, index / 2),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ShelfDrop {
     Shelf(usize),
     Bin(usize),
@@ -368,6 +396,8 @@ pub struct InkarchyApp {
     /// flashes back to empty paper while it re-rasters.
     bg_hot: HashSet<String>,
     pdf_raster: Option<crate::pdf::RasterHub>,
+    pdf_view_scale: [f32; 3],
+    pdf_detail_after: f64,
     startup_toast: Option<String>,
     /// Image picker and decoding run away from the drawing/event loop.
     image_import: Option<ImageImport>,
@@ -413,6 +443,10 @@ pub struct InkarchyApp {
     pdf_text_pending: HashSet<String>,
     pdf_text_hub: Option<crate::pdf::TextHub>,
     pdf_lines: HashMap<(Uuid, usize), Vec<f32>>,
+    /// Inputs kept by the PDF page and text navigation popovers.
+    pdf_page_entry: String,
+    pdf_page_target: usize,
+    pdf_search_query: String,
     /// Paper color of the next sticky peeled from the pad.
     sticky_color: Color32,
     /// Pointer while a sticky is being dragged off the pad.
@@ -613,6 +647,8 @@ impl InkarchyApp {
             bg_pending: HashSet::new(),
             bg_hot: HashSet::new(),
             pdf_raster: None,
+            pdf_view_scale: [0.0; 3],
+            pdf_detail_after: 0.0,
             startup_toast: None,
             image_import: None,
             export_picker_open: false,
@@ -646,6 +682,9 @@ impl InkarchyApp {
             pdf_text_pending: HashSet::new(),
             pdf_text_hub: None,
             pdf_lines: HashMap::new(),
+            pdf_page_entry: String::new(),
+            pdf_page_target: 0,
+            pdf_search_query: String::new(),
             sticky_color,
             sticky_drag: None,
             sticky_wheel: None,
@@ -751,7 +790,7 @@ impl InkarchyApp {
     }
 
     fn kick_pdf_preview(&mut self) {
-        let (key, path, page) = {
+        let (key, path, page, size) = {
             let Some(note) = self.note.as_ref() else {
                 return;
             };
@@ -763,22 +802,10 @@ impl InkarchyApp {
             };
             let path = self.lib.note_dir(note.id).join(&bg.file);
             let key = format!("{}:{}:{page}", note.id, bg.file);
-            (key, path, page)
+            (key, path, page, bg.source_size.unwrap_or([PAGE_W, PAGE_H]))
         };
-        let scale = if crate::pdf::poppler_available() {
-            crate::pdf::display_scale(crate::pdf::DISPLAY_SCALE_MAX)
-        } else {
-            crate::pdf::preview_scale(4.0)
-        };
-        if crate::pdf::raster_cache_fresh(&path, page, scale)
-            || crate::pdf::raster_cache_fresh(
-                &path,
-                page,
-                crate::pdf::display_scale(crate::pdf::DISPLAY_SCALE_MAX),
-            )
-        {
-            return;
-        }
+        let scale = crate::pdf::clamp_scale(size[0], size[1], crate::pdf::preview_scale(1.0))
+            .min(2047.0 / size[0].max(size[1]).max(1.0));
         if self.bg_pending.contains(&key) || self.bg_failed.contains(&key) {
             return;
         }
@@ -790,6 +817,7 @@ impl InkarchyApp {
             path,
             page,
             scale,
+            preview: true,
         }) {
             self.bg_pending.insert(key);
         }
@@ -938,6 +966,8 @@ impl InkarchyApp {
             self.dock_fold = 0.0;
             self.dock_fold_vel = 0.0;
             self.pdf_lines.clear();
+            self.pdf_page_entry.clear();
+            self.pdf_search_query.clear();
             self.sticky_drag = None;
             self.sticky_wheel = None;
             self.sticky_hold = None;
@@ -974,6 +1004,8 @@ impl InkarchyApp {
         self.undo.clear();
         self.sel.clear();
         self.pdf_lines.clear();
+        self.pdf_page_entry.clear();
+        self.pdf_search_query.clear();
         self.sticky_drag = None;
         self.sticky_wheel = None;
         self.sticky_hold = None;
@@ -1056,6 +1088,64 @@ impl InkarchyApp {
         }
         self.sel.clear();
         self.lasso.clear();
+        self.mark_dirty();
+    }
+
+    fn page_arrangement(&self) -> Option<PageArrangement> {
+        let note = self.note.as_ref()?;
+        PageArrangement::ALL.into_iter().find(|layout| {
+            note.pages
+                .iter()
+                .enumerate()
+                .all(|(index, page)| (page.col, page.row) == layout.cell(index))
+        })
+    }
+
+    fn arrange_pages(&mut self, layout: PageArrangement) {
+        if self.note.as_ref().is_none_or(|note| note.pages.len() < 2)
+            || self.page_arrangement() == Some(layout)
+        {
+            return;
+        }
+        self.finish_live();
+        self.finish_text_edit();
+        self.clear_shape_hold();
+        self.clear_page_drag_state();
+        self.sel.clear();
+        self.lasso.clear();
+        let rect = self.canvas_rect;
+        let current = if Camera::valid_viewport(rect) {
+            self.page_in_view(rect)
+        } else {
+            0
+        };
+        let old_origin = self.origin_of(current);
+        let local = if Camera::valid_viewport(rect) {
+            self.camera.to_paper(rect.center(), rect).to_vec2() - old_origin
+        } else {
+            Vec2::ZERO
+        };
+        let was_fitted = self.fitted_cell.is_some();
+        self.push_snapshot();
+        if let Some(note) = &mut self.note {
+            for (index, page) in note.pages.iter_mut().enumerate() {
+                (page.col, page.row) = layout.cell(index);
+            }
+        }
+        let cell = layout.cell(current);
+        self.pages_jiggle_cell = Some(cell);
+        if Camera::valid_viewport(rect) {
+            let origin = self.origin_of(current);
+            if was_fitted {
+                let (pw, ph) = self.note.as_ref().unwrap().page_size();
+                self.camera.fit_page(rect, origin, pw, ph);
+                self.fitted_cell = Some(cell);
+            } else {
+                let point = origin + local;
+                self.camera.pan = (rect.center() - rect.min)
+                    - vec2(point.x * self.camera.zoom, point.y * self.camera.zoom_y());
+            }
+        }
         self.mark_dirty();
     }
 
@@ -1399,6 +1489,12 @@ impl eframe::App for InkarchyApp {
 
         let on_shelf = matches!(self.scene, Scene::Shelf { .. });
         if on_shelf {
+            self.bg_hot.clear();
+            if let Some(hub) = &self.pdf_raster {
+                for key in hub.retain_visible(&self.bg_hot) {
+                    self.bg_pending.remove(&key);
+                }
+            }
             self.ui_shelf(ctx);
         } else {
             self.ui_desk(ctx);
@@ -1435,8 +1531,7 @@ impl eframe::App for InkarchyApp {
             || wants_pen
             || self.toast.is_some()
             || pen.in_proximity
-            || pen.down
-            || !self.bg_pending.is_empty();
+            || pen.down;
         if animating && focused {
             ctx.request_repaint();
         } else if self.dirty && focused {
@@ -1983,6 +2078,48 @@ impl InkarchyApp {
         }
     }
 
+    fn request_open_pdf_text(&mut self) {
+        let Some(note) = self.note.as_ref() else {
+            return;
+        };
+        let id = note.id;
+        let jobs: Vec<_> = note
+            .pages
+            .iter()
+            .filter_map(|page| {
+                let bg = page.background.as_ref()?;
+                let pdf_page = bg.pdf_page?;
+                let key = format!("{}:{}:{pdf_page}", id, bg.file);
+                (!self.pdf_text.contains_key(&key) && !self.pdf_text_pending.contains(&key))
+                    .then(|| (key, self.lib.note_dir(id).join(&bg.file), pdf_page))
+            })
+            .collect();
+        if jobs.is_empty() {
+            return;
+        }
+        let hub = self
+            .pdf_text_hub
+            .get_or_insert_with(crate::pdf::TextHub::new);
+        for (key, path, page) in jobs {
+            if hub.request(crate::pdf::TextJob {
+                key: key.clone(),
+                path,
+                page,
+            }) {
+                self.pdf_text_pending.insert(key);
+            }
+        }
+    }
+
+    fn jump_to_page(&mut self, page: usize) {
+        let last = self
+            .note
+            .as_ref()
+            .map_or(0, |note| note.pages.len().saturating_sub(1));
+        self.land_page = Some(page.min(last));
+        self.need_fit = false;
+    }
+
     fn shelf_hit_matches(&self, id: Uuid, query: &str) -> bool {
         if query.is_empty() {
             return true;
@@ -2188,7 +2325,7 @@ impl InkarchyApp {
                                         None => {}
                                     }
                                 });
-                            } else if shifting {                            } else if shifting {
+                            } else if shifting {
                                 if compact_cards {
                                     self.paint_sel_wash(
                                         &ui.painter_at(cell),
@@ -5129,6 +5266,300 @@ impl InkarchyApp {
         }
     }
 
+    fn page_layout_picker(&mut self, button: &Response) {
+        let current = self.page_arrangement();
+        let mut picked = None;
+        Popup::menu(button)
+            // This control sits near the bottom edge; anchor the editor above it
+            // so the page picker remains visible instead of opening off-screen.
+            .align(egui::RectAlign::BOTTOM_START)
+            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+            .frame(self.note_popup_frame())
+            .show(|ui| {
+                ui.set_width(224.0);
+                ui.spacing_mut().item_spacing = vec2(0.0, 4.0);
+                self.menu_head(ui, "Arrange pages");
+                for layout in PageArrangement::ALL {
+                    let (rect, response) =
+                        ui.allocate_exact_size(vec2(ui.available_width(), 54.0), Sense::click());
+                    response.widget_info(|| {
+                        WidgetInfo::selected(
+                            WidgetType::Button,
+                            ui.is_enabled(),
+                            current == Some(layout),
+                            layout.label(),
+                        )
+                    });
+                    let fill = if current == Some(layout) {
+                        mix_col(self.look.paper, self.look.green(), 0.28)
+                    } else {
+                        self.look.paper
+                    };
+                    let (face, fg) =
+                        self.paint_note_surface(ui, rect.shrink(2.0), &response, fill, 10);
+                    let preview = Rect::from_center_size(
+                        pos2(face.left() + 28.0, face.center().y),
+                        vec2(40.0, 32.0),
+                    );
+                    let count = if layout == PageArrangement::TwoColumns {
+                        6
+                    } else {
+                        3
+                    };
+                    let cells: Vec<_> = (0..count).map(|index| layout.cell(index)).collect();
+                    let max_col = cells.iter().map(|cell| cell.0).max().unwrap_or(0);
+                    let max_row = cells.iter().map(|cell| cell.1).max().unwrap_or(0);
+                    let paper_size = vec2(7.0, 8.0);
+                    let step = vec2(9.5, 10.0);
+                    let group = vec2(
+                        max_col as f32 * step.x + paper_size.x,
+                        max_row as f32 * step.y + paper_size.y,
+                    );
+                    let start = preview.center() - group * 0.5;
+                    for (col, row) in cells {
+                        let miniature = Rect::from_min_size(
+                            start + vec2(col as f32 * step.x, row as f32 * step.y),
+                            paper_size,
+                        );
+                        ui.painter().rect_stroke(
+                            miniature,
+                            1.0,
+                            Stroke::new(1.0, fg.gamma_multiply(0.72)),
+                            StrokeKind::Inside,
+                        );
+                    }
+                    ui.painter().text(
+                        pos2(face.left() + 57.0, face.center().y),
+                        Align2::LEFT_CENTER,
+                        layout.label(),
+                        self.look.serif(16.0),
+                        fg,
+                    );
+                    if response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                        picked = Some(layout);
+                    }
+                }
+            });
+        if let Some(layout) = picked {
+            self.arrange_pages(layout);
+            Popup::close_all(&button.ctx);
+        }
+    }
+
+    fn ui_pdf_page_number(&mut self, ctx: &Context) {
+        if !self.note_has_pdf() || !Camera::valid_viewport(self.canvas_rect) {
+            return;
+        }
+        let page_count = self.note.as_ref().map_or(0, |note| note.pages.len());
+        if page_count == 0 {
+            return;
+        }
+        let current = self.page_in_view(self.canvas_rect).min(page_count - 1) + 1;
+        let visible_width = 28.0 + current.to_string().len() as f32 * 7.0;
+        let number = Area::new(Id::new("pdf-page-number"))
+            .fixed_pos(pos2(
+                self.canvas_rect.left() + 8.0,
+                self.canvas_rect.bottom() - 52.0,
+            ))
+            .order(Order::Foreground)
+            .show(ctx, |ui| {
+                let (hit, response) = ui.allocate_exact_size(vec2(visible_width.max(44.0), 44.0), Sense::click());
+                response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true,
+                    format!("Go to page {current} of {page_count}")));
+                let rect = Rect::from_center_size(hit.center(), vec2(visible_width, 26.0));
+                let fill = mix_col(
+                    self.look.desk,
+                    self.look.paper,
+                    if response.hovered() { 0.26 } else { 0.13 },
+                );
+                ui.painter().rect_filled(rect, 8.0, fill);
+                ui.painter().text(rect.center(), Align2::CENTER_CENTER, current.to_string(),
+                    self.look.mono(13.0), self.look.fg);
+                response.on_hover_text("Go to page").on_hover_cursor(CursorIcon::PointingHand)
+            });
+        if number.inner.clicked() {
+            self.pdf_page_target = current;
+            self.pdf_page_entry = current.to_string();
+        }
+        let mut destination = None;
+        Popup::menu(&number.inner)
+            .align(egui::RectAlign::TOP_START)
+            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+            .frame(self.note_popup_frame().fill(self.look.paper))
+            .show(|ui| {
+                ui.set_width(260.0_f32.min(ctx.screen_rect().width() - 36.0).max(150.0));
+                ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                self.menu_head(ui, "Go to page");
+                ui.horizontal(|ui| {
+                    let back = ui.add_sized([44.0, 44.0], Button::new("−"));
+                    if back.clicked() {
+                        self.pdf_page_target = self.pdf_page_target.saturating_sub(1).max(1);
+                    }
+                    ui.vertical_centered(|ui| {
+                        ui.label(RichText::new(self.pdf_page_target.to_string())
+                            .font(self.look.serif(24.0)).color(self.look.ink));
+                        ui.label(RichText::new(format!("of {page_count}"))
+                            .font(self.look.mono(11.0)).color(self.look.ink.gamma_multiply(0.6)));
+                    });
+                    let next = ui.add_sized([44.0, 44.0], Button::new("+"));
+                    if next.clicked() {
+                        self.pdf_page_target = (self.pdf_page_target + 1).min(page_count);
+                    }
+                });
+                if page_count > 1 {
+                    let (track, scrub) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), Sense::click_and_drag());
+                    let line = Rect::from_center_size(track.center(), vec2(track.width() - 24.0, 3.0));
+                    ui.painter().rect_filled(line, 2.0, self.look.ink.gamma_multiply(0.28));
+                    if (scrub.dragged() || scrub.clicked()) && scrub.interact_pointer_pos().is_some() {
+                        let x = scrub.interact_pointer_pos().unwrap().x.clamp(line.left(), line.right());
+                        self.pdf_page_target = 1 + ((x - line.left()) / line.width() * (page_count - 1) as f32).round() as usize;
+                    }
+                    let x = line.left() + line.width() * (self.pdf_page_target - 1) as f32 / (page_count - 1) as f32;
+                    ui.painter().circle_filled(pos2(x, line.center().y), 9.0, self.look.paper);
+                    ui.painter().circle_stroke(pos2(x, line.center().y), 9.0, Stroke::new(2.0, self.look.ink));
+                    if scrub.drag_stopped() || scrub.clicked() {
+                        destination = Some(self.pdf_page_target - 1);
+                    }
+                }
+                ui.horizontal(|ui| {
+                    let edit = ui.add(TextEdit::singleline(&mut self.pdf_page_entry)
+                        .font(self.look.mono(15.0)).desired_width(64.0).hint_text("Page"));
+                    if ui.add_sized([54.0, 44.0], Button::new("Go")).clicked()
+                        || (edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))) {
+                        destination = self.pdf_page_entry.trim().parse::<usize>().ok()
+                            .filter(|page| *page > 0).map(|page| page.min(page_count) - 1);
+                    }
+                });
+            });
+        if let Some(page) = destination {
+            self.jump_to_page(page);
+            Popup::close_all(ctx);
+        }
+    }
+
+    fn pdf_search_picker(&mut self, button: &Response) {
+        let popup = Popup::menu(button)
+            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+            .frame(self.note_popup_frame());
+        if !popup.is_open() && !button.clicked() {
+            return;
+        }
+        self.request_open_pdf_text();
+        let query = self.pdf_search_query.trim().to_lowercase();
+        let results: Vec<(usize, String)> = self
+            .note
+            .as_ref()
+            .map(|note| {
+                note.pages
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, page)| {
+                        let bg = page.background.as_ref()?;
+                        let pdf_page = bg.pdf_page?;
+                        let key = format!("{}:{}:{pdf_page}", note.id, bg.file);
+                        let text = self.pdf_text.get(&key)?;
+                        (!query.is_empty() && text.contains(&query))
+                            .then(|| (index, search_snippet(text, &query).unwrap_or_default()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let pending = self.note.as_ref().is_some_and(|note| {
+            note.pages.iter().any(|page| {
+                page.background.as_ref().is_some_and(|bg| {
+                    bg.pdf_page.is_some_and(|pdf_page| {
+                        self.pdf_text_pending
+                            .contains(&format!("{}:{}:{pdf_page}", note.id, bg.file))
+                    })
+                })
+            })
+        });
+        let mut destination = None;
+        popup.show(|ui| {
+            ui.set_width(300.0_f32.min(button.ctx.screen_rect().width() - 32.0));
+            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+            self.menu_head(ui, "Find in PDF");
+            let edit = Frame::NONE
+                .fill(self.look.paper)
+                .corner_radius(10)
+                .inner_margin(Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.visuals_mut().weak_text_color = Some(self.look.ink.gamma_multiply(0.58));
+                    ui.add(
+                        TextEdit::singleline(&mut self.pdf_search_query)
+                            .font(self.look.mono(14.0))
+                            .text_color(self.look.ink)
+                            .desired_width(ui.available_width())
+                            .frame(false)
+                            .hint_text("Search a word or phrase…"),
+                    )
+                })
+                .inner;
+            if button.clicked() {
+                edit.request_focus();
+            }
+            ui.add_space(4.0);
+            if query.is_empty() {
+                ui.label(
+                    RichText::new("Type to search every page")
+                        .small()
+                        .color(self.look.fg.gamma_multiply(0.7)),
+                );
+            } else if results.is_empty() {
+                ui.label(
+                    RichText::new(if pending {
+                        "Reading PDF…"
+                    } else {
+                        "No result"
+                    })
+                    .small()
+                    .color(self.look.fg.gamma_multiply(0.7)),
+                );
+            } else {
+                ScrollArea::vertical()
+                    .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
+                    .max_height(260.0)
+                    .show(ui, |ui| {
+                        for (page, snippet) in &results {
+                            let label = format!("Page {}", page + 1);
+                            let (rect, response) = ui.allocate_exact_size(
+                                vec2(ui.available_width(), 48.0),
+                                Sense::click(),
+                            );
+                            let (face, fg) = self.paint_note_surface(
+                                ui,
+                                rect.shrink(2.0),
+                                &response,
+                                self.look.paper,
+                                10,
+                            );
+                            ui.painter().text(
+                                pos2(face.left() + 10.0, face.top() + 10.0),
+                                Align2::LEFT_TOP,
+                                label,
+                                self.look.mono(13.0),
+                                fg,
+                            );
+                            ui.painter().text(
+                                pos2(face.left() + 10.0, face.bottom() - 9.0),
+                                Align2::LEFT_BOTTOM,
+                                snippet,
+                                self.look.mono(11.0),
+                                fg.gamma_multiply(0.68),
+                            );
+                            if response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                                destination = Some(*page);
+                            }
+                        }
+                    });
+            }
+        });
+        if let Some(page) = destination {
+            self.jump_to_page(page);
+            Popup::close_all(&button.ctx);
+        }
+    }
+
     fn paper_kind_row(&self, ui: &mut Ui, kind: PaperKind, on: bool) -> bool {
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 56.0), Sense::click());
         resp.widget_info(|| {
@@ -5595,6 +6026,27 @@ impl InkarchyApp {
                         if pages.clicked() {
                             self.toggle_pages_mode();
                         }
+                        if self.sheet_tabs_on
+                            && self.note.as_ref().is_some_and(|note| note.pages.len() > 1)
+                        {
+                            let layout = self.round_well(
+                                ui,
+                                chrome,
+                                self.look.paper,
+                                paint_page_layout_icon,
+                            );
+                            ctx.data_mut(|data| {
+                                data.insert_temp(Id::new("page-layout-button-rect"), layout.rect)
+                            });
+                            layout.widget_info(|| {
+                                WidgetInfo::labeled(
+                                    WidgetType::Button,
+                                    ui.is_enabled(),
+                                    "Arrange pages",
+                                )
+                            });
+                            self.page_layout_picker(&layout);
+                        }
                         let join = self
                             .note
                             .as_ref()
@@ -5797,12 +6249,21 @@ impl InkarchyApp {
                         });
                         self.paper_picker(&paper);
                         let coach = self.ui_coach_button(ui);
-                        ctx.data_mut(|d| {
-                            d.insert_temp(
-                                Id::new("header-right-start"),
-                                coach.rect.left().min(paper.rect.left()),
-                            )
-                        });
+                        let mut leftmost = coach.rect.left().min(paper.rect.left());
+                        if self.note_has_pdf() {
+                            let search =
+                                self.round_well(ui, chrome, self.look.paper, paint_search_icon);
+                            search.widget_info(|| {
+                                WidgetInfo::labeled(
+                                    WidgetType::Button,
+                                    ui.is_enabled(),
+                                    "Find in PDF",
+                                )
+                            });
+                            self.pdf_search_picker(&search);
+                            leftmost = leftmost.min(search.rect.left());
+                        }
+                        ctx.data_mut(|d| d.insert_temp(Id::new("header-right-start"), leftmost));
                     });
                 });
                 let left_end = ctx
@@ -5829,6 +6290,8 @@ impl InkarchyApp {
             .show(ctx, |ui| {
                 self.ui_canvas(ui);
             });
+
+        self.ui_pdf_page_number(ctx);
 
         if !self.sheet_tabs_on {
             self.ui_floating_dock(ctx);
@@ -8657,6 +9120,11 @@ impl InkarchyApp {
         let bleed = 1.6;
         let occupied: HashSet<_> = note.pages.iter().map(|p| (p.col, p.row)).collect();
         let pixels_per_point = painter.ctx().pixels_per_point();
+        let view_scale = [cam.zoom, cam.zoom_y(), pixels_per_point];
+        if self.pdf_view_scale != view_scale {
+            self.pdf_view_scale = view_scale;
+            self.pdf_detail_after = now + 0.12;
+        }
         let snap = |p: Pos2| {
             pos2(
                 (p.x * pixels_per_point).round() / pixels_per_point,
@@ -8916,6 +9384,11 @@ impl InkarchyApp {
         if self.lasso.len() >= 2 {
             let pts: Vec<_> = self.lasso.iter().copied().map(map).collect();
             painter.add(Shape::closed_line(pts, Stroke::new(1.2, self.look.accent)));
+        }
+        if let Some(hub) = &self.pdf_raster {
+            for key in hub.retain_visible(&self.bg_hot) {
+                self.bg_pending.remove(&key);
+            }
         }
     }
 
@@ -10434,12 +10907,15 @@ impl InkarchyApp {
         let Some(hub) = self.pdf_raster.as_ref() else {
             return;
         };
+        hub.set_repaint_context(ctx);
         let ready = hub.take_ready();
         if !ready.is_empty() {
             ctx.request_repaint();
         }
         for (key, result) in ready {
-            self.bg_pending.remove(&key);
+            if !self.bg_pending.remove(&key) {
+                continue;
+            }
             match result {
                 Ok(rendered) => {
                     self.store_background(ctx, key, rendered);
@@ -10455,14 +10931,24 @@ impl InkarchyApp {
         &mut self,
         ctx: &Context,
         key: String,
-        rendered: crate::pdf::Rendered,
+        rendered: crate::pdf::RasterImage,
     ) -> Option<TextureHandle> {
-        if rendered.width == 0 || rendered.height == 0 || rendered.rgba.is_empty() {
+        if rendered.image.width() == 0
+            || rendered.image.height() == 0
+            || rendered.image.pixels.is_empty()
+        {
             self.bg_failed.insert(key);
             return None;
         }
         const BUDGET: usize = 96 * 1024 * 1024;
-        let bytes = rendered.rgba.len();
+        let bytes = rendered.image.pixels.len() * 4;
+        if self
+            .bg_tex_scale
+            .get(&key)
+            .is_some_and(|have| *have >= rendered.scale)
+        {
+            return self.bg_textures.get(&key).cloned();
+        }
         let old_bytes = self
             .bg_order
             .iter()
@@ -10477,17 +10963,10 @@ impl InkarchyApp {
             };
             self.forget_background_at(i);
         }
-        if self.bg_bytes + bytes > BUDGET + old_bytes {
-            if let Some(tex) = self.bg_textures.get(&key).cloned() {
-                // Keep the current raster. Dropping it to make room flashes empty paper.
-                return Some(tex);
-            }
-        }
-        let image = ColorImage::from_rgba_unmultiplied(
-            [rendered.width as usize, rendered.height as usize],
-            &rendered.rgba,
-        );
-        let tex = ctx.load_texture(key.clone(), image, TextureOptions::LINEAR);
+        // The LRU budget is soft for visible sheets. Refusing their upgrades
+        // would requeue the same expensive render every frame. Each raster is
+        // independently bounded, and off-screen textures are evicted first.
+        let tex = ctx.load_texture(key.clone(), rendered.image, TextureOptions::LINEAR);
         if let Some(i) = self.bg_order.iter().position(|(k, _)| k == &key) {
             self.forget_background_at(i);
         }
@@ -10526,6 +11005,7 @@ impl InkarchyApp {
                 pixels_per_point,
             );
             crate::pdf::clamp_scale(src_w, src_h, raw)
+                .min((ctx.input(|i| i.max_texture_side) as f32 - 1.0) / src_w.max(src_h).max(1.0))
         } else {
             1.0
         };
@@ -10548,38 +11028,25 @@ impl InkarchyApp {
         }
         let path = self.lib.note_dir(note_id).join(&bg.file);
         if let Some(page) = bg.pdf_page {
-            let display = crate::pdf::display_scale(wanted);
-            let preview = crate::pdf::preview_scale(wanted);
-            let mut shown = cached;
-            if shown.is_none() {
-                if let Some(hit) = crate::pdf::load_raster_cache(&path, page, display)
-                    .or_else(|| crate::pdf::load_raster_cache(&path, page, preview))
-                {
-                    shown = self.store_background(ctx, key.clone(), hit);
-                }
+            let delay = self.pdf_detail_after - ctx.input(|i| i.time);
+            if cached.is_some() && delay > 0.0 {
+                ctx.request_repaint_after(Duration::from_secs_f64(delay));
+                return cached;
             }
-            let have = self.bg_tex_scale.get(&key).copied().unwrap_or(0.0);
-            if shown.is_some() && crate::pdf::raster_is_sharp_enough(have, wanted) {
-                return shown;
-            }
-            // Poppler: one display-quality pass. Hayro: tiny preview first.
-            let scale = if shown.is_none() && !crate::pdf::poppler_available() {
-                preview
-            } else {
-                display
-            };
             let hub = self
                 .pdf_raster
                 .get_or_insert_with(crate::pdf::RasterHub::new);
+            hub.set_repaint_context(ctx);
             if hub.request(crate::pdf::RasterJob {
                 key: key.clone(),
                 path,
                 page,
-                scale,
+                scale: wanted,
+                preview: cached.is_none(),
             }) {
                 self.bg_pending.insert(key);
             }
-            return shown;
+            return cached;
         }
         let rendered = image::open(&path).ok().and_then(|img| {
             let img = img.into_rgba8();
@@ -10600,7 +11067,7 @@ impl InkarchyApp {
             self.bg_failed.insert(key);
             return cached;
         };
-        self.store_background(ctx, key, rendered)
+        self.store_background(ctx, key, (&rendered).into())
     }
 
     fn texture_for(&mut self, ctx: &Context, note_id: &Uuid, file: &str) -> Option<TextureHandle> {
@@ -11525,6 +11992,26 @@ fn paint_pages_icon(p: &Painter, c: Pos2, fg: Color32) {
     let plus = page.center() + vec2(0.0, 0.2);
     p.rect_filled(Rect::from_center_size(plus, vec2(7.6, 2.0)), 1.0, fg);
     p.rect_filled(Rect::from_center_size(plus, vec2(2.0, 7.6)), 1.0, fg);
+}
+
+fn paint_page_layout_icon(p: &Painter, c: Pos2, fg: Color32) {
+    for row in 0..2 {
+        for col in 0..2 {
+            let page = Rect::from_min_size(
+                c + vec2(-8.5 + col as f32 * 9.5, -8.5 + row as f32 * 9.5),
+                vec2(7.5, 7.5),
+            );
+            p.rect_stroke(page, 1.0, Stroke::new(1.4, fg), StrokeKind::Inside);
+        }
+    }
+}
+
+fn paint_search_icon(p: &Painter, c: Pos2, fg: Color32) {
+    p.circle_stroke(c - vec2(2.5, 2.5), 6.0, Stroke::new(1.8, fg));
+    p.line_segment(
+        [c + vec2(1.8, 1.8), c + vec2(7.0, 7.0)],
+        Stroke::new(2.0, fg),
+    );
 }
 
 fn paint_more(p: &egui::Painter, c: Pos2, fg: Color32) {

@@ -10,7 +10,6 @@ pub(super) struct CoachUi {
     pub(super) open: bool,
     draft: AiSettings,
     key: String,
-    key_entry: String,
     keyring: Option<CredentialJob>,
     keyring_action: u8,
     keyring_attempted: bool,
@@ -286,307 +285,130 @@ impl InkarchyApp {
         if !self.coach.open || self.note.is_none() {
             return;
         }
-        let mut open = true;
         let screen = ctx.screen_rect();
-        let panel_width = (screen.width() - 48.0).clamp(248.0, 344.0);
-        let anchor = ctx
-            .data(|d| d.get_temp::<Rect>(Id::new("coach-button-rect")))
+        let panel_width = (screen.width() - 48.0).clamp(220.0, 276.0);
+        let anchor = ctx.data(|d| d.get_temp::<Rect>(Id::new("coach-button-rect")))
             .unwrap_or_else(|| Rect::from_min_size(screen.left_top(), vec2(44.0, 44.0)));
         let panel_pos = pos2(
-            (anchor.center().x - panel_width * 0.5)
-                .clamp(screen.left() + 8.0, screen.right() - panel_width - 8.0),
+            (anchor.center().x - panel_width * 0.5).clamp(screen.left() + 8.0, screen.right() - panel_width - 8.0),
             anchor.bottom() + 6.0,
         );
-        let desk = self.look.desk;
-        let surface = self.look.desk_deep;
-        let edge = self.look.desk_edge;
-        let fg = self.look.fg;
-        let muted = mix_col(surface, fg, 0.68);
-        let accent = self.look.accent;
-        let now_enabled = self.coach_enabled();
-        let status = self.coach_label();
-        let status_color = if self.coach.session.error.is_some() {
-            self.look.punch
-        } else if let Some(result) = &self.coach.session.result {
-            match result.verdict {
-                Verdict::OnTrack => self.look.green(),
-                Verdict::LikelyError => self.look.punch,
-                Verdict::CheckStep => accent,
-                Verdict::Insufficient => muted,
-            }
-        } else if now_enabled {
-            accent
-        } else {
-            muted
-        };
-
-        Window::new(
-            RichText::new("Exercise coach")
-                .font(self.look.serif(18.0))
-                .color(fg),
-        )
-        .id(Id::new("inkarchy-coach-settings"))
-        .open(&mut open)
-        .fixed_pos(panel_pos)
-        .resizable(false)
-        .collapsible(false)
-        .vscroll(true)
-        .min_width(panel_width)
-        .max_width(panel_width)
-        .default_width(panel_width)
-        .default_height(420.0)
-        .max_height((screen.height() - 56.0).max(120.0))
-        .constrain_to(screen.shrink(8.0))
-        .frame(
-            Frame::NONE
-                .fill(surface)
-                .stroke(Stroke::new(1.0, edge))
-                .corner_radius(12)
-                .inner_margin(14),
-        )
-        .show(ctx, |ui| {
-            ui.set_width(panel_width);
-            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-            ui.spacing_mut().text_edit_width = panel_width;
-            ui.style_mut().wrap_mode = Some(TextWrapMode::Wrap);
-
-            let visuals = ui.visuals_mut();
-            visuals.override_text_color = Some(fg);
-            visuals.weak_text_color = Some(muted);
-            visuals.extreme_bg_color = desk;
-            visuals.code_bg_color = desk;
-            visuals.selection.bg_fill = mix_col(desk, accent, 0.45);
-            visuals.selection.stroke = Stroke::new(1.0, fg);
-            for widget in [
-                &mut visuals.widgets.noninteractive,
-                &mut visuals.widgets.inactive,
-                &mut visuals.widgets.hovered,
-                &mut visuals.widgets.active,
-                &mut visuals.widgets.open,
-            ] {
-                widget.bg_fill = desk;
-                widget.weak_bg_fill = desk;
-                widget.fg_stroke = Stroke::new(1.0, fg);
-                widget.bg_stroke = Stroke::new(0.7, edge);
-            }
-            visuals.widgets.hovered.bg_fill = mix_col(desk, accent, 0.22);
-            visuals.widgets.active.bg_fill = mix_col(desk, accent, 0.38);
-
-            let notebook_id = self.note.as_ref().unwrap().id;
-            let mut enabled = now_enabled;
-            if ui.checkbox(&mut enabled, "Enable in this notebook").changed() {
-                if enabled {
-                    self.lib.index.ai.enabled_notebooks.insert(notebook_id);
-                } else {
-                    self.lib.index.ai.enabled_notebooks.remove(&notebook_id);
-                }
-                self.coach.session.invalidate(Instant::now());
-                let saved = self.lib.save_index();
-                self.report_save(saved);
-            }
-
-            Frame::NONE
-                .fill(desk)
-                .corner_radius(8)
-                .inner_margin(10)
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.label(RichText::new(status).color(status_color).strong());
-                    if let Some(error) = &self.coach.session.error {
-                        ui.label(RichText::new(error).small().color(self.look.punch));
-                    }
-                    if let Some(result) = &self.coach.session.result {
-                        if !result.recognized_step.is_empty() {
-                            ui.label(RichText::new("Read as").small().color(muted));
-                            ui.label(RichText::new(&result.recognized_step).font(self.look.mono(14.0)));
-                        }
-                        if !result.explanation.is_empty() {
-                            ui.label(RichText::new(&result.explanation).small());
-                        }
-                    }
-                    if self.coach.session.error.is_some()
-                        && ui
-                            .add_enabled(enabled && self.coach.session.busy.is_none(), Button::new("Retry"))
-                            .clicked()
-                    {
-                        self.coach.session.invalidate(Instant::now());
-                    }
-                });
-
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Statement").small().color(muted));
-                let old_reference = self.coach.session.reference;
-                let reference_label = old_reference
-                    .map(|cell| {
-                        self.note
-                            .as_ref()
-                            .unwrap()
-                            .pages
-                            .iter()
-                            .position(|p| (p.col, p.row) == cell)
-                            .map(|p| format!("Page {}", p + 1))
-                            .unwrap_or_else(|| "Removed".into())
-                    })
-                    .unwrap_or_else(|| "This page".into());
-                ComboBox::from_id_salt("coach-reference")
-                    .selected_text(reference_label)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.coach.session.reference,
-                            None,
-                            "This page",
-                        );
-                        for (i, page) in self.note.as_ref().unwrap().pages.iter().enumerate() {
-                            ui.selectable_value(
-                                &mut self.coach.session.reference,
-                                Some((page.col, page.row)),
-                                format!("Page {}", i + 1),
-                            );
-                        }
-                    });
-                if old_reference != self.coach.session.reference {
-                    self.coach.session.invalidate(Instant::now());
-                }
-            });
-
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.coach.draft.provider, Provider::Ollama, "Local");
-                ui.selectable_value(&mut self.coach.draft.provider, Provider::Gemini, "Gemini API");
-            });
-
-            ui.collapsing("Model & connection", |ui| {
-                ui.label(RichText::new("Shared by all notebooks").small().color(muted));
-                match self.coach.draft.provider {
-                    Provider::Ollama => {
-                        ui.add(
-                            TextEdit::singleline(&mut self.coach.draft.local_url)
-                                .hint_text("Ollama address"),
-                        );
-                        ui.add(
-                            TextEdit::singleline(&mut self.coach.draft.local_model)
-                                .hint_text("Vision model"),
-                        );
-                        ui.label(
-                            RichText::new("Install: ollama pull qwen3-vl:4b-instruct")
-                                .small()
-                                .monospace(),
-                        );
-                        ui.label(
-                            RichText::new("CPU-only analysis may be slow.")
-                                .small()
-                                .color(muted),
-                        );
-                    }
-                    Provider::Gemini => {
-                        ui.add(
-                            TextEdit::singleline(&mut self.coach.draft.api_model)
-                                .hint_text("Model name"),
-                        );
-                        ui.add(
-                            TextEdit::singleline(&mut self.coach.key_entry)
-                                .password(true)
-                                .hint_text("API key"),
-                        );
-                        ui.horizontal_wrapped(|ui| {
-                            let has_key = !self.coach.key_entry.trim().is_empty();
-                            if ui
-                                .add_enabled(has_key, Button::new("Use for session"))
-                                .clicked()
-                            {
-                                self.coach.key = self.coach.key_entry.trim().to_owned();
-                                self.coach.key_entry.clear();
-                                self.coach.keyring_attempted = true;
-                                self.coach.keyring_status = "Key active for this session.".into();
-                                self.coach.session.invalidate(Instant::now());
-                            }
-                            if ui
-                                .add_enabled(has_key && self.coach.keyring.is_none(), Button::new("Save key"))
-                                .clicked()
-                            {
-                                self.coach.key = self.coach.key_entry.trim().to_owned();
-                                self.coach.key_entry.clear();
-                                self.coach.keyring_attempted = true;
-                                self.coach.keyring_action = 1;
-                                self.coach.keyring = Some(CredentialJob::start(
-                                    CredentialAction::Save(self.coach.key.clone()),
-                                    ctx,
-                                ));
-                                self.coach.session.invalidate(Instant::now());
-                            }
-                            if !self.coach.key.is_empty() && ui.button("Forget").clicked() {
-                                self.coach.key.clear();
-                                self.coach.key_entry.clear();
-                                self.coach.keyring_attempted = true;
-                                self.coach.keyring_action = 2;
-                                self.coach.keyring = Some(CredentialJob::start(
-                                    CredentialAction::Delete,
-                                    ctx,
-                                ));
-                                self.coach.session.invalidate(Instant::now());
-                            }
+        let fg = self.look.ink;
+        let muted = fg.gamma_multiply(0.62);
+        let notebook_id = self.note.as_ref().unwrap().id;
+        let mut enabled = self.lib.index.ai.enabled_notebooks.contains(&notebook_id);
+        let panel = Area::new(Id::new("inkarchy-coach-settings"))
+            .fixed_pos(panel_pos).order(Order::Foreground).constrain(true)
+            .show(ctx, |ui| {
+                self.note_popup_frame()
+                    .fill(self.look.paper)
+                    .stroke(Stroke::new(1.0, fg.gamma_multiply(0.18)))
+                    .show(ui, |ui| {
+                        ui.set_width(panel_width - 16.0);
+                        ui.spacing_mut().item_spacing = vec2(0.0, 4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Exercise coach").font(self.look.serif(18.0)).color(fg));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let (rect, close) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
+                                let center = rect.center();
+                                ui.painter().circle_stroke(center, 12.0, Stroke::new(1.0, muted));
+                                for (a, b) in [(vec2(-3.0, -3.0), vec2(3.0, 3.0)),
+                                    (vec2(3.0, -3.0), vec2(-3.0, 3.0))] {
+                                    ui.painter().line_segment([center + a, center + b], Stroke::new(1.5, fg));
+                                }
+                                if close.on_hover_text("Close").on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                                    self.coach.open = false;
+                                }
+                            });
                         });
-                        if !self.coach.keyring_status.is_empty() {
-                            ui.label(RichText::new(&self.coach.keyring_status).small().color(muted));
+                        let (rect, toggle) = ui.allocate_exact_size(vec2(ui.available_width(), 56.0), Sense::click());
+                        toggle.widget_info(|| WidgetInfo::selected(
+                            WidgetType::Button, ui.is_enabled(), enabled, "Enable for this notebook"
+                        ));
+                        let fill = if enabled { mix_col(self.look.paper, self.look.green(), 0.28) }
+                            else { self.look.paper };
+                        let (face, ink) = self.paint_note_surface(ui, rect.shrink(2.0), &toggle, fill, 10);
+                        let swatch = Rect::from_min_size(face.min + vec2(8.0, 6.0), vec2(58.0, 40.0));
+                        self.paint_paper_swatch(ui.painter(), swatch, PaperKind::Lined);
+                        ui.painter().circle_filled(swatch.right_top() - vec2(7.0, -7.0), 3.2,
+                            if enabled { self.look.green() } else { muted });
+                        ui.painter().text(pos2(swatch.right() + 12.0, face.center().y),
+                            Align2::LEFT_CENTER, "Enable AI", self.look.serif(16.0), ink);
+                        if toggle.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                            enabled = !enabled;
+                            if enabled { self.lib.index.ai.enabled_notebooks.insert(notebook_id); }
+                            else { self.lib.index.ai.enabled_notebooks.remove(&notebook_id); }
+                            self.coach.session.invalidate(Instant::now());
+                            let saved = self.lib.save_index();
+                            self.report_save(saved);
                         }
-                        ui.label(
-                            RichText::new("Enabled notebooks send page images to Google. API use may cost money.")
-                                .small()
-                                .color(muted),
+                        ui.add_space(7.0);
+                        ui.label(RichText::new("Connections").font(self.look.serif(15.0)).color(muted));
+                        for (provider, title, mark) in [
+                                (Provider::Ollama, "Ollama · local", "O"),
+                                (Provider::Gemini, "Gemini · cloud", "G"),
+                            ] {
+                                let selected = self.lib.index.ai.provider == provider;
+                                let color = if selected && !self.coach.connection_status.is_empty() {
+                                    if self.coach.connection_status.contains("ready") || self.coach.connection_status.contains("connected") { self.look.green() } else { self.look.punch }
+                                } else { muted };
+                                let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
+                                let badge = pos2(rect.left() + 19.0, rect.center().y);
+                                ui.painter().circle_filled(badge, 12.0, mix_col(self.look.paper, color, 0.18));
+                                ui.painter().circle_stroke(badge, 12.0, Stroke::new(1.0, color.gamma_multiply(0.5)));
+                                ui.painter().text(badge, Align2::CENTER_CENTER, mark, self.look.mono(13.0), fg);
+                                ui.painter().text(pos2(rect.left() + 40.0, rect.center().y), Align2::LEFT_CENTER,
+                                    title, self.look.mono(12.0), if selected { fg } else { muted });
+                                ui.painter().circle_filled(pos2(rect.right() - 12.0, rect.center().y), 3.0, color);
+                        }
+                        let checking = self.coach.connection.is_some();
+                        let (rect, check) = ui.allocate_exact_size(
+                            vec2(ui.available_width(), 44.0),
+                            if checking { Sense::hover() } else { Sense::click() },
                         );
-                    }
-                }
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(self.coach.connection.is_none(), Button::new("Test"))
-                        .clicked()
-                    {
-                        let settings = self.coach.draft.clone();
-                        let key = if self.coach.key_entry.trim().is_empty() {
-                            self.coach.key.clone()
-                        } else {
-                            self.coach.key_entry.trim().to_owned()
-                        };
-                        let ctx = ctx.clone();
-                        let (tx, rx) = mpsc::channel();
-                        self.coach.connection = Some(rx);
-                        self.coach.connection_status = "Checking…".into();
-                        let _ = std::thread::Builder::new()
-                            .name("inkarchy-ai-check".into())
-                            .spawn(move || {
+                        check.widget_info(|| {
+                            WidgetInfo::labeled(WidgetType::Button, !checking, "Test AI connection")
+                        });
+                        let face_fill = mix_col(self.look.paper, self.look.accent, 0.10);
+                        let (face, ink) = self.paint_note_surface(
+                            ui, rect.shrink2(vec2(1.0, 2.0)), &check, face_fill, 11,
+                        );
+                        let seal = pos2(face.left() + 22.0, face.center().y);
+                        let painter = ui.painter();
+                        painter.circle_filled(seal, 12.0, mix_col(face_fill, self.look.accent, 0.24));
+                        painter.circle_stroke(seal, 12.0, Stroke::new(0.9, ink.gamma_multiply(0.36)));
+                        painter.line_segment(
+                            [seal + vec2(-4.0, 3.0), seal + vec2(4.0, -3.0)],
+                            Stroke::new(1.6, ink),
+                        );
+                        painter.circle_filled(seal + vec2(-4.0, 3.0), 2.1, ink);
+                        painter.circle_filled(seal + vec2(4.0, -3.0), 2.1, ink);
+                        painter.text(
+                            pos2(face.left() + 42.0, face.center().y),
+                            Align2::LEFT_CENTER,
+                            if checking { "Checking…" } else { "Test connection" },
+                            self.look.serif(15.0), ink,
+                        );
+                        if !checking && check.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                            let settings = self.lib.index.ai.clone();
+                            let key = self.coach.key.clone();
+                            let ctx = ctx.clone();
+                            let (tx, rx) = mpsc::channel();
+                            self.coach.connection = Some(rx);
+                            self.coach.connection_status = "Checking…".into();
+                            let _ = std::thread::Builder::new().name("inkarchy-ai-check".into()).spawn(move || {
                                 let _ = tx.send(ai::check_connection(&settings, &key));
                                 ctx.request_repaint();
                             });
-                    }
-                    if ui.button(RichText::new("Apply").strong()).clicked() {
-                        self.coach.draft.enabled_notebooks =
-                            self.lib.index.ai.enabled_notebooks.clone();
-                        self.lib.index.ai = self.coach.draft.clone();
-                        self.coach.session.invalidate(Instant::now());
-                        let saved = self.lib.save_index();
-                        self.report_save(saved);
-                        self.coach.connection_status = "Settings applied.".into();
-                    }
-                });
-                if !self.coach.connection_status.is_empty() {
-                    ui.label(
-                        RichText::new(&self.coach.connection_status)
-                            .small()
-                            .color(muted),
-                    );
-                }
+                        }
+                        if !checking && !self.coach.connection_status.is_empty()
+                            && self.coach.connection_status != "Checking…" {
+                            ui.label(RichText::new(&self.coach.connection_status).small().color(muted));
+                        }
+                    });
             });
-
-            if let Some(timings) = self.coach.session.timings {
-                ui.collapsing("Timing", |ui| {
-                    ui.label(RichText::new(format!(
-                        "Load {:.1}s · image {:.0}ms · model {:.1}s",
-                        timings.load.as_secs_f64(),
-                        timings.prepare.as_secs_f64() * 1000.0,
-                        timings.inference.as_secs_f64(),
-                    )).small().color(muted));
-                });
-            }
-        });
-        self.coach.open = open;
+        let clicked_outside = ctx.input(|input| input.pointer.primary_pressed()
+            && input.pointer.interact_pos().is_some_and(|pos| !panel.response.rect.contains(pos) && !anchor.contains(pos)));
+        if clicked_outside || ctx.input(|input| input.key_pressed(Key::Escape)) { self.coach.open = false; }
     }
 }
