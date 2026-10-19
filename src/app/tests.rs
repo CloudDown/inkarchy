@@ -20,7 +20,7 @@ fn coach_settings_remember_notebook_and_do_not_shift_the_canvas() {
     assert!(app.coach.open);
     frames.settle(app);
     frames.snapshot("exercise-coach-settings");
-    let toggle = frames.text_center("Enable AI");
+    let toggle = frames.text_center("Coach this book");
     frames.drag(app, toggle, toggle);
     assert!(app.coach_enabled());
     assert_eq!(canvas, app.canvas_rect);
@@ -33,13 +33,14 @@ fn coach_settings_remember_notebook_and_do_not_shift_the_canvas() {
     frames.key(app, Key::Escape);
     frames.settle(app);
     frames.snapshot("exercise-coach-header-compact");
+    frames.size = vec2(1280.0, 860.0);
+    frames.settle(app);
     let bar = frames
         .ctx
         .data(|d| d.get_temp::<Rect>(Id::new("coach-meter-rect")))
         .unwrap();
     frames.drag(app, bar.center(), bar.center());
-    assert!(app.coach.open, "the bar opens the explanation too");
-    frames.size = vec2(1280.0, 860.0);
+    assert!(app.coach.open, "the bar opens the coach panel too");
     frames.settle(app);
     app.close_desk();
     app.open_note(id);
@@ -79,7 +80,35 @@ fn coach_keeps_completed_step_during_ink_but_discards_it_on_undo() {
 }
 
 #[test]
-fn coach_panel_shows_connection_control_and_escape_closes_without_changing_document() {
+fn writing_coach_shows_verdict_on_meter_without_cluttering_toggle_panel() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Exercise");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    app.lib.index.ai.enabled_notebooks.insert(id);
+    app.coach.session.reset(Some(id));
+    app.coach.session.result = Some(crate::ai::Analysis {
+        exercise_found: true,
+        readable: true,
+        complete_step: true,
+        verdict: crate::ai::Verdict::OnTrack,
+        statement: "Solve 2x+3=11".into(),
+        recognized_step: "2x=8".into(),
+        explanation: "Valid subtraction.".into(),
+        region: None,
+    });
+    app.coach.session.evaluated = app.coach.session.revision;
+    app.open_coach();
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    assert!(app.coach.session.result.is_some(), "coach result must survive rendering");
+    frames.snapshot("writing-coach-verdict");
+    frames.text_center("On track");
+    frames.text_center("Coach this book");
+}
+
+#[test]
+fn coach_panel_only_shows_toggle_and_escape_closes_without_changing_document() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Coach fields");
     let app = &mut fixture.app;
@@ -88,7 +117,7 @@ fn coach_panel_shows_connection_control_and_escape_closes_without_changing_docum
     let mut frames = Frames::new(app);
     app.open_coach();
     frames.settle(app);
-    frames.text_center("Test connection");
+    frames.text_center("Coach this book");
     assert_eq!(app.tool, Tool::Brush);
     assert!(app.note.as_ref().unwrap().pages[0].strokes.is_empty());
     frames.key(app, Key::Escape);
@@ -426,11 +455,11 @@ fn many_pdf_pages_do_not_block_the_first_frames() {
 }
 
 #[test]
-fn pdf_page_chip_opens_a_finger_scrubber_and_jumps_on_release() {
+fn pdf_page_chip_steps_once_and_accelerates_when_held() {
     let mut fixture = Fixture::new();
     let mut note = Note::blank("Pages", 0);
     note.sheet_join = SheetJoin::Separate;
-    note.pages = (0..4).map(|i| {
+    note.pages = (0..30).map(|i| {
         let mut page = crate::document::Page::at(0, i);
         page.background = Some(PageBackground {
             file: "source.pdf".into(), pdf_page: Some(i as u32), source_size: None,
@@ -447,10 +476,65 @@ fn pdf_page_chip_opens_a_finger_scrubber_and_jumps_on_release() {
     let chip = chip.expect("PDF page chip is visible");
     frames.drag(app, chip.center(), chip.center());
     frames.settle(app);
+    frames.snapshot("pdf-page-picker");
     let next = frames.text_center("+");
     frames.drag(app, next, next);
     frames.settle(app);
     assert_eq!(app.pdf_page_target, 2);
+    assert_eq!(app.page_in_view(app.canvas_rect), 1);
+    frames.step(app, vec![Event::PointerMoved(next)]);
+    frames.step(app, vec![Event::PointerButton {
+        pos: next, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE,
+    }]);
+    assert_eq!(app.pdf_page_target, 3, "a page turns when the finger lands");
+    for _ in 0..150 { frames.step(app, vec![]); }
+    assert!(app.pdf_page_target >= 12, "holding accelerates the page turns");
+    let target = app.pdf_page_target;
+    frames.step(app, vec![Event::PointerButton {
+        pos: next, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE,
+    }]);
+    frames.settle(app);
+    assert_eq!(app.pdf_page_target, target, "release does not turn an extra page");
+    assert_eq!(app.page_in_view(app.canvas_rect), target - 1);
+    assert_eq!(app.page_cells()[1], (0, 1), "holding the stepper must not move pages");
+}
+
+#[test]
+fn pdf_search_field_opens_in_header_and_stays_open_while_editing() {
+    let mut fixture = Fixture::new();
+    let mut note = Note::blank("Search PDF", 0);
+    note.pages[0].background = Some(PageBackground {
+        file: "source.pdf".into(), pdf_page: Some(0), source_size: None,
+    });
+    let id = note.id;
+    fixture.app.lib.insert_new(&note).unwrap();
+    fixture.app.open_note(id);
+    let app = &mut fixture.app;
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let icon = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("pdf-search-button-rect"))).unwrap();
+    frames.drag(app, icon.center(), icon.center());
+    frames.settle(app);
+    let field = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("pdf-search-field-rect"))).unwrap();
+    assert!(field.right() <= icon.left() && field.bottom() <= 52.0, "field {field:?} icon {icon:?}");
+    frames.drag(app, field.center(), field.center());
+    let tool = app.tool;
+    frames.step(app, vec![Event::Text("formula".into())]);
+    assert_eq!(app.pdf_search_query, "formula");
+    frames.key(app, Key::L);
+    assert_eq!(app.tool, tool, "typing a search must not activate a drawing tool");
+    assert!(Popup::is_any_open(&frames.ctx));
+    frames.key(app, Key::Escape);
+    frames.settle(app);
+    assert!(!Popup::is_any_open(&frames.ctx));
+    frames.size = vec2(360.0, 640.0);
+    frames.settle(app);
+    let icon = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("pdf-search-button-rect"))).unwrap();
+    frames.drag(app, icon.center(), icon.center());
+    frames.settle(app);
+    let field = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("pdf-search-field-rect"))).unwrap();
+    assert!(field.width() >= 60.0 && field.left() >= 0.0 && field.right() <= icon.left(),
+        "compact header: field {field:?} icon {icon:?}");
 }
 
 #[test]
@@ -754,7 +838,6 @@ fn fitted_canvas_tracks_same_page_through_resizes() {
         assert!(app.update_canvas_rect(rect));
         assert_eq!(app.fitted_cell, Some((1, 0)));
         assert_eq!(app.page_in_view(rect), 1);
-        assert_eq!(app.zoom_percent(), 100);
         assert_eq!(app.note.as_ref().unwrap().page_size(), (PAGE_W, PAGE_H));
         assert_uniform_page_fit(app, app.origin_of(1), PAGE_W, PAGE_H);
     }
@@ -816,7 +899,7 @@ fn manual_scroll_leaves_fitted_mode() {
     frames.snapshot("page-fit-wide");
     frames.size = vec2(820.0, 620.0);
     frames.settle(app);
-    assert_eq!(app.zoom_percent(), 100);
+    assert_eq!(app.fitted_cell, Some((0, 0)));
     frames.snapshot("page-fit-small");
     let center = app.canvas_rect.center();
     frames.step(app, vec![Event::PointerMoved(center)]);
@@ -941,8 +1024,8 @@ fn responsive_note_controls_do_not_overlap_through_resizes() {
                         assert!(!face.intersects(*other), "header buttons overlap");
                     }
                 }
-                let [paper, cap, meter] =
-                    ["paper-button-rect", "coach-button-rect", "coach-meter-rect"].map(|key| {
+                let [menu, cap, meter] =
+                    ["notebook-menu-button-rect", "coach-button-rect", "coach-meter-rect"].map(|key| {
                         frames
                             .ctx
                             .data(|d| d.get_temp::<Rect>(Id::new(key)))
@@ -951,15 +1034,15 @@ fn responsive_note_controls_do_not_overlap_through_resizes() {
                 if edge == DockEdge::Bottom && size.x == 1024.0 && accessory == 1 {
                     frames.snapshot("exercise-coach-header-1024");
                 }
-                for rect in [paper, cap, meter] {
+                for rect in [menu, cap, meter] {
                     assert!(
                         screen.contains_rect(rect),
                         "header control outside {size:?}: {rect:?}"
                     );
                 }
                 assert!(
-                    cap.left() < paper.left(),
-                    "coach and page-style icons sit in the right cluster"
+                    cap.left() < menu.left(),
+                    "coach and notebook menu sit in the right cluster"
                 );
                 if size.x >= 760.0 {
                     assert!(
@@ -2013,6 +2096,48 @@ fn notebook_menu_keeps_actions_and_keyboard_dismissal() {
         reached_last,
         "keyboard navigation must reveal clipped menu actions"
     );
+}
+
+#[test]
+fn paper_style_remains_available_in_notebook_menu() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Paper menu");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let more = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("notebook-menu-button-rect")))
+        .unwrap();
+    frames.drag(app, more.center(), more.center());
+    frames.settle(app);
+    let paper = frames.text_center("Paper style");
+    frames.drag(app, paper, paper);
+    frames.settle(app);
+    let lined = frames.text_center("Lined");
+    frames.drag(app, lined, lined);
+    assert_eq!(app.note.as_ref().unwrap().paper, PaperKind::Lined);
+}
+
+#[test]
+fn notebook_menu_stays_clear_of_right_tool_case() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Menu beside tools");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    app.dock_edge = DockEdge::Right;
+    let mut frames = Frames::new(app);
+    for size in [vec2(1280.0, 860.0), vec2(360.0, 640.0), vec2(320.0, 280.0)] {
+        frames.size = size;
+        frames.settle(app);
+        let more = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("notebook-menu-button-rect"))).unwrap();
+        frames.drag(app, more.center(), more.center());
+        frames.settle(app);
+        let menu = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("notebook-menu-rect"))).unwrap();
+        let dock = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("dock-rect"))).unwrap();
+        assert!(menu.right() + 4.0 <= dock.left(), "{size:?}: menu {menu:?} covers dock {dock:?}");
+        assert!(menu.left() >= 0.0 && menu.bottom() <= size.y, "{size:?}: menu {menu:?} outside window");
+        frames.key(app, Key::Escape);
+    }
 }
 
 #[test]
@@ -3301,7 +3426,6 @@ fn linked_canvas_keeps_selected_page_when_resized() {
         frames.settle(app);
         assert_eq!(app.fitted_cell, Some((1, 0)));
         assert_eq!(app.page_in_view(app.canvas_rect), 1);
-        assert_eq!(app.zoom_percent(), 100);
         assert_uniform_page_fit(app, app.origin_of(1), app.pw(), app.ph());
         frames.snapshot(name);
     }

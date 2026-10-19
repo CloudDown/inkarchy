@@ -443,9 +443,11 @@ pub struct InkarchyApp {
     pdf_text_pending: HashSet<String>,
     pdf_text_hub: Option<crate::pdf::TextHub>,
     pdf_lines: HashMap<(Uuid, usize), Vec<f32>>,
-    /// Inputs kept by the PDF page and text navigation popovers.
-    pdf_page_entry: String,
+    /// Page selected by the touch-friendly PDF stepper.
     pdf_page_target: usize,
+    /// Direction, press start, next repeat time for a held page button.
+    pdf_page_repeat: Option<(i8, f64, f64)>,
+    pdf_page_picker_open: bool,
     pdf_search_query: String,
     /// Paper color of the next sticky peeled from the pad.
     sticky_color: Color32,
@@ -682,8 +684,9 @@ impl InkarchyApp {
             pdf_text_pending: HashSet::new(),
             pdf_text_hub: None,
             pdf_lines: HashMap::new(),
-            pdf_page_entry: String::new(),
             pdf_page_target: 0,
+            pdf_page_repeat: None,
+            pdf_page_picker_open: false,
             pdf_search_query: String::new(),
             sticky_color,
             sticky_drag: None,
@@ -850,15 +853,6 @@ impl InkarchyApp {
         Camera::fit_zoom(rect, pw, ph)
     }
 
-    /// 100 while the centered page is fitted at one zoom.
-    fn zoom_percent(&self) -> i32 {
-        if self.fitted_cell.is_some() {
-            return 100;
-        }
-        let fit = self.fit_zoom_now();
-        ((self.camera.zoom / fit.max(0.001)) * 100.0).round() as i32
-    }
-
     fn zoom_level(&self) -> f32 {
         self.camera.zoom / self.fit_zoom_now().max(0.001)
     }
@@ -966,7 +960,8 @@ impl InkarchyApp {
             self.dock_fold = 0.0;
             self.dock_fold_vel = 0.0;
             self.pdf_lines.clear();
-            self.pdf_page_entry.clear();
+            self.pdf_page_repeat = None;
+            self.pdf_page_picker_open = false;
             self.pdf_search_query.clear();
             self.sticky_drag = None;
             self.sticky_wheel = None;
@@ -1004,7 +999,8 @@ impl InkarchyApp {
         self.undo.clear();
         self.sel.clear();
         self.pdf_lines.clear();
-        self.pdf_page_entry.clear();
+        self.pdf_page_repeat = None;
+        self.pdf_page_picker_open = false;
         self.pdf_search_query.clear();
         self.sticky_drag = None;
         self.sticky_wheel = None;
@@ -1686,7 +1682,7 @@ impl InkarchyApp {
             if i.key_pressed(Key::CloseBracket) {
                 width_delta = 0.8;
             }
-            if !c && self.editing_text.is_none() {
+            if !c && !typing && self.editing_text.is_none() {
                 if i.key_pressed(Key::P) {
                     tool = Some(Tool::Fineliner);
                 }
@@ -3215,7 +3211,27 @@ impl InkarchyApp {
             });
     }
 
-    /// Flat dark capsule on the shelf chrome (desk-deep, 1px edge, mono type).
+    /// Shared search field on the shelf and in PDF notes.
+    fn paint_search_capsule(&self, ui: &Ui, rect: Rect, focused: bool) {
+        let radius = CornerRadius::same((rect.height() * 0.5) as u8);
+        if focused {
+            ui.painter().rect_stroke(
+                rect,
+                radius,
+                Stroke::new(1.0, self.look.accent.gamma_multiply(0.85)),
+                StrokeKind::Outside,
+            );
+        } else {
+            ui.painter().rect_filled(rect, radius, self.look.desk_deep);
+            ui.painter().rect_stroke(
+                rect,
+                radius,
+                Stroke::new(1.0, self.look.desk_edge.gamma_multiply(0.72)),
+                StrokeKind::Inside,
+            );
+        }
+    }
+
     fn ui_shelf_search(&mut self, ctx: &Context) {
         if !matches!(self.scene, Scene::Shelf { .. }) {
             return;
@@ -3241,13 +3257,8 @@ impl InkarchyApp {
                     (width - 600.0).clamp(1.0, 420.0)
                 };
                 let search_h = 36.0;
-                let radius = CornerRadius::same((search_h * 0.5) as u8);
                 let (outer, _) = ui.allocate_exact_size(vec2(search_w, search_h), Sense::hover());
-                let fill = self.look.desk_deep;
-                let border = self.look.desk_edge.gamma_multiply(0.72);
-                let p = ui.painter();
-                p.rect_filled(outer, radius, fill);
-                p.rect_stroke(outer, radius, Stroke::new(1.0, border), StrokeKind::Inside);
+                self.paint_search_capsule(ui, outer, false);
                 let inner = Rect::from_min_max(
                     pos2(outer.min.x + 16.0, outer.min.y + 6.0),
                     pos2(outer.max.x - 16.0, outer.max.y - 6.0),
@@ -3275,12 +3286,7 @@ impl InkarchyApp {
                     }
                 });
                 if focused {
-                    ui.painter().rect_stroke(
-                        outer,
-                        radius,
-                        Stroke::new(1.0, self.look.accent.gamma_multiply(0.85)),
-                        StrokeKind::Outside,
-                    );
+                    self.paint_search_capsule(ui, outer, true);
                 }
             });
     }
@@ -5236,36 +5242,6 @@ impl InkarchyApp {
         picked
     }
 
-    /// Paper samples. Pick one, instead of cycling the sheet.
-    fn paper_picker(&mut self, button: &Response) {
-        let current = self.note.as_ref().map(|n| n.paper).unwrap_or_default();
-        let mut picked = None;
-        let mut picked_tone = None;
-        Popup::menu(button)
-            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
-            .frame(
-                self.note_popup_frame()
-                    .fill(self.look.paper)
-                    .stroke(Stroke::new(1.0, self.look.ink.gamma_multiply(0.18))),
-            )
-            .show(|ui| {
-                ui.set_width(248.0);
-                ui.spacing_mut().item_spacing = vec2(0.0, 4.0);
-                for kind in PaperKind::ALL {
-                    if self.paper_kind_row(ui, kind, kind == current) {
-                        picked = Some(kind);
-                    }
-                }
-                picked_tone = self.paper_tone_picker_row(ui);
-            });
-        if let Some(kind) = picked {
-            self.set_paper(kind);
-        }
-        if let Some(tone) = picked_tone {
-            self.set_paper_tone(tone);
-        }
-    }
-
     fn page_layout_picker(&mut self, button: &Response) {
         let current = self.page_arrangement();
         let mut picked = None;
@@ -5364,6 +5340,7 @@ impl InkarchyApp {
             .order(Order::Foreground)
             .show(ctx, |ui| {
                 let (hit, response) = ui.allocate_exact_size(vec2(visible_width.max(44.0), 44.0), Sense::click());
+                ctx.data_mut(|d| d.insert_temp(Id::new("pdf-page-number-rect"), hit));
                 response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true,
                     format!("Go to page {current} of {page_count}")));
                 let rect = Rect::from_center_size(hit.center(), vec2(visible_width, 26.0));
@@ -5379,70 +5356,110 @@ impl InkarchyApp {
             });
         if number.inner.clicked() {
             self.pdf_page_target = current;
-            self.pdf_page_entry = current.to_string();
+            self.pdf_page_repeat = None;
         }
-        let mut destination = None;
-        Popup::menu(&number.inner)
+        let opened = Popup::menu(&number.inner)
             .align(egui::RectAlign::TOP_START)
             .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
             .frame(self.note_popup_frame().fill(self.look.paper))
             .show(|ui| {
-                ui.set_width(260.0_f32.min(ctx.screen_rect().width() - 36.0).max(150.0));
-                ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
-                self.menu_head(ui, "Go to page");
+                ui.set_width(196.0_f32.min(ctx.screen_rect().width() - 36.0).max(140.0));
                 ui.horizontal(|ui| {
-                    let back = ui.add_sized([44.0, 44.0], Button::new("−"));
-                    if back.clicked() {
-                        self.pdf_page_target = self.pdf_page_target.saturating_sub(1).max(1);
-                    }
+                    let back = self.note_action(ui, "−", 44.0, false);
                     ui.vertical_centered(|ui| {
                         ui.label(RichText::new(self.pdf_page_target.to_string())
                             .font(self.look.serif(24.0)).color(self.look.ink));
                         ui.label(RichText::new(format!("of {page_count}"))
                             .font(self.look.mono(11.0)).color(self.look.ink.gamma_multiply(0.6)));
                     });
-                    let next = ui.add_sized([44.0, 44.0], Button::new("+"));
-                    if next.clicked() {
-                        self.pdf_page_target = (self.pdf_page_target + 1).min(page_count);
-                    }
-                });
-                if page_count > 1 {
-                    let (track, scrub) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), Sense::click_and_drag());
-                    let line = Rect::from_center_size(track.center(), vec2(track.width() - 24.0, 3.0));
-                    ui.painter().rect_filled(line, 2.0, self.look.ink.gamma_multiply(0.28));
-                    if (scrub.dragged() || scrub.clicked()) && scrub.interact_pointer_pos().is_some() {
-                        let x = scrub.interact_pointer_pos().unwrap().x.clamp(line.left(), line.right());
-                        self.pdf_page_target = 1 + ((x - line.left()) / line.width() * (page_count - 1) as f32).round() as usize;
-                    }
-                    let x = line.left() + line.width() * (self.pdf_page_target - 1) as f32 / (page_count - 1) as f32;
-                    ui.painter().circle_filled(pos2(x, line.center().y), 9.0, self.look.paper);
-                    ui.painter().circle_stroke(pos2(x, line.center().y), 9.0, Stroke::new(2.0, self.look.ink));
-                    if scrub.drag_stopped() || scrub.clicked() {
-                        destination = Some(self.pdf_page_target - 1);
-                    }
-                }
-                ui.horizontal(|ui| {
-                    let edit = ui.add(TextEdit::singleline(&mut self.pdf_page_entry)
-                        .font(self.look.mono(15.0)).desired_width(64.0).hint_text("Page"));
-                    if ui.add_sized([54.0, 44.0], Button::new("Go")).clicked()
-                        || (edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))) {
-                        destination = self.pdf_page_entry.trim().parse::<usize>().ok()
-                            .filter(|page| *page > 0).map(|page| page.min(page_count) - 1);
+                    let next = self.note_action(ui, "+", 44.0, false);
+                    let held = if let Some((direction, _, _)) = self.pdf_page_repeat {
+                        ui.input(|input| input.pointer.primary_down()).then_some(direction)
+                    } else if back.is_pointer_button_down_on() { Some(-1) }
+                        else if next.is_pointer_button_down_on() { Some(1) } else { None };
+                    let now = ui.input(|input| input.time);
+                    let was_held = self.pdf_page_repeat.is_some();
+                    let step = if let Some(direction) = held {
+                        ctx.request_repaint_after(Duration::from_millis(20));
+                        match &mut self.pdf_page_repeat {
+                            Some((held_direction, started, next_repeat)) if *held_direction == direction => {
+                                if now >= *next_repeat {
+                                    *next_repeat = now + if now - *started >= 2.0 { 0.055 }
+                                        else if now - *started >= 1.0 { 0.11 } else { 0.20 };
+                                    Some(direction)
+                                } else { None }
+                            }
+                            _ => {
+                                self.pdf_page_repeat = Some((direction, now, now + 0.45));
+                                Some(direction)
+                            }
+                        }
+                    } else {
+                        self.pdf_page_repeat = None;
+                        if was_held { None }
+                        else if back.clicked() { Some(-1) }
+                        else if next.clicked() { Some(1) }
+                        else { None }
+                    };
+                    if let Some(direction) = step {
+                        self.pdf_page_target = if direction < 0 {
+                            self.pdf_page_target.saturating_sub(1).max(1)
+                        } else { (self.pdf_page_target + 1).min(page_count) };
+                        self.jump_to_page(self.pdf_page_target - 1);
                     }
                 });
             });
-        if let Some(page) = destination {
-            self.jump_to_page(page);
-            Popup::close_all(ctx);
+        self.pdf_page_picker_open = opened.is_some();
+        if !self.pdf_page_picker_open {
+            self.pdf_page_repeat = None;
         }
     }
 
-    fn pdf_search_picker(&mut self, button: &Response) {
-        let popup = Popup::menu(button)
-            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+    fn pdf_search_picker(&mut self, ui: &mut Ui, button: &Response) -> Option<Rect> {
+        let mut popup = Popup::menu(button)
+            .close_behavior(PopupCloseBehavior::IgnoreClicks)
             .frame(self.note_popup_frame());
-        if !popup.is_open() && !button.clicked() {
-            return;
+        let open = popup.is_open() != button.clicked();
+        if !open {
+            return None;
+        }
+        let width = ui.available_width().min(260.0).max(1.0);
+        let (outer, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
+        ui.ctx().data_mut(|d| d.insert_temp(Id::new("pdf-search-field-rect"), outer));
+        // Anchor the results to the whole search control, not just its icon.
+        popup = popup.anchor(Rect::from_min_max(outer.min, button.rect.max));
+        let right_dock = (self.dock_layout_edge() == DockEdge::Right)
+            .then(|| button.ctx.data(|d| d.get_temp::<Rect>(Id::new("dock-rect"))))
+            .flatten();
+        if let Some(dock) = right_dock {
+            popup = popup
+                .at_position(pos2(dock.left() - 10.0, button.rect.bottom()))
+                .align(egui::RectAlign::BOTTOM_END)
+                .align_alternatives(&[]);
+        }
+        self.paint_search_capsule(ui, outer, false);
+        let inner = outer.shrink2(vec2(16.0_f32.min(width * 0.1), 6.0));
+        let edit = ui.scope_builder(UiBuilder::new().max_rect(inner), |ui| {
+            ui.set_min_size(inner.size());
+            let hint = self.look.fg.gamma_multiply(0.42);
+            ui.visuals_mut().override_text_color = Some(self.look.fg);
+            ui.visuals_mut().widgets.noninteractive.fg_stroke = Stroke::new(1.0, hint);
+            ui.add_sized(
+                inner.size(),
+                TextEdit::singleline(&mut self.pdf_search_query)
+                    .hint_text("Search a word or phrase…")
+                    .font(self.look.mono(14.0))
+                    .text_color(self.look.fg)
+                    .frame(false)
+                    .margin(Margin::ZERO)
+                    .vertical_align(Align::Center),
+            )
+        }).inner;
+        if edit.has_focus() {
+            self.paint_search_capsule(ui, outer, true);
+        }
+        if button.clicked() {
+            edit.request_focus();
         }
         self.request_open_pdf_text();
         let query = self.pdf_search_query.trim().to_lowercase();
@@ -5475,36 +5492,14 @@ impl InkarchyApp {
             })
         });
         let mut destination = None;
-        popup.show(|ui| {
-            ui.set_width(300.0_f32.min(button.ctx.screen_rect().width() - 32.0));
+        let shown = popup.show(|ui| {
+            let results_width = right_dock.map_or(button.ctx.screen_rect().right(), |dock| dock.left() - 10.0)
+                - button.ctx.screen_rect().left() - 32.0;
+            ui.set_width(300.0_f32.min(results_width).max(120.0));
             ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
-            self.menu_head(ui, "Find in PDF");
-            let edit = Frame::NONE
-                .fill(self.look.paper)
-                .corner_radius(10)
-                .inner_margin(Margin::symmetric(12, 8))
-                .show(ui, |ui| {
-                    ui.visuals_mut().weak_text_color = Some(self.look.ink.gamma_multiply(0.58));
-                    ui.add(
-                        TextEdit::singleline(&mut self.pdf_search_query)
-                            .font(self.look.mono(14.0))
-                            .text_color(self.look.ink)
-                            .desired_width(ui.available_width())
-                            .frame(false)
-                            .hint_text("Search a word or phrase…"),
-                    )
-                })
-                .inner;
-            if button.clicked() {
-                edit.request_focus();
-            }
-            ui.add_space(4.0);
             if query.is_empty() {
-                ui.label(
-                    RichText::new("Type to search every page")
-                        .small()
-                        .color(self.look.fg.gamma_multiply(0.7)),
-                );
+                // Keep the popup's open/close state in sync with the header
+                // field, without showing a redundant prompt or section title.
             } else if results.is_empty() {
                 ui.label(
                     RichText::new(if pending {
@@ -5554,10 +5549,23 @@ impl InkarchyApp {
                     });
             }
         });
+        if let Some(shown) = shown {
+            let outside = button.ctx.input(|i| {
+                i.pointer.any_click() && i.pointer.interact_pos().is_some_and(|pos| {
+                    !outer.contains(pos)
+                        && !button.rect.contains(pos)
+                        && !shown.response.rect.contains(pos)
+                })
+            });
+            if outside {
+                Popup::close_all(&button.ctx);
+            }
+        }
         if let Some(page) = destination {
             self.jump_to_page(page);
             Popup::close_all(&button.ctx);
         }
+        Some(outer)
     }
 
     fn paper_kind_row(&self, ui: &mut Ui, kind: PaperKind, on: bool) -> bool {
@@ -5756,6 +5764,23 @@ impl InkarchyApp {
             rect.x_range().shrink(10.0),
             rect.bottom() - 1.0,
             Stroke::new(1.0_f32, self.look.fg.gamma_multiply(0.28)),
+        );
+    }
+
+    /// Ink-on-paper section label for the notebook's settings sheet.
+    fn notebook_menu_head(&self, ui: &mut Ui, title: &str) {
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::hover());
+        ui.painter().text(
+            pos2(rect.left() + 12.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            title.to_uppercase(),
+            self.look.mono(11.0),
+            self.look.ink.gamma_multiply(0.72),
+        );
+        ui.painter().hline(
+            rect.x_range().shrink(10.0),
+            rect.bottom() - 1.0,
+            Stroke::new(1.0, self.look.ink.gamma_multiply(0.18)),
         );
     }
 
@@ -6007,6 +6032,7 @@ impl InkarchyApp {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.add_space(8.0);
                         let more = self.round_well(ui, chrome, self.look.paper, paint_more);
+                        ctx.data_mut(|d| d.insert_temp(Id::new("notebook-menu-button-rect"), more.rect));
                         more.widget_info(|| {
                             WidgetInfo::labeled(
                                 WidgetType::Button,
@@ -6055,21 +6081,40 @@ impl InkarchyApp {
                         let mut act = None;
                         let mut picked_paper = None;
                         let mut picked_tone = None;
-                        Popup::menu(&more)
+                        // The right-hand tool case occupies the same vertical strip as
+                        // the default menu. Keep this sheet entirely beside it.
+                        let right_dock = (self.dock_layout_edge() == DockEdge::Right)
+                            .then(|| ctx.data(|d| d.get_temp::<Rect>(Id::new("dock-rect"))))
+                            .flatten();
+                        let menu_right = right_dock
+                            .map(|dock| dock.left() - 10.0)
+                            .unwrap_or(more.rect.right());
+                        let menu_width = (menu_right - ctx.screen_rect().left() - 32.0)
+                            .min(312.0)
+                            .max(120.0);
+                        let mut popup = Popup::menu(&more)
                             .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
-                            .frame(self.note_popup_frame())
+                            .frame(self.note_popup_frame().fill(self.look.paper));
+                        if right_dock.is_some() {
+                            popup = popup
+                                .at_position(pos2(menu_right, more.rect.bottom()))
+                                .align(egui::RectAlign::BOTTOM_END)
+                                .align_alternatives(&[]);
+                        }
+                        let menu = popup
                             .show(|ui| {
-                                ui.set_width(
-                                    312.0_f32.min(ctx.screen_rect().width() - 32.0).max(240.0),
-                                );
+                                ui.set_width(menu_width);
                                 ui.set_max_height((ctx.screen_rect().height() - 84.0).max(88.0));
-                                ui.spacing_mut().item_spacing = vec2(2.0, 2.0);
+                                ui.spacing_mut().item_spacing = vec2(2.0, 3.0);
                                 ScrollArea::vertical()
                                     .max_height((ctx.screen_rect().height() - 84.0).max(88.0))
                                     .auto_shrink([false, true])
                                     .show(ui, |ui| {
+                                        ui.label(RichText::new("Notebook settings")
+                                            .font(self.look.serif(20.0))
+                                            .color(self.look.ink));
                                         if title_in_menu {
-                                            self.menu_head(ui, "Notebook title");
+                                            self.notebook_menu_head(ui, "Notebook title");
                                             if ui
                                                 .add(
                                                     TextEdit::singleline(&mut self.title_buf)
@@ -6083,7 +6128,7 @@ impl InkarchyApp {
                                                 }
                                             }
                                         }
-                                        self.menu_head(ui, "File");
+                                        self.notebook_menu_head(ui, "File");
                                         if self.menu_row(ui, "Open…", "Ctrl+O", false, false) {
                                             act = Some(MoreAct::Open);
                                         }
@@ -6091,7 +6136,7 @@ impl InkarchyApp {
                                         {
                                             act = Some(MoreAct::Download);
                                         }
-                                        self.menu_head(ui, "Pages");
+                                        self.notebook_menu_head(ui, "Pages");
                                         if self.menu_row(
                                             ui,
                                             "Linked pages",
@@ -6110,37 +6155,29 @@ impl InkarchyApp {
                                         ) {
                                             act = Some(MoreAct::Separate);
                                         }
-                                        if compact {
-                                            self.menu_head(ui, "View");
-                                            if self.menu_row(ui, "Fit page", "0", false, false) {
-                                                act = Some(MoreAct::Fit);
-                                            }
-                                            self.menu_head(ui, "Paper");
-                                            let current = self.note.as_ref().map(|n| n.paper);
-                                            for kind in PaperKind::ALL {
-                                                if self.menu_row(
-                                                    ui,
-                                                    kind.label(),
-                                                    "",
-                                                    current == Some(kind),
-                                                    false,
-                                                ) {
-                                                    picked_paper = Some(kind);
+                                        self.notebook_menu_head(ui, "View");
+                                        if self.menu_row(ui, "Fit page", "0", false, false) {
+                                            act = Some(MoreAct::Fit);
+                                        }
+                                        ui.collapsing(
+                                            RichText::new("Paper style")
+                                                .font(self.look.mono(13.0))
+                                                .color(self.look.ink),
+                                            |ui| {
+                                                let current = self.note.as_ref().map(|n| n.paper);
+                                                for kind in PaperKind::ALL {
+                                                    if self.paper_kind_row(
+                                                        ui,
+                                                        kind,
+                                                        current == Some(kind),
+                                                    ) {
+                                                        picked_paper = Some(kind);
+                                                    }
                                                 }
-                                            }
-                                            picked_tone = self.paper_tone_picker_row(ui);
-                                        }
-                                        self.menu_head(ui, "Tools");
-                                        if self.menu_row(
-                                            ui,
-                                            "Exercise coach",
-                                            "",
-                                            self.coach_enabled(),
-                                            false,
-                                        ) {
-                                            self.open_coach();
-                                            Popup::close_all(ctx);
-                                        }
+                                                picked_tone = self.paper_tone_picker_row(ui);
+                                            },
+                                        );
+                                        self.notebook_menu_head(ui, "Tools");
                                         if self.menu_row(
                                             ui,
                                             "Draw with finger",
@@ -6168,12 +6205,15 @@ impl InkarchyApp {
                                         ) {
                                             act = Some(MoreAct::EraseArea);
                                         }
-                                        self.menu_head(ui, "Notebook");
+                                        self.notebook_menu_head(ui, "Notebook");
                                         if self.menu_row(ui, "Move to trash", "", false, true) {
                                             act = Some(MoreAct::Trash);
                                         }
                                     });
                             });
+                        if let Some(menu) = menu {
+                            ctx.data_mut(|d| d.insert_temp(Id::new("notebook-menu-rect"), menu.response.rect));
+                        }
                         match act {
                             Some(MoreAct::Open) => {
                                 Popup::close_all(ctx);
@@ -6206,53 +6246,12 @@ impl InkarchyApp {
                         if let Some(tone) = picked_tone {
                             self.set_paper_tone(tone);
                         }
-                        if !compact {
-                            if self
-                                .round_well(ui, chrome, self.look.paper, paint_fit)
-                                .clicked()
-                            {
-                                self.fit_to_screen();
-                            }
-                            let pct = format!("{}%", self.zoom_percent());
-                            let near_fit = (self.zoom_percent() - 100).abs() <= 2;
-                            let (r, lab) =
-                                ui.allocate_exact_size(vec2(56.0, chrome), Sense::click());
-                            let (face, fg) = self.paint_note_surface(
-                                ui,
-                                r.shrink(2.0),
-                                &lab,
-                                self.look.paper,
-                                10,
-                            );
-                            ui.painter().text(
-                                face.center(),
-                                Align2::CENTER_CENTER,
-                                pct,
-                                self.look.mono(13.0),
-                                if near_fit { fg } else { fg.gamma_multiply(0.7) },
-                            );
-                            if lab.on_hover_cursor(CursorIcon::PointingHand).clicked() {
-                                self.fit_to_screen();
-                            }
-                        }
-                        let paper = self.round_well(ui, chrome, self.look.paper, paint_paper_icon);
-                        ctx.data_mut(|d| d.insert_temp(Id::new("paper-button-rect"), paper.rect));
-                        paper.widget_info(|| {
-                            WidgetInfo::labeled(
-                                WidgetType::Button,
-                                ui.is_enabled(),
-                                self.note
-                                    .as_ref()
-                                    .map(|n| n.paper.label())
-                                    .unwrap_or("Paper"),
-                            )
-                        });
-                        self.paper_picker(&paper);
                         let coach = self.ui_coach_button(ui);
-                        let mut leftmost = coach.rect.left().min(paper.rect.left());
+                        let mut leftmost = coach.rect.left();
                         if self.note_has_pdf() {
                             let search =
                                 self.round_well(ui, chrome, self.look.paper, paint_search_icon);
+                            ctx.data_mut(|d| d.insert_temp(Id::new("pdf-search-button-rect"), search.rect));
                             search.widget_info(|| {
                                 WidgetInfo::labeled(
                                     WidgetType::Button,
@@ -6260,8 +6259,8 @@ impl InkarchyApp {
                                     "Find in PDF",
                                 )
                             });
-                            self.pdf_search_picker(&search);
-                            leftmost = leftmost.min(search.rect.left());
+                            let field = self.pdf_search_picker(ui, &search);
+                            leftmost = leftmost.min(field.unwrap_or(search.rect).left());
                         }
                         ctx.data_mut(|d| d.insert_temp(Id::new("header-right-start"), leftmost));
                     });
@@ -6280,7 +6279,7 @@ impl InkarchyApp {
                 let meter_rect =
                     Rect::from_center_size(pos2(center_x, bar.center().y), vec2(meter_width, 44.0));
                 ctx.data_mut(|d| d.insert_temp(Id::new("coach-meter-rect"), meter_rect));
-                if meter_width >= 32.0 {
+                if self.coach_enabled() && meter_width >= 32.0 {
                     self.ui_coach_meter(ui, meter_rect);
                 }
             });
@@ -7912,18 +7911,20 @@ impl InkarchyApp {
             return;
         }
 
-        if self.sheet_tabs_on {
-            self.arm_page_marks(ui);
-        }
-        let touch_owned = self.handle_canvas_touch(ui, rect);
-        self.handle_camera(ui, &resp, rect);
-        let pen = self.tablet.snapshot();
-        if self.sheet_tabs_on {
-            if !touch_owned || pen.down || pen.pressed || pen.released {
-                self.pages_or_pan(ui, &resp, rect);
+        if !self.pdf_page_picker_open {
+            if self.sheet_tabs_on {
+                self.arm_page_marks(ui);
             }
-        } else if !touch_owned || pen.down || pen.pressed || pen.released {
-            self.handle_tool(ui, &resp, rect);
+            let touch_owned = self.handle_canvas_touch(ui, rect);
+            self.handle_camera(ui, &resp, rect);
+            let pen = self.tablet.snapshot();
+            if self.sheet_tabs_on {
+                if !touch_owned || pen.down || pen.pressed || pen.released {
+                    self.pages_or_pan(ui, &resp, rect);
+                }
+            } else if !touch_owned || pen.down || pen.pressed || pen.released {
+                self.handle_tool(ui, &resp, rect);
+            }
         }
         self.paint_world(&painter, rect);
         self.paint_sheet_tabs(ui, &painter, rect);
@@ -12081,22 +12082,6 @@ fn paint_smile_icon(p: &Painter, c: Pos2, fg: Color32) {
     p.add(Shape::line(smile, st));
 }
 
-fn paint_fit(p: &egui::Painter, c: Pos2, fg: Color32) {
-    let st = Stroke::new(1.8_f32, fg);
-    let s = 7.6;
-    let m = 2.6;
-    for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
-        p.add(Shape::line(
-            vec![
-                c + vec2(x * s, y * m),
-                c + vec2(x * s, y * s),
-                c + vec2(x * m, y * s),
-            ],
-            st,
-        ));
-    }
-}
-
 fn paint_curved_arrow(p: &egui::Painter, c: Pos2, fg: Color32, flip: f32) {
     let mut pts = Vec::with_capacity(15);
     let start = -2.55_f32;
@@ -12197,52 +12182,19 @@ fn paint_hand_icon(p: &Painter, c: Pos2, fg: Color32) {
     ));
 }
 
-/// Lined sheet — paper background chooser.
-fn paint_paper_icon(p: &egui::Painter, c: Pos2, fg: Color32) {
-    let page = Rect::from_center_size(c + vec2(0.0, 0.2), vec2(13.2, 16.8));
-    let wire = Stroke::new(1.65_f32, fg);
-    let rule = Stroke::new(1.35_f32, fg);
-    p.rect_stroke(page, 1.5, wire, StrokeKind::Inside);
-    // Left margin, like a ruled notebook page.
-    let mx = page.left() + 3.6;
-    p.line_segment(
-        [pos2(mx, page.top() + 2.4), pos2(mx, page.bottom() - 2.2)],
-        Stroke::new(1.5_f32, fg),
-    );
-    let x0 = mx + 2.0;
-    let x1 = page.right() - 2.4;
-    for dy in [-4.2_f32, -1.0, 2.2, 5.4] {
-        let y = c.y + dy;
-        if y > page.top() + 2.0 && y < page.bottom() - 2.0 {
-            p.line_segment([pos2(x0, y), pos2(x1, y)], rule);
-        }
-    }
-}
-
-/// Mortarboard, drawn with the same fine strokes as the other header actions.
-fn paint_graduation_cap(p: &Painter, c: Pos2, fg: Color32) {
+/// A pen nib and a small reading spark: the coach watches ink, not grades.
+fn paint_coach_icon(p: &Painter, c: Pos2, fg: Color32) {
     let wire = Stroke::new(1.65, fg);
-    p.add(Shape::closed_line(
-        vec![
-            c + vec2(-11.0, -3.0),
-            c + vec2(0.0, -8.0),
-            c + vec2(11.0, -3.0),
-            c + vec2(0.0, 2.0),
-        ],
-        wire,
-    ));
-    p.add(Shape::line(
-        vec![
-            c + vec2(-6.5, -0.8),
-            c + vec2(-6.5, 4.5),
-            c + vec2(0.0, 7.0),
-            c + vec2(6.5, 4.5),
-            c + vec2(6.5, -0.8),
-        ],
-        wire,
-    ));
-    p.line_segment([c + vec2(11.0, -3.0), c + vec2(11.0, 5.5)], wire);
-    p.circle_filled(c + vec2(11.0, 6.5), 1.5, fg);
+    p.add(Shape::closed_line(vec![
+        c + vec2(-7.0, -6.0), c + vec2(2.0, -6.0),
+        c + vec2(6.0, -2.0), c + vec2(-2.0, 8.0),
+        c + vec2(-8.0, 0.0),
+    ], wire));
+    p.line_segment([c + vec2(-6.0, -4.0), c + vec2(-2.0, 3.0)], wire);
+    p.circle_filled(c + vec2(-2.0, 3.0), 1.5, fg);
+    let spark = c + vec2(8.0, -7.0);
+    p.line_segment([spark + vec2(-3.0, 0.0), spark + vec2(3.0, 0.0)], wire);
+    p.line_segment([spark + vec2(0.0, -3.0), spark + vec2(0.0, 3.0)], wire);
 }
 
 fn paint_tool_icon(p: &Painter, c: Pos2, fg: Color32, tool: Tool) {

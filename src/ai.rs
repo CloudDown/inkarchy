@@ -14,6 +14,7 @@ use crate::look::Look;
 mod credentials;
 mod provider;
 pub use credentials::{CredentialAction, CredentialJob};
+#[cfg(test)]
 pub use provider::check_connection;
 #[cfg(test)]
 mod tests;
