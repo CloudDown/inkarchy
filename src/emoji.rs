@@ -3,6 +3,7 @@
 //!
 //! Picker order follows the iPhone emoji keyboard categories.
 
+use image::imageops::FilterType;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
@@ -10,6 +11,10 @@ use std::process::Command;
 /// Decode size for shelf spines (picker cells scale the same bitmap down).
 /// 96 keeps folder marks sharp; the picker stays light via a per-frame decode budget.
 const TEX_SIDE: u32 = 96;
+
+/// Picker-only decode size: cheaper per-glyph decode so the grid fills fast.
+/// Folder spines keep the full `TEX_SIDE` bitmap.
+const PICKER_SIDE: u32 = 40;
 
 pub struct Glyph {
     pub width: usize,
@@ -60,6 +65,8 @@ impl EmojiGroup {
 pub struct Atlas {
     font: Option<FontBytes>,
     glyphs: HashMap<char, Glyph>,
+    /// Small (picker) decodes, kept apart so spines stay full quality.
+    small_glyphs: HashMap<char, Glyph>,
     /// Membership for `key()` — O(1).
     catalog_set: HashSet<char>,
     /// Glyphs split like the iPhone emoji tabs.
@@ -71,6 +78,7 @@ impl Atlas {
         let mut atlas = Self {
             font: None,
             glyphs: HashMap::new(),
+            small_glyphs: HashMap::new(),
             catalog_set: HashSet::new(),
             sections: Vec::new(),
         };
@@ -116,27 +124,38 @@ impl Atlas {
             .unwrap_or(&[])
     }
 
-    /// Decode at most one new glyph when `budget` allows. Returns whether a
-    /// decode was deferred (caller should request a repaint).
-    pub fn ensure_budgeted(&mut self, ch: char, budget: &mut u32) -> (Option<&Glyph>, bool) {
-        if self.glyphs.contains_key(&ch) {
-            return (self.glyphs.get(&ch), false);
+    /// Decode at most one new glyph when `budget` allows. `small` decodes the
+    /// picker-sized bitmap (40 px); folder spines use the full decode.
+    /// Returns whether a decode was deferred (caller should request a repaint).
+    pub fn ensure_budgeted(
+        &mut self,
+        ch: char,
+        small: bool,
+        budget: &mut u32,
+    ) -> (Option<&Glyph>, bool) {
+        let cache = if small {
+            &mut self.small_glyphs
+        } else {
+            &mut self.glyphs
+        };
+        if cache.contains_key(&ch) {
+            return (cache.get(&ch), false);
         }
         if *budget == 0 {
             return (None, true);
         }
         *budget -= 1;
-        let Some(g) = self.font.as_ref().and_then(|font| font.decode(ch)) else {
+        let Some(g) = self.font.as_ref().and_then(|font| font.decode(ch, small)) else {
             return (None, false);
         };
-        self.glyphs.insert(ch, g);
-        (self.glyphs.get(&ch), false)
+        cache.insert(ch, g);
+        (cache.get(&ch), false)
     }
 
     #[cfg(test)]
     pub fn ensure(&mut self, ch: char) -> Option<&Glyph> {
         let mut budget = u32::MAX;
-        self.ensure_budgeted(ch, &mut budget).0
+        self.ensure_budgeted(ch, false, &mut budget).0
     }
 
     pub fn key(&self, emoji: &str) -> Option<char> {
@@ -429,7 +448,8 @@ impl FontBytes {
         out
     }
 
-    fn decode(&self, ch: char) -> Option<Glyph> {
+    fn decode(&self, ch: char, small: bool) -> Option<Glyph> {
+        let side = if small { PICKER_SIDE } else { TEX_SIDE };
         let gid = glyph_id(&self.groups, ch as u32)?;
         let (off, len) = locate(self.cblc(), gid)?;
         let blob = self.cbdt().get(off..off + len)?;
@@ -437,11 +457,16 @@ impl FontBytes {
         let png = blob.get(9..9 + dlen)?;
         let img = image::load_from_memory(png).ok()?.into_rgba8();
         let (w, h) = img.dimensions();
-        let img = if w > TEX_SIDE || h > TEX_SIDE {
-            let s = (TEX_SIDE as f32 / w.max(h) as f32).min(1.0);
+        let filter = if small {
+            FilterType::Nearest
+        } else {
+            FilterType::Triangle
+        };
+        let img = if w > side || h > side {
+            let s = (side as f32 / w.max(h) as f32).min(1.0);
             let nw = ((w as f32 * s).round() as u32).max(1);
             let nh = ((h as f32 * s).round() as u32).max(1);
-            image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
+            image::imageops::resize(&img, nw, nh, filter)
         } else {
             img
         };
@@ -641,11 +666,11 @@ mod tests {
         }
         let ch = *atlas.catalog().last().expect("glyph");
         let mut budget = 0;
-        let (g, deferred) = atlas.ensure_budgeted(ch, &mut budget);
+        let (g, deferred) = atlas.ensure_budgeted(ch, false, &mut budget);
         assert!(g.is_none());
         assert!(deferred);
         budget = 1;
-        let (g, deferred) = atlas.ensure_budgeted(ch, &mut budget);
+        let (g, deferred) = atlas.ensure_budgeted(ch, false, &mut budget);
         assert!(g.is_some());
         assert!(!deferred);
         assert_eq!(budget, 0);

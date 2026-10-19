@@ -237,6 +237,8 @@ impl TextBox {
         }
     }
 
+    /// Legacy constructor: notes from the retired sticky pad still deserialize.
+    #[cfg(test)]
     pub fn sticky(pos: Pos2, color: Color32) -> Self {
         Self {
             size: [168.0, 168.0],

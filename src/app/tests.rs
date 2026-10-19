@@ -16,6 +16,10 @@ fn coach_settings_remember_notebook_and_do_not_shift_the_canvas() {
         .ctx
         .data(|d| d.get_temp::<Rect>(Id::new("coach-button-rect")))
         .unwrap();
+    assert!(!frames.output.as_ref().unwrap().shapes.iter().any(|shape| {
+        matches!(&shape.shape, Shape::Rect(r)
+            if r.rect.width() >= 35.0 && cap.contains_rect(r.rect) && r.fill.a() > 0)
+    }), "graduation cap has no round button backing");
     frames.drag(app, cap.center(), cap.center());
     assert!(app.coach.open);
     frames.settle(app);
@@ -503,14 +507,32 @@ fn pdf_page_chip_steps_once_and_accelerates_when_held() {
 fn pdf_search_field_opens_in_header_and_stays_open_while_editing() {
     let mut fixture = Fixture::new();
     let mut note = Note::blank("Search PDF", 0);
+    note.pages.push(crate::document::Page::at(0, 1));
     note.pages[0].background = Some(PageBackground {
         file: "source.pdf".into(), pdf_page: Some(0), source_size: None,
+    });
+    note.pages[1].background = Some(PageBackground {
+        file: "source.pdf".into(), pdf_page: Some(1), source_size: None,
     });
     let id = note.id;
     fixture.app.lib.insert_new(&note).unwrap();
     fixture.app.open_note(id);
     let app = &mut fixture.app;
+    app.pdf_text.insert(format!("{id}:source.pdf:0"), "formula formula".into());
+    app.pdf_text.insert(format!("{id}:source.pdf:1"), "a formula".into());
     let mut frames = Frames::new(app);
+    frames.settle(app);
+    frames.step_with_modifiers(app, vec![Event::Key {
+        key: Key::F,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers::COMMAND,
+    }], Modifiers::COMMAND);
+    let field = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("pdf-search-field-rect"))).unwrap();
+    assert!(field.width() > 100.0, "Ctrl+F opens the search bubble: {field:?}");
+    assert!(frames.ctx.memory(|memory| memory.focused()).is_some(), "Ctrl+F focuses search input");
+    frames.key(app, Key::Escape);
     frames.settle(app);
     let icon = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("pdf-search-button-rect"))).unwrap();
     frames.drag(app, icon.center(), icon.center());
@@ -521,12 +543,29 @@ fn pdf_search_field_opens_in_header_and_stays_open_while_editing() {
     let tool = app.tool;
     frames.step(app, vec![Event::Text("formula".into())]);
     assert_eq!(app.pdf_search_query, "formula");
+    frames.text_center("1/3");
+    assert_eq!(app.page_in_view(app.canvas_rect), 0);
+    let next = frames.text_center("↓");
+    frames.drag(app, next, next);
+    frames.settle(app);
+    frames.text_center("2/3");
+    frames.drag(app, next, next);
+    frames.settle(app);
+    frames.text_center("3/3");
+    assert_eq!(app.page_in_view(app.canvas_rect), 1);
+    frames.drag(app, next, next);
+    frames.settle(app);
+    frames.text_center("1/3");
+    assert_eq!(app.page_in_view(app.canvas_rect), 0);
+    frames.key(app, Key::Enter);
+    frames.settle(app);
+    frames.text_center("2/3");
     frames.key(app, Key::L);
     assert_eq!(app.tool, tool, "typing a search must not activate a drawing tool");
-    assert!(Popup::is_any_open(&frames.ctx));
+    assert!(app.pdf_search_open);
     frames.key(app, Key::Escape);
     frames.settle(app);
-    assert!(!Popup::is_any_open(&frames.ctx));
+    assert!(!app.pdf_search_open);
     frames.size = vec2(360.0, 640.0);
     frames.settle(app);
     let icon = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("pdf-search-button-rect"))).unwrap();
@@ -626,10 +665,20 @@ impl Frames {
     }
 
     fn step(&mut self, app: &mut InkarchyApp, events: Vec<Event>) {
+        self.step_with_modifiers(app, events, Modifiers::NONE);
+    }
+
+    fn step_with_modifiers(
+        &mut self,
+        app: &mut InkarchyApp,
+        events: Vec<Event>,
+        modifiers: Modifiers,
+    ) {
         self.time += 1.0 / 60.0;
         let input = RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)),
             time: Some(self.time),
+            modifiers,
             events,
             ..Default::default()
         };
@@ -1040,10 +1089,8 @@ fn responsive_note_controls_do_not_overlap_through_resizes() {
                         "header control outside {size:?}: {rect:?}"
                     );
                 }
-                assert!(
-                    cap.left() < menu.left(),
-                    "coach and notebook menu sit in the right cluster"
-                );
+                assert!(cap.top() > 52.0, "coach badge is beside the dock");
+                assert!(!cap.intersects(controls[1].1), "coach badge stays clear of dock");
                 if size.x >= 760.0 {
                     assert!(
                         meter
@@ -1052,7 +1099,7 @@ fn responsive_note_controls_do_not_overlap_through_resizes() {
                             < 1.0
                     );
                     assert!(
-                        meter.right() < cap.left(),
+                        meter.right() < menu.left(),
                         "center bar stays left of the right icon cluster"
                     );
                     assert!(
@@ -1066,32 +1113,6 @@ fn responsive_note_controls_do_not_overlap_through_resizes() {
             }
         }
     }
-}
-
-/// Header wells, rightmost first. Index 0 is Pages, 1 is the notebook menu.
-fn header_wells(frames: &Frames) -> Vec<Pos2> {
-    let mut wells: Vec<Rect> = frames
-        .output
-        .as_ref()
-        .unwrap()
-        .shapes
-        .iter()
-        .filter_map(|shape| {
-            let Shape::Rect(rect) = &shape.shape else {
-                return None;
-            };
-            if rect.fill.a() == 255
-                && (rect.rect.height() - 40.0).abs() < 0.1
-                && rect.rect.top() < 52.0
-            {
-                Some(rect.rect)
-            } else {
-                None
-            }
-        })
-        .collect();
-    wells.sort_by(|a, b| b.right().total_cmp(&a.right()));
-    wells.into_iter().map(|rect| rect.center()).collect()
 }
 
 #[test]
@@ -1114,7 +1135,7 @@ fn pages_mode_adds_a_sheet_and_toggle_hides_the_pluses() {
     app.fitted_cell = None;
     frames.settle(app);
     let pages = app.note.as_ref().unwrap().pages.len();
-    let manage = header_wells(&frames)[1];
+    let manage = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("pages-button-rect"))).unwrap().center();
     frames.drag(app, manage, manage);
     frames.settle(app);
     assert!(app.sheet_tabs_on);
@@ -1171,7 +1192,7 @@ fn pages_mode_arranges_six_pages_without_losing_the_visible_page_or_its_content(
         .expect("arrangement control appears in Pages mode");
     frames.drag(app, button.center(), button.center());
     frames.settle(app);
-    let choice = frames.text_center("Two columns");
+    let choice = frames.text_center("Two per row");
     frames.drag(app, choice, choice);
     frames.settle(app);
     let note = app.note.as_ref().unwrap();
@@ -1303,7 +1324,7 @@ fn compact_controls_keep_drag_selection_and_wheel_actions_accessible() {
     frames.settle(app);
     assert!(app.sheet_tabs_on);
     frames.snapshot("responsive-page-selection-small");
-    let manage = header_wells(&frames)[1];
+    let manage = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("pages-button-rect"))).unwrap().center();
     frames.touch(app, TouchPhase::Start, manage);
     frames.touch(app, TouchPhase::End, manage);
     frames.settle(app);
@@ -1563,354 +1584,6 @@ fn dock_turns_onto_the_edge_while_carried_then_springs_home() {
 }
 
 #[test]
-fn sticky_pad_drags_a_yellow_note_onto_the_page() {
-    let mut fixture = Fixture::new();
-    let id = fixture.notebook("Stickies");
-    let app = &mut fixture.app;
-    app.open_note(id);
-    let mut frames = Frames::new(app);
-    frames.settle(app);
-    let pad = frames
-        .ctx
-        .data(|d| d.get_temp::<Rect>(Id::new("sticky-pad-rect")))
-        .expect("sticky pad");
-    let canvas = app.canvas_rect;
-    let drop = canvas.center();
-    frames.drag(app, pad.center(), drop);
-    frames.settle(app);
-    let texts = &app.note.as_ref().unwrap().pages[0].texts;
-    assert_eq!(texts.len(), 1);
-    assert!(texts[0].sticky);
-    assert_eq!(texts[0].color32(), app.look.sticky_yellow());
-    assert!(
-        app.sticky_sheet.is_none(),
-        "drop leaves the sticky on the page; double-click opens the sheet"
-    );
-    assert_eq!(app.sel.len(), 1);
-    assert_eq!(app.sel[0].id, texts[0].id);
-}
-
-#[test]
-fn long_press_on_a_sticky_uses_the_folder_cloth_wheel() {
-    let mut fixture = Fixture::new();
-    let id = fixture.notebook("Sticky color");
-    let app = &mut fixture.app;
-    app.open_note(id);
-    let mut frames = Frames::new(app);
-    frames.settle(app);
-    let pad = frames
-        .ctx
-        .data(|d| d.get_temp::<Rect>(Id::new("sticky-pad-rect")))
-        .expect("sticky pad");
-    frames.step(
-        app,
-        vec![
-            Event::PointerMoved(pad.center()),
-            Event::PointerButton {
-                pos: pad.center(),
-                button: PointerButton::Primary,
-                pressed: true,
-                modifiers: Modifiers::NONE,
-            },
-        ],
-    );
-    for _ in 0..30 {
-        frames.step(app, vec![]);
-    }
-    assert!(
-        app.sticky_wheel.is_none(),
-        "the pad icon does not open color"
-    );
-    frames.step(
-        app,
-        vec![Event::PointerButton {
-            pos: pad.center(),
-            button: PointerButton::Primary,
-            pressed: false,
-            modifiers: Modifiers::NONE,
-        }],
-    );
-
-    let canvas = app.canvas_rect;
-    let drop = canvas.center();
-    frames.drag(app, pad.center(), drop);
-    frames.settle(app);
-    assert!(app.sticky_sheet.is_none());
-    let screen = {
-        let tx = &app.note.as_ref().unwrap().pages[0].texts[0];
-        let paper = tx.rect().center() + app.origin_of(0);
-        app.camera.to_screen(paper, app.canvas_rect)
-    };
-    frames.step(
-        app,
-        vec![
-            Event::PointerMoved(screen),
-            Event::PointerButton {
-                pos: screen,
-                button: PointerButton::Primary,
-                pressed: true,
-                modifiers: Modifiers::NONE,
-            },
-        ],
-    );
-    for _ in 0..30 {
-        frames.step(app, vec![Event::PointerMoved(screen)]);
-    }
-    let wheel = app
-        .sticky_wheel
-        .as_ref()
-        .expect("long press opens the wheel");
-    assert!(!wheel.secondary);
-    let cloth = (0..app.look.cloth.len())
-        .find(|&i| app.look.cloth_at(i as u8) != app.look.sticky_yellow())
-        .expect("a cloth color besides sticky yellow") as u8;
-    let n = app.look.cloth.len().max(1);
-    let (origin, scale) = fitted_wheel(frames.ctx.screen_rect(), wheel.origin);
-    let aim = slice_mid(origin, cloth as usize, n, (WHEEL_IN + WHEEL_OUT) * 0.5);
-    let aim = origin + (aim - origin) * scale;
-    frames.step(app, vec![Event::PointerMoved(aim)]);
-    frames.step(
-        app,
-        vec![
-            Event::PointerMoved(aim),
-            Event::PointerButton {
-                pos: aim,
-                button: PointerButton::Primary,
-                pressed: false,
-                modifiers: Modifiers::NONE,
-            },
-        ],
-    );
-    assert!(app.sticky_wheel.is_none());
-    let tx = &app.note.as_ref().unwrap().pages[0].texts[0];
-    assert_eq!(tx.color32(), app.look.cloth_at(cloth));
-    assert_eq!(app.sticky_color, app.look.cloth_at(cloth));
-}
-
-#[test]
-fn finger_hold_on_a_sticky_opens_the_cloth_wheel() {
-    let mut fixture = Fixture::new();
-    let id = fixture.notebook("Sticky finger");
-    let app = &mut fixture.app;
-    app.open_note(id);
-    let mut frames = Frames::new(app);
-    frames.settle(app);
-    let tx = TextBox::sticky(pos2(400.0, 300.0), app.look.sticky_yellow());
-    app.note.as_mut().unwrap().pages[0].texts.push(tx);
-    app.tool = Tool::Hand;
-    frames.settle(app);
-    let screen = {
-        let tx = &app.note.as_ref().unwrap().pages[0].texts[0];
-        app.camera
-            .to_screen(tx.rect().center() + app.origin_of(0), app.canvas_rect)
-    };
-    frames.touch(app, TouchPhase::Start, screen);
-    for _ in 0..30 {
-        frames.step(app, vec![]);
-    }
-    assert!(
-        app.sticky_wheel.is_some(),
-        "a still finger on the sticky opens the cloth wheel"
-    );
-    frames.touch(app, TouchPhase::End, screen);
-    assert!(
-        app.sticky_wheel.is_some(),
-        "lifting in the hole leaves the wheel up for a tap"
-    );
-    let cloth = (0..app.look.cloth.len())
-        .find(|&i| app.look.cloth_at(i as u8) != app.look.sticky_yellow())
-        .expect("a cloth color besides yellow") as u8;
-    let n = app.look.cloth.len().max(1);
-    let (origin, scale) = fitted_wheel(
-        frames.ctx.screen_rect(),
-        app.sticky_wheel.as_ref().unwrap().origin,
-    );
-    let aim = slice_mid(origin, cloth as usize, n, (WHEEL_IN + WHEEL_OUT) * 0.5);
-    let aim = origin + (aim - origin) * scale;
-    frames.touch(app, TouchPhase::Start, aim);
-    frames.touch(app, TouchPhase::End, aim);
-    assert!(app.sticky_wheel.is_none());
-    assert_eq!(
-        app.note.as_ref().unwrap().pages[0].texts[0].color32(),
-        app.look.cloth_at(cloth)
-    );
-}
-
-#[test]
-fn sticky_tap_fills_the_sheet_and_a_corner_drag_resizes_it() {
-    let mut fixture = Fixture::new();
-    let id = fixture.notebook("Sticky edit");
-    let app = &mut fixture.app;
-    app.open_note(id);
-    let tx = TextBox::sticky(pos2(180.0, 160.0), app.look.sticky_yellow());
-    let sticky_id = tx.id;
-    app.note.as_mut().unwrap().pages[0].texts.push(tx);
-    let mut frames = Frames::new(app);
-    frames.settle(app);
-    let screen = {
-        let tx = &app.note.as_ref().unwrap().pages[0].texts[0];
-        app.camera
-            .to_screen(tx.rect().center() + app.origin_of(0), app.canvas_rect)
-    };
-    let click = |frames: &mut Frames, app: &mut InkarchyApp| {
-        frames.step(app, vec![Event::PointerMoved(screen)]);
-        frames.step(
-            app,
-            vec![Event::PointerButton {
-                pos: screen,
-                button: PointerButton::Primary,
-                pressed: true,
-                modifiers: Modifiers::NONE,
-            }],
-        );
-        frames.step(
-            app,
-            vec![Event::PointerButton {
-                pos: screen,
-                button: PointerButton::Primary,
-                pressed: false,
-                modifiers: Modifiers::NONE,
-            }],
-        );
-    };
-    click(&mut frames, app);
-    assert!(
-        app.sticky_sheet.is_none(),
-        "one click leaves the note on the page"
-    );
-    click(&mut frames, app);
-    assert_eq!(app.sticky_sheet, Some((0, sticky_id)));
-    assert!(
-        app.tool.is_ink(),
-        "sticky sheet opens ready to draw, got {:?}",
-        app.tool
-    );
-    frames.settle(app);
-    frames.step(app, vec![Event::Text("Hello".into())]);
-    frames.settle(app);
-    assert!(
-        !app.note.as_ref().unwrap().pages[0].texts[0]
-            .text
-            .contains("Hello"),
-        "keyboard text is off until the Text tool is chosen"
-    );
-    app.tool = Tool::Text;
-    app.text_focus = true;
-    frames.settle(app);
-    frames.step(app, vec![Event::Text("Hello".into())]);
-    frames.settle(app);
-    assert!(
-        app.note.as_ref().unwrap().pages[0].texts[0]
-            .text
-            .contains("Hello"),
-        "Text tool accepts typing on the sheet"
-    );
-    // Done is a round check well at the top-right of the sticky sheet.
-    let done = {
-        let screen = frames.ctx.screen_rect();
-        pos2(screen.right() - 34.0, screen.top() + 78.0)
-    };
-    frames.step(app, vec![Event::PointerMoved(done)]);
-    frames.step(
-        app,
-        vec![Event::PointerButton {
-            pos: done,
-            button: PointerButton::Primary,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-        }],
-    );
-    frames.step(
-        app,
-        vec![Event::PointerButton {
-            pos: done,
-            button: PointerButton::Primary,
-            pressed: false,
-            modifiers: Modifiers::NONE,
-        }],
-    );
-    assert!(app.sticky_sheet.is_none());
-    assert!(app.note.as_ref().unwrap().pages[0].texts[0]
-        .text
-        .contains("Hello"));
-
-    // Resize via selection handles (fold corner is visual only).
-    app.sel = vec![Sel {
-        page: 0,
-        id: sticky_id,
-        kind: SelKind::Text,
-    }];
-    app.tool = Tool::Hand;
-    frames.settle(app);
-    let before = app.note.as_ref().unwrap().pages[0].texts[0].size;
-    let corner = {
-        let tx = &app.note.as_ref().unwrap().pages[0].texts[0];
-        app.camera
-            .to_screen(tx.rect().right_bottom() + app.origin_of(0), app.canvas_rect)
-    };
-    frames.drag(app, corner, corner + vec2(70.0, 36.0));
-    let after = app.note.as_ref().unwrap().pages[0].texts[0].size;
-    assert!(after[0] > before[0] + 20.0, "wider {before:?} -> {after:?}");
-    assert!(
-        after[1] > before[1] + 10.0,
-        "taller {before:?} -> {after:?}"
-    );
-
-    let corner = {
-        let tx = &app.note.as_ref().unwrap().pages[0].texts[0];
-        app.camera
-            .to_screen(tx.rect().right_bottom() + app.origin_of(0), app.canvas_rect)
-    };
-    let pull = corner + vec2(40.0, 24.0);
-    let mid = app.note.as_ref().unwrap().pages[0].texts[0].size;
-    frames.touch(app, TouchPhase::Start, corner);
-    frames.touch(app, TouchPhase::Move, pull);
-    frames.touch(app, TouchPhase::End, pull);
-    let end = app.note.as_ref().unwrap().pages[0].texts[0].size;
-    assert!(end[0] > mid[0] + 10.0, "finger widens {mid:?} -> {end:?}");
-    assert!(end[1] > mid[1] + 8.0, "finger heightens {mid:?} -> {end:?}");
-}
-
-#[test]
-fn sticky_ink_follows_move_and_resize() {
-    let mut fixture = Fixture::new();
-    let id = fixture.notebook("Sticky ink");
-    let app = &mut fixture.app;
-    app.open_note(id);
-    let tx = TextBox::sticky(pos2(100.0, 100.0), app.look.sticky_yellow());
-    let sticky_id = tx.id;
-    let origin = tx.min();
-    app.note.as_mut().unwrap().pages[0].texts.push(tx);
-    let mut stroke = InkStroke::new(Nib::Fineliner, Color32::BLACK, 2.0);
-    stroke.sticky = Some(sticky_id);
-    stroke.push(InkPoint::new(origin + vec2(20.0, 24.0), 1.0));
-    stroke.push(InkPoint::new(origin + vec2(60.0, 70.0), 1.0));
-    app.note.as_mut().unwrap().pages[0].strokes.push(stroke);
-    app.sel = vec![Sel {
-        page: 0,
-        id: sticky_id,
-        kind: SelKind::Text,
-    }];
-    app.translate_sel(vec2(40.0, 15.0));
-    let st = &app.note.as_ref().unwrap().pages[0].strokes[0];
-    assert_eq!(st.sticky, Some(sticky_id));
-    assert!((st.points[0].x - (100.0 + 20.0 + 40.0)).abs() < 0.01);
-    assert!((st.points[0].y - (100.0 + 24.0 + 15.0)).abs() < 0.01);
-    let tx = &app.note.as_ref().unwrap().pages[0].texts[0];
-    assert!((tx.pos[0] - 140.0).abs() < 0.01);
-    app.set_sticky_size(0, sticky_id, vec2(336.0, 336.0));
-    let st = &app.note.as_ref().unwrap().pages[0].strokes[0];
-    // After move, sticky origin is (140, 115); point is 20 past origin in x;
-    // resize 168→336 (×2) → 140 + 40 = 180.
-    assert!(
-        (st.points[0].x - 180.0).abs() < 0.05,
-        "got {}",
-        st.points[0].x
-    );
-    assert!((st.points[0].y - (115.0 + 24.0 * 2.0)).abs() < 0.05);
-}
-
-#[test]
 fn pages_mode_minus_removes_a_sticky() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Sticky minus");
@@ -2018,6 +1691,32 @@ fn scrolling_compact_toolbar_does_not_zoom_the_page() {
 }
 
 #[test]
+fn fit_page_button_is_in_the_header_not_the_notebook_menu() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Fullscreen button");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let full = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("fullscreen-button-rect"))).unwrap();
+    assert!(full.top() < 52.0, "fullscreen control belongs in the top bar");
+    let more = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("notebook-menu-button-rect"))).unwrap();
+    frames.drag(app, more.center(), more.center());
+    frames.settle(app);
+    assert!(!frames.output.as_ref().unwrap().shapes.iter().any(|shape| {
+        matches!(&shape.shape, Shape::Text(text) if text.galley.text() == "Fit page")
+    }));
+    app.camera.zoom = 0.8;
+    app.fitted_cell = None;
+    frames.drag(app, full.center(), full.center());
+    frames.step(app, vec![]);
+    assert_eq!(app.fitted_cell, Some((0, 0)), "button fits the current page");
+    assert!(!frames.output.as_ref().unwrap().viewport_output.values().any(|viewport| {
+        viewport.commands.iter().any(|command| matches!(command, ViewportCommand::Fullscreen(_)))
+    }));
+}
+
+#[test]
 fn notebook_menu_keeps_actions_and_keyboard_dismissal() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Notebook menu");
@@ -2025,26 +1724,34 @@ fn notebook_menu_keeps_actions_and_keyboard_dismissal() {
     app.open_note(id);
     let mut frames = Frames::new(app);
     frames.settle(app);
-    let more = header_wells(&frames)[0];
+    let more = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("notebook-menu-button-rect"))).unwrap().center();
     frames.drag(app, more, more);
     frames.settle(app);
     assert!(Popup::is_any_open(&frames.ctx));
-    let last = frames.text_center("Move to trash");
+    let last = frames.text_center("Area eraser");
     frames.text_center("Stroke eraser");
-    frames.text_center("Area eraser");
+    frames.text_center("Separate pages");
     assert!(
         frames.output.as_ref().unwrap().shapes.iter().any(|shape| {
-            matches!(&shape.shape, Shape::Text(text) if text.galley.text() == "Move to trash")
+            matches!(&shape.shape, Shape::Text(text) if text.galley.text() == "Area eraser")
                 && shape.clip_rect.contains(last)
         }),
         "all menu actions should fit in a normal window"
     );
     frames.snapshot("notebook-menu");
-    let download = frames.text_center("Download…");
-    frames.touch(app, TouchPhase::Start, download);
-    frames.touch(app, TouchPhase::End, download);
+    frames.step_with_modifiers(
+        app,
+        vec![Event::Key {
+            key: Key::S,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::COMMAND,
+        }],
+        Modifiers::COMMAND,
+    );
     frames.settle(app);
-    assert!(app.export_picker_open);
+    assert!(app.export_picker_open, "Ctrl+S still opens the export picker");
     frames.text_center("PNG image");
     frames.text_center("PDF document");
     frames.snapshot("download-canson");
@@ -2074,13 +1781,13 @@ fn notebook_menu_keeps_actions_and_keyboard_dismissal() {
     frames.settle(app);
     assert!(Popup::is_any_open(&frames.ctx));
     frames.snapshot("notebook-menu-short");
-    let save = frames.text_center("Download…");
+    let save = frames.text_center("Draw with finger");
     assert!(save.y > 0.0 && save.y < frames.size.y);
     let mut reached_last = false;
     for _ in 0..48 {
         frames.key(app, Key::Tab);
         frames.settle(app);
-        let last = frames.text_center("Move to trash");
+        let last = frames.text_center("Area eraser");
         if frames
             .ctx
             .memory(|m| m.focused())
@@ -2099,23 +1806,59 @@ fn notebook_menu_keeps_actions_and_keyboard_dismissal() {
 }
 
 #[test]
-fn paper_style_remains_available_in_notebook_menu() {
+fn paper_style_is_available_in_pages_mode_even_with_one_page() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Paper menu");
     let app = &mut fixture.app;
     app.open_note(id);
     let mut frames = Frames::new(app);
     frames.settle(app);
-    let more = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("notebook-menu-button-rect")))
-        .unwrap();
-    frames.drag(app, more.center(), more.center());
+    assert!(frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("page-paper-button-rect"))).is_none());
+    app.enter_pages_mode();
     frames.settle(app);
-    let paper = frames.text_center("Paper style");
-    frames.drag(app, paper, paper);
+    let paper = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("page-paper-button-rect"))).unwrap();
+    frames.drag(app, paper.center(), paper.center());
     frames.settle(app);
     let lined = frames.text_center("Lined");
     frames.drag(app, lined, lined);
     assert_eq!(app.note.as_ref().unwrap().paper, PaperKind::Lined);
+}
+
+#[test]
+fn pdf_pages_can_be_arranged_horizontally_or_two_per_row() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("PDF arrangement");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let note = app.note.as_mut().unwrap();
+    note.sheet_join = SheetJoin::Separate;
+    note.pages = (0..5).map(|index| {
+        let mut page = crate::document::Page::at(0, index);
+        page.background = Some(PageBackground {
+            file: "source.pdf".into(), pdf_page: Some(index as u32), source_size: None,
+        });
+        page
+    }).collect();
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    app.enter_pages_mode();
+    frames.settle(app);
+    let button = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("page-layout-button-rect"))).unwrap();
+    for (label, expected) in [
+        ("Horizontal", vec![(0, 0), (1, 0), (2, 0), (3, 0), (4, 0)]),
+        ("Two per row", vec![(0, 0), (1, 0), (0, 1), (1, 1), (0, 2)]),
+    ] {
+        frames.drag(app, button.center(), button.center());
+        frames.settle(app);
+        let choice = frames.text_center(label);
+        frames.drag(app, choice, choice);
+        frames.settle(app);
+        let note = app.note.as_ref().unwrap();
+        assert_eq!(note.pages.iter().map(|page| (page.col, page.row)).collect::<Vec<_>>(), expected);
+        for (index, page) in note.pages.iter().enumerate() {
+            assert_eq!(page.background.as_ref().unwrap().pdf_page, Some(index as u32));
+        }
+    }
 }
 
 #[test]
@@ -2240,7 +1983,9 @@ fn ink_tin_keeps_color_picking_and_fits_after_resize() {
 
 #[test]
 fn tools_can_be_stored_and_restored_by_dragging_between_panel_and_dock() {
-    for touch in [false, true] {
+    for (touch, tool) in [
+        (false, Tool::Fineliner), (true, Tool::Fineliner),
+    ] {
         let mut fixture = Fixture::new();
         let id = fixture.notebook("Tool storage");
         let app = &mut fixture.app;
@@ -2250,7 +1995,7 @@ fn tools_can_be_stored_and_restored_by_dragging_between_panel_and_dock() {
         assert!(!app.ink_panel_open());
         let source = frames
             .ctx
-            .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", Tool::Fineliner))))
+            .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", tool))))
             .unwrap()
             .center();
         if touch {
@@ -2293,10 +2038,12 @@ fn tools_can_be_stored_and_restored_by_dragging_between_panel_and_dock() {
             );
         }
         assert!(
-            app.parked_tools.contains(&Tool::Fineliner),
-            "store touch={touch}"
+            app.parked_tools.contains(&tool),
+            "store {tool:?} touch={touch}"
         );
-        assert_eq!(app.lib.index.parked_tools, vec![Tool::Fineliner]);
+        assert_eq!(app.lib.index.parked_tools, vec![tool]);
+        assert!(app.note.as_ref().unwrap().pages[0].texts.is_empty(),
+            "storing a tool must not place a sticky note");
         frames.settle(app);
         frames.snapshot(if touch {
             "storage-touch"
@@ -2305,7 +2052,7 @@ fn tools_can_be_stored_and_restored_by_dragging_between_panel_and_dock() {
         });
         let stored = frames
             .ctx
-            .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", Tool::Fineliner))))
+            .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", tool))))
             .unwrap()
             .center();
         let dock = frames
@@ -2320,8 +2067,8 @@ fn tools_can_be_stored_and_restored_by_dragging_between_panel_and_dock() {
             frames.drag(app, stored, dock.center());
         }
         assert!(
-            !app.parked_tools.contains(&Tool::Fineliner),
-            "restore touch={touch}"
+            !app.parked_tools.contains(&tool),
+            "restore {tool:?} touch={touch}"
         );
         assert!(app.lib.index.parked_tools.is_empty());
         assert!(app.dock_tool_drag.is_none());
@@ -2766,6 +2513,48 @@ fn pages_mode_tear_badge_removes_a_page_and_leaves_ink() {
 }
 
 #[test]
+fn double_tap_on_page_leaves_pages_mode_without_moving_it() {
+    for touch in [false, true] {
+        let mut fixture = Fixture::new();
+        let id = fixture.notebook("Double tap pages");
+        let app = &mut fixture.app;
+        app.open_note(id);
+        let mut frames = Frames::new(app);
+        frames.settle(app);
+        app.camera = Camera { pan: vec2(200.0, 100.0), zoom: 0.3, stretch_y: None };
+        app.fitted_cell = None;
+        app.need_fit = false;
+        let before = serde_json::to_value(&app.note.as_ref().unwrap().pages).unwrap();
+        let canvas = app.canvas_rect;
+        let page = app.unit_screen_rect(canvas, 0, 0).center();
+        let desk = canvas.left_top() + vec2(25.0, 25.0);
+        assert!(app.page_unit_at(desk, canvas).is_none());
+        for pos in [page, desk] {
+            app.enter_pages_mode();
+            frames.settle(app);
+            for tap in 0..2 {
+                if touch {
+                    frames.touch(app, TouchPhase::Start, pos);
+                    frames.touch(app, TouchPhase::End, pos);
+                } else {
+                    for pressed in [true, false] {
+                        frames.step(app, vec![Event::PointerButton {
+                            pos,
+                            button: PointerButton::Primary,
+                            pressed,
+                            modifiers: Modifiers::NONE,
+                        }]);
+                    }
+                }
+                assert_eq!(app.sheet_tabs_on, tap == 0, "exit after second tap at {pos:?} (touch={touch})");
+            }
+            frames.settle(app);
+        }
+        assert_eq!(serde_json::to_value(&app.note.as_ref().unwrap().pages).unwrap(), before);
+    }
+}
+
+#[test]
 fn long_press_on_page_enters_pages_mode() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Long press pages");
@@ -2829,7 +2618,7 @@ fn finger_long_press_on_page_shows_progress_ring() {
                 &shape.shape,
                 Shape::Circle(circle)
                     if circle.center.distance(screen) < 0.5
-                        && (circle.radius - 20.0).abs() < 0.5
+                        && (circle.radius - 44.0).abs() < 0.5
             )
         }),
         "a normal touch does not immediately draw the hold indicator"
@@ -2842,7 +2631,7 @@ fn finger_long_press_on_page_shows_progress_ring() {
                 &shape.shape,
                 Shape::Circle(circle)
                     if circle.center.distance(screen) < 0.5
-                        && (circle.radius - 20.0).abs() < 0.5
+                        && (circle.radius - 44.0).abs() < 0.5
                         && (circle.stroke.width - 2.5).abs() < 0.1
             )
         }),

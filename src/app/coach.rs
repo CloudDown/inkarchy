@@ -12,6 +12,20 @@ pub(super) struct CoachUi {
 }
 
 impl InkarchyApp {
+    pub(super) fn ui_coach_badge(&mut self, ctx: &Context) {
+        let bounds = note_controls_bounds(ctx);
+        let dock = ctx.data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
+            .unwrap_or(Rect::from_center_size(bounds.center(), vec2(48.0, 48.0)));
+        let badge = sticky_pad_place(dock, self.dock_layout_edge(), bounds);
+        Area::new(Id::new("inkarchy-coach-badge"))
+            .order(Order::Foreground)
+            .fixed_pos(badge.min)
+            .constrain_to(bounds)
+            .show(ctx, |ui| {
+                self.ui_coach_button(ui);
+            });
+    }
+
     pub(super) fn coach_enabled(&self) -> bool {
         self.note
             .as_ref()
@@ -169,18 +183,14 @@ impl InkarchyApp {
     }
 
     pub(super) fn ui_coach_button(&mut self, ui: &mut Ui) -> Response {
-        let fill = if self.coach_enabled() {
-            mix_col(self.look.paper, self.look.accent, 0.38)
-        } else {
-            self.look.paper
-        };
-        let button = self.round_well(ui, self.chrome_btn(), fill, paint_coach_icon);
+        // Only the raised cap is visible; the 44px hit target has no button plate.
+        let (rect, button) = ui.allocate_exact_size(vec2(44.0, 44.0), Sense::click());
+        let center = rect.center() - vec2(0.0, if button.hovered() { 1.0 } else { 0.0 });
+        paint_coach_icon(ui.painter(), center, self.look.ink, self.look.accent,
+            self.look.paper, self.look.shadow, self.coach_enabled());
         button.widget_info(|| {
             WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Writing coach")
         });
-        if self.coach_enabled() {
-            ui.painter().circle_filled(button.rect.right_bottom() - vec2(8.0, 8.0), 3.5, self.look.green());
-        }
         ui.ctx()
             .data_mut(|d| d.insert_temp(Id::new("coach-button-rect"), button.rect));
         if button.clone().on_hover_text(format!("Writing coach · {}", self.coach_label())).clicked() {
@@ -266,7 +276,11 @@ impl InkarchyApp {
         let panel_pos = pos2(
             (anchor.center().x - panel_width * 0.5)
                 .clamp(screen.left() + 8.0, screen.right() - panel_width - 8.0),
-            anchor.bottom() + 6.0,
+            if anchor.bottom() + 200.0 > screen.bottom() {
+                (anchor.top() - 200.0 - 6.0).max(screen.top() + 8.0)
+            } else {
+                anchor.bottom() + 6.0
+            },
         );
         let fg = self.look.ink;
         let notebook_id = self.note.as_ref().unwrap().id;

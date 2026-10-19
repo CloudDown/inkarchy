@@ -130,10 +130,6 @@ impl InkarchyApp {
         if !touching {
             self.touch_navigation = false;
         }
-        if self.sticky_sheet.is_some() {
-            self.canvas_touch = None;
-            return true;
-        }
         if !ui.input(|i| i.focused) {
             self.reset_canvas_gesture();
             if !self.live_from_pen {
@@ -152,9 +148,6 @@ impl InkarchyApp {
                 self.clear_shape_hold();
             }
             self.touch_navigation = touching;
-            return true;
-        }
-        if self.sticky_wheel.is_some() {
             return true;
         }
         if self.export_picker_open || Popup::is_any_open(ui.ctx()) || self.palm_guard(&pen) {
@@ -301,27 +294,21 @@ impl InkarchyApp {
                             self.push_snapshot();
                             gesture.snapshot = true;
                         }
-                        if self.selection_is_sticky_only() {
-                            let free = self.camera.to_paper(screen, canvas);
-                            self.apply_sticky_diagonal_resize(anchor, free);
-                            self.selection_resize = Some((anchor, initial, scale));
-                        } else {
-                            // Offset the handle by finger travel: a generous hit area
-                            // must not make the image jump when grabbed off-centre.
-                            let travel = self.camera.screen_to_paper_delta(screen - gesture.origin);
-                            let next = ((initial + travel).dot(initial)
-                                / initial.length_sq().max(1.0))
-                            .clamp(0.1, 10.0);
-                            if (next - scale).abs() > 0.0001 {
-                                self.scale_selection(anchor, next / scale);
-                                gesture.mode = CanvasGesture::Resize {
-                                    anchor,
-                                    initial,
-                                    scale: next,
-                                };
-                                self.selection_resize = Some((anchor, initial, next));
-                                self.mark_dirty();
-                            }
+                        // Offset the handle by finger travel: a generous hit area
+                        // must not make the image jump when grabbed off-centre.
+                        let travel = self.camera.screen_to_paper_delta(screen - gesture.origin);
+                        let next = ((initial + travel).dot(initial)
+                            / initial.length_sq().max(1.0))
+                        .clamp(0.1, 10.0);
+                        if (next - scale).abs() > 0.0001 {
+                            self.scale_selection(anchor, next / scale);
+                            gesture.mode = CanvasGesture::Resize {
+                                anchor,
+                                initial,
+                                scale: next,
+                            };
+                            self.selection_resize = Some((anchor, initial, next));
+                            self.mark_dirty();
                         }
                     }
                     CanvasGesture::Pan(_) | CanvasGesture::Text => {
@@ -338,7 +325,8 @@ impl InkarchyApp {
                 if !gesture.moved {
                     match gesture.mode {
                         CanvasGesture::Text => {
-                            self.activate_text(self.camera.to_paper(screen, canvas))
+                            let paper = self.camera.to_paper(screen, canvas);
+                            self.activate_text(paper);
                         }
                         CanvasGesture::Pan(_) => {
                             self.finish_text_edit();
@@ -347,11 +335,7 @@ impl InkarchyApp {
                         CanvasGesture::Move => {
                             let double = ui
                                 .input(|i| i.pointer.button_double_clicked(PointerButton::Primary));
-                            if let Some((page, id)) = self.selected_sticky() {
-                                if double && time - gesture.since < super::WHEEL_HOLD {
-                                    self.open_sticky_sheet(page, id);
-                                }
-                            } else if double {
+                            if double {
                                 self.edit_selected_text();
                             }
                         }
@@ -360,26 +344,6 @@ impl InkarchyApp {
                 }
             } else {
                 self.canvas_touch = Some(gesture);
-            }
-        }
-
-        // A still finger on a sticky opens the folder cloth wheel.
-        let sticky_hold = self.canvas_touch.as_ref().and_then(|gesture| {
-            (!gesture.moved && matches!(gesture.mode, CanvasGesture::Move))
-                .then_some((gesture.origin, gesture.since))
-        });
-        if let Some((origin, since)) = sticky_hold {
-            if let Some((page, id)) = self.selected_sticky() {
-                let held = time - since;
-                if held >= super::WHEEL_HOLD {
-                    self.canvas_touch = None;
-                    self.drag_last = None;
-                    self.open_sticky_wheel(page, id, origin, ui.ctx(), false);
-                } else {
-                    ui.ctx().request_repaint_after(Duration::from_secs_f64(
-                        (super::WHEEL_HOLD - held).max(0.001),
-                    ));
-                }
             }
         }
 
@@ -478,12 +442,14 @@ fn paint_hold_progress(
     accent: Color32,
     paper: Color32,
 ) {
-    painter.circle_stroke(center, 20.0, Stroke::new(2.5, paper.gamma_multiply(0.75)));
+    // Keep the ring outside the fingertip so it remains visible while holding.
+    const RADIUS: f32 = 44.0;
+    painter.circle_stroke(center, RADIUS, Stroke::new(2.5, paper.gamma_multiply(0.75)));
     let points: Vec<Pos2> = (0..=32)
         .map(|step| {
             let angle = -std::f32::consts::FRAC_PI_2
                 + std::f32::consts::TAU * progress * step as f32 / 32.0;
-            center + Vec2::angled(angle) * 20.0
+            center + Vec2::angled(angle) * RADIUS
         })
         .collect();
     if points.len() > 1 {

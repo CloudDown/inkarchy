@@ -17,14 +17,13 @@ Uninstall: `curl -fsSL https://raw.githubusercontent.com/CloudDown/inkarchy/main
 <table>
   <tr>
     <td width="33%" align="center"><img src="docs/screens/pdf-annotation.png" alt="Annotated PDF"><br><sub>Annotate PDFs</sub></td>
-    <td width="33%" align="center"><img src="docs/screens/sticky-notes.png" alt="Sticky notes"><br><sub>Sticky notes</sub></td>
     <td width="33%" align="center"><img src="docs/screens/shelf.png" alt="Notebook shelf"><br><sub>Notebook shelf</sub></td>
   </tr>
 </table>
 
 ## Usage
 
-Optional **Exercise coach**: use the graduation cap beside the paper style button to connect a local Ollama vision model or Gemini with your own API key. A slim bar shows a qualitative evaluation of handwritten maths and physics steps. Disabled by default; activation is remembered per notebook. [Setup and data handling](docs/GUIDE.md#exercise-coach).
+Optional **Exercise coach**: use the graduation cap beside the tool case to connect a local Ollama vision model or Gemini with your own API key. A slim bar shows a qualitative evaluation of handwritten maths and physics steps. Disabled by default; activation is remembered per notebook. [Setup and data handling](docs/GUIDE.md#exercise-coach).
 
 ```bash
 inkarchy                      # open the shelf

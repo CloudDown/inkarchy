@@ -255,11 +255,13 @@ impl Look {
     }
 
     /// Theme yellow (Omarchy `yellow`).
+    #[cfg(test)]
     pub fn yellow(&self) -> Color32 {
         self.inks.get(4).copied().unwrap_or(self.accent)
     }
 
-    /// Fluorescent sticky paper — theme yellow punched toward neon lemon.
+    /// Fluorescent sticky paper — legacy color of notes peeled from the old pad.
+    #[cfg(test)]
     pub fn sticky_yellow(&self) -> Color32 {
         let y = self.yellow();
         let t = 0.88;
