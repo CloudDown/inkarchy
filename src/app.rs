@@ -5171,15 +5171,13 @@ impl InkarchyApp {
                     StrokeKind::Inside,
                 );
                 // Hairlines keep each cluster of the instrument distinct.
-                let mut dividers = vec![
-                    ((separate.right() + flow.left()) * 0.5, row_a),
-                    (
-                        (paper_end + tone_left) * 0.5,
-                        if wide { row_a } else { row_b },
-                    ),
-                ];
+                // On a single row the gaps are tight enough for hairlines
+                // around every cluster; on two rows the shapes separate the
+                // surface row on their own.
+                let mut dividers = vec![((separate.right() + flow.left()) * 0.5, row_a)];
                 if wide {
                     dividers.push(((flow.right() + paper_x) * 0.5, row_a));
+                    dividers.push(((paper_end + tone_left) * 0.5, row_a));
                 }
                 for (x, row_y) in dividers {
                     p.vline(
