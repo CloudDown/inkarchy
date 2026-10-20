@@ -103,6 +103,7 @@ impl Transport {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn analyze(
         &self,
         settings: &AiSettings,

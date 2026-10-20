@@ -296,9 +296,11 @@ fn corrupt_exercise_background_is_not_silently_replaced_by_blank_paper() {
 #[test]
 #[ignore = "Requires an installed local vision model and an Ollama server"]
 fn live_local_coach_smoke() {
-    let mut settings = AiSettings::default();
-    settings.local_model = std::env::var("INKARCHY_AI_TEST_MODEL")
-        .unwrap_or_else(|_| AiSettings::default().local_model);
+    let settings = AiSettings {
+        local_model: std::env::var("INKARCHY_AI_TEST_MODEL")
+            .unwrap_or_else(|_| AiSettings::default().local_model),
+        ..AiSettings::default()
+    };
     check_connection(&settings, "").expect("local vision model available");
     let client = provider::Transport::new().unwrap();
     let epoch = AtomicU64::new(0);

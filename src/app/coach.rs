@@ -54,8 +54,8 @@ impl InkarchyApp {
                 self.coach.session.invalidate(Instant::now());
             }
         }
-        let uses_api = (self.coach_enabled() && self.lib.index.ai.provider == Provider::Gemini)
-            || (self.coach.open && self.lib.index.ai.provider == Provider::Gemini);
+        let uses_api = (self.coach_enabled() || self.coach.open)
+            && self.lib.index.ai.provider == Provider::Gemini;
         if uses_api && self.coach.key.is_empty() && !self.coach.keyring_attempted {
             self.coach.keyring_attempted = true;
             self.coach.keyring = Some(CredentialJob::start(CredentialAction::Load, ctx));

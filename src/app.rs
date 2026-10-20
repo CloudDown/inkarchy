@@ -4714,6 +4714,7 @@ impl InkarchyApp {
 
     /// Long-press on empty page paper opens Pages manage mode.
     /// True means this frame belongs to the hold, not the tool.
+    #[allow(clippy::too_many_arguments)]
     fn take_pages_manage_hold(
         &mut self,
         ui: &Ui,
@@ -5054,7 +5055,7 @@ impl InkarchyApp {
         let width = if wide {
             840.0
         } else {
-            (canvas.width() - 16.0).min(620.0).max(280.0)
+            (canvas.width() - 16.0).clamp(280.0, 620.0)
         };
         let compact = !wide && width < 450.0;
         let pad = if wide {
@@ -5472,7 +5473,7 @@ impl InkarchyApp {
                 .memory_mut(|memory| memory.surrender_focus(Id::new("pdf-search-input")));
             return None;
         }
-        let width = ui.available_width().min(420.0).max(1.0);
+        let width = ui.available_width().clamp(1.0, 420.0);
         let (outer, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
         ui.ctx()
             .data_mut(|d| d.insert_temp(Id::new("pdf-search-field-rect"), outer));
@@ -6187,9 +6188,8 @@ impl InkarchyApp {
                             let menu_right = right_dock
                                 .map(|dock| dock.left() - 10.0)
                                 .unwrap_or(more.rect.right());
-                            let menu_width = (menu_right - ctx.screen_rect().left() - 32.0)
-                                .min(312.0)
-                                .max(120.0);
+                            let menu_width =
+                                (menu_right - ctx.screen_rect().left() - 32.0).clamp(120.0, 312.0);
                             let mut popup = Popup::menu(&more)
                                 .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
                                 .frame(self.note_popup_frame().fill(self.look.paper));
@@ -7822,7 +7822,7 @@ impl InkarchyApp {
         }
         if self.take_pages_manage_hold(
             ui,
-            &resp,
+            resp,
             rect,
             &mut screen,
             pen_ink && pen.pressed,

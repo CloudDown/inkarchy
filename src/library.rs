@@ -702,9 +702,11 @@ mod tests {
         assert!(old.parked_tools.is_empty());
         assert!(old.custom_inks.is_empty());
 
-        let mut index = Index::default();
-        index.parked_tools = vec![Tool::Text, Tool::EraserStroke];
-        index.custom_inks = vec![[25, 80, 160]];
+        let index = Index {
+            parked_tools: vec![Tool::Text, Tool::EraserStroke],
+            custom_inks: vec![[25, 80, 160]],
+            ..Index::default()
+        };
         let encoded = serde_json::to_vec(&index).expect("encode index");
         let decoded: Index = serde_json::from_slice(&encoded).expect("decode index");
         assert_eq!(decoded.parked_tools, index.parked_tools);
