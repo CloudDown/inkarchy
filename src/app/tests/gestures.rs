@@ -323,20 +323,11 @@ fn held_tool_opens_settings_and_all_swatches_have_finger_sized_targets() {
     app.open_note(id);
     let mut frames = Frames::new(app);
     frames.settle(app);
-    let fill = app.tool_well_fill(Tool::Pencil, false);
     let target = frames
-        .output
-        .as_ref()
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", Tool::Pencil))))
         .unwrap()
-        .shapes
-        .iter()
-        .find_map(|s| match &s.shape {
-            Shape::Rect(r) if r.fill == fill && (r.rect.width() - 40.0).abs() < 0.1 => {
-                Some(r.rect.center())
-            }
-            _ => None,
-        })
-        .unwrap();
+        .center();
     frames.touch(app, TouchPhase::Start, target);
     frames.time += 0.7;
     frames.step(app, vec![]);
@@ -346,37 +337,31 @@ fn held_tool_opens_settings_and_all_swatches_have_finger_sized_targets() {
     assert_eq!(app.tool, Tool::Pencil);
     assert!(
         app.tin_open,
-        "long press opens the colour wheel without a follow-up click"
+        "long press opens size settings without a follow-up click"
     );
+    assert_eq!(app.ink_panel_view, InkPanelView::Nib);
+    assert!(!app.color_mixer_open);
     frames.snapshot("touch-tool-settings");
     app.tool = Tool::EraserArea;
     app.last_eraser = Tool::EraserArea;
     app.width = 27.0;
     app.tin_open = false;
     frames.settle(app);
-    let fill = app.tool_well_fill(Tool::EraserArea, true);
     let eraser = frames
-        .output
-        .as_ref()
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", Tool::EraserStroke))))
         .unwrap()
-        .shapes
-        .iter()
-        .find_map(|s| match &s.shape {
-            Shape::Rect(r) if r.fill == fill && (r.rect.width() - 40.0).abs() < 0.1 => {
-                Some(r.rect.center())
-            }
-            _ => None,
-        })
-        .unwrap();
+        .center();
     frames.touch(app, TouchPhase::Start, eraser);
     frames.time += 0.4;
     frames.step(app, vec![]);
-    assert!(!app.tin_open, "eraser hold does not open the colour wheel");
+    assert!(app.tin_open, "eraser hold opens size settings");
+    assert_eq!(app.ink_panel_view, InkPanelView::Nib);
     assert_eq!(app.width, 27.0, "eraser hold preserves its width");
     frames.time += 0.5;
     frames.step(app, vec![]);
     assert!(
-        !app.tin_open,
+        app.tin_open,
         "a hold fires once, including egui's later long-touch event"
     );
     frames.touch(app, TouchPhase::End, eraser);
@@ -390,9 +375,113 @@ fn held_tool_opens_settings_and_all_swatches_have_finger_sized_targets() {
         let _ = ctx.run(RawInput::default(), |ctx| {
             CentralPanel::default().show(ctx, |ui| {
                 let well = app.ink_well(ui, false);
-                assert_eq!(well.rect.size(), vec2(44.0, 44.0), "vertical={vertical}");
+                assert_eq!(well.rect.size(), vec2(48.0, 48.0), "vertical={vertical}");
             });
         });
+    }
+}
+
+#[test]
+fn toolbar_touch_swipes_scroll_without_storing_or_drawing() {
+    for (edge, size, delta) in [
+        (DockEdge::Bottom, vec2(360.0, 500.0), vec2(-80.0, 0.0)),
+        (DockEdge::Right, vec2(500.0, 360.0), vec2(0.0, -80.0)),
+    ] {
+        let mut fixture = Fixture::new();
+        let id = fixture.notebook("Swipe tools");
+        let app = &mut fixture.app;
+        app.open_note(id);
+        app.dock_edge = edge;
+        let mut frames = Frames::new(app);
+        frames.size = size;
+        frames.settle(app);
+        let rect = |frames: &Frames, tool| {
+            frames
+                .ctx
+                .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", tool))))
+                .unwrap()
+        };
+        let before = rect(&frames, Tool::Fineliner);
+        let from = rect(&frames, Tool::Brush).center();
+        let tool = app.tool;
+        let pages = serde_json::to_value(&app.note.as_ref().unwrap().pages).unwrap();
+        frames.touch(app, TouchPhase::Start, from);
+        for fraction in [0.2, 0.5, 0.8, 1.0] {
+            frames.touch(app, TouchPhase::Move, from + delta * fraction);
+        }
+        frames.touch(app, TouchPhase::End, from + delta);
+        frames.settle(app);
+        let after = rect(&frames, Tool::Fineliner);
+        let moved = if edge.vertical() {
+            before.top() - after.top()
+        } else {
+            before.left() - after.left()
+        };
+        assert!(moved > 40.0, "{edge:?}: swipe scrolls tools, moved {moved}");
+        assert!(!app.ink_panel_open());
+        assert!(app.dock_tool_drag.is_none() && app.parked_tools.is_empty());
+        assert_eq!(app.tool, tool, "swiping never selects a tool");
+        assert_eq!(
+            serde_json::to_value(&app.note.as_ref().unwrap().pages).unwrap(),
+            pages
+        );
+    }
+}
+
+#[test]
+fn active_pen_tap_opens_spaced_touch_size_presets() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Tap for size");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    for tool in [
+        Tool::Fineliner,
+        Tool::Brush,
+        Tool::Pencil,
+        Tool::Highlighter,
+    ] {
+        app.tool = tool;
+        app.set_ink_panel(true);
+        app.ink_panel_view = InkPanelView::Colors;
+        app.color_mixer_open = true;
+        frames.settle(app);
+        let pen = frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", tool))))
+            .unwrap();
+        assert_eq!(pen.size(), Vec2::splat(48.0));
+        frames.touch(app, TouchPhase::Start, pen.center());
+        frames.touch(app, TouchPhase::End, pen.center());
+        frames.settle(app);
+        assert_eq!(app.ink_panel_view, InkPanelView::Nib);
+        assert!(app.ink_panel_open() && !app.color_mixer_open);
+        let hit = frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new("nib-hit")))
+            .unwrap();
+        assert!(hit.height() >= 48.0);
+        let mut previous: Option<Rect> = None;
+        for (i, width) in [1.0, 2.5, 6.0, 12.0].into_iter().enumerate() {
+            let preset = frames
+                .ctx
+                .data(|d| d.get_temp::<Rect>(Id::new(("nib-preset", i))))
+                .unwrap();
+            assert_eq!(preset.size(), Vec2::splat(48.0));
+            assert!(!hit.intersects(preset));
+            if let Some(previous) = previous {
+                assert!(preset.left() - previous.right() >= 4.0);
+            }
+            frames.touch(app, TouchPhase::Start, preset.center());
+            frames.touch(app, TouchPhase::End, preset.center());
+            assert_eq!(app.width, width);
+            assert_eq!(app.last_ink_width, width);
+            previous = Some(preset);
+        }
+        frames.touch(app, TouchPhase::Start, pen.center());
+        frames.touch(app, TouchPhase::End, pen.center());
+        assert!(!app.ink_panel_open(), "tap again closes size settings");
+        assert_eq!(app.tool, tool);
     }
 }
 

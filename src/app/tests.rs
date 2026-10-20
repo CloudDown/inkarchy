@@ -1102,9 +1102,29 @@ fn responsive_note_controls_do_not_overlap_through_resizes() {
             vec2(600.0, 400.0),
         ] {
             frames.size = size;
-            for accessory in 0..2 {
-                app.tin_open = accessory == 1;
+            let mut palette_rect: Option<Rect> = None;
+            for accessory in 0..5 {
+                app.set_ink_panel(accessory != 0);
+                app.ink_panel_view = match accessory {
+                    2 => InkPanelView::Nib,
+                    3 => InkPanelView::Tools,
+                    _ => InkPanelView::Colors,
+                };
+                app.color_mixer_open = accessory == 4;
                 frames.settle(app);
+                let panel = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("tin-rect")));
+                if accessory == 1 {
+                    palette_rect = panel;
+                } else if accessory == 4 {
+                    let palette = palette_rect.unwrap();
+                    let mixer = panel.unwrap();
+                    assert!((palette.height() - mixer.height()).abs() < 1.0,
+                        "{edge:?} {size:?}: palette {palette:?} and mixer {mixer:?} keep the same height");
+                    assert!(
+                        palette.min.distance(mixer.min) < 1.0,
+                        "switching between colors and mixer keeps the panel in place"
+                    );
+                }
                 let screen = Rect::from_min_size(Pos2::ZERO, size);
                 let controls: Vec<_> = ["top-rect", "dock-rect", "tin-rect"]
                     .into_iter()
@@ -1991,12 +2011,48 @@ fn pages_edit_replaces_the_header_with_a_canvas_tray() {
     );
     frames.snapshot("pages-edit-tray");
     let size = frames.size;
-    frames.size = vec2(700.0, 640.0);
-    frames.settle(app);
-    frames.snapshot("pages-edit-tray-two-rows");
-    frames.size = vec2(420.0, 640.0);
-    frames.settle(app);
-    frames.snapshot("pages-edit-tray-compact");
+    for (window, artifact) in [
+        (size, "pages-edit-tray"),
+        (vec2(700.0, 640.0), "pages-edit-tray-two-rows"),
+        (vec2(420.0, 640.0), "pages-edit-tray-compact"),
+        (vec2(320.0, 640.0), "pages-edit-tray-narrow"),
+    ] {
+        frames.size = window;
+        frames.settle(app);
+        frames.snapshot(artifact);
+        let tray = frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new("pages-strip-rect")))
+            .unwrap();
+        assert!(
+            app.canvas_rect.contains_rect(tray),
+            "tray fits at {window:?}"
+        );
+        let mut controls: Vec<Rect> = Vec::new();
+        let ids = ["Linked", "Separate", "Done"]
+            .map(|name| Id::new(("strip-tray", name)))
+            .into_iter()
+            .chain(["1", "2", "3", "4", "all"].map(|name| Id::new(("strip-columns", name))))
+            .chain(PaperKind::ALL.map(|kind| Id::new(("strip-paper", kind.label()))))
+            .chain(["White", "Sand", "Black"].map(|name| Id::new(("strip-tone", name))));
+        for id in ids {
+            let target = frames
+                .ctx
+                .data(|d| d.get_temp::<Rect>(id))
+                .expect("visible edit control");
+            assert!(
+                tray.contains_rect(target),
+                "control stays inside tray at {window:?}"
+            );
+            assert!(
+                !controls
+                    .iter()
+                    .any(|other| other.intersects(target.shrink(0.1))),
+                "controls cannot overlap at {window:?}"
+            );
+            controls.push(target);
+        }
+    }
     frames.size = size;
     frames.settle(app);
     let strip = frames
@@ -2057,6 +2113,18 @@ fn pdf_pages_can_be_arranged_horizontally_or_two_per_row() {
         (
             Id::new(("strip-columns", "2")),
             vec![(0, 0), (1, 0), (0, 1), (1, 1), (0, 2)],
+        ),
+        (
+            Id::new(("strip-columns", "3")),
+            vec![(0, 0), (1, 0), (2, 0), (0, 1), (1, 1)],
+        ),
+        (
+            Id::new(("strip-columns", "4")),
+            vec![(0, 0), (1, 0), (2, 0), (3, 0), (0, 1)],
+        ),
+        (
+            Id::new(("strip-columns", "1")),
+            vec![(0, 0), (0, 1), (0, 2), (0, 3), (0, 4)],
         ),
     ] {
         let target = frames
@@ -2132,32 +2200,79 @@ fn ink_tin_keeps_color_picking_and_fits_after_resize() {
         .ctx
         .data(|d| d.get_temp::<Rect>(Id::new("tin-wheel")))
         .is_none());
+    let palette = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("tin-rect")))
+        .unwrap();
+    let first = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("ink-swatch", 0))))
+        .unwrap();
+    let next = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("ink-swatch", 1))))
+        .unwrap();
+    assert!(
+        palette.width() <= 66.0,
+        "colors form a narrow dock extension"
+    );
+    assert!((first.center().x - next.center().x).abs() < 1.0);
+    assert_eq!(first.size(), Vec2::splat(36.0));
+    assert!(
+        next.top() >= first.bottom(),
+        "swatches follow one vertical column"
+    );
     frames.snapshot("ink-swatches");
     let add = frames
         .ctx
         .data(|d| d.get_temp::<Rect>(Id::new("ink-add-color")))
         .unwrap();
+    assert_eq!(add.size(), Vec2::splat(48.0));
     frames.drag(app, add.center(), add.center());
     frames.settle(app);
     assert!(app.color_mixer_open);
-    let wheel = frames
+    let mixer = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("tin-rect")))
+        .unwrap();
+    assert!(
+        mixer.width() <= 66.0,
+        "mixer replaces the same narrow column"
+    );
+    assert!((mixer.center().x - palette.center().x).abs() < 1.0);
+    assert!(frames
         .ctx
         .data(|d| d.get_temp::<Rect>(Id::new("tin-wheel")))
+        .is_none());
+    let hue = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("ink-slider", 0))))
         .unwrap();
-    let geom = ink_wheel_geom(wheel);
-    let hue_at = geom.hue_pos(0.25);
+    let sat = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("ink-slider", 1))))
+        .unwrap();
+    let hue_at = pos2(
+        hue.center().x,
+        hue.top() + 16.0 + (hue.height() - 21.0) * 0.25,
+    );
     frames.drag(app, hue_at, hue_at);
     assert!(
         (app.tin_hue - 0.25).abs() < 0.04,
-        "hue ring sets tin_hue, got {}",
+        "hue slider sets tin_hue, got {}",
         app.tin_hue
     );
     assert!(app.tin_open);
-    let sv = geom.sv_pos(0.65, 0.8);
-    frames.touch(app, TouchPhase::Start, sv);
-    frames.touch(app, TouchPhase::End, sv);
-    let expect = hsv_to_rgb(app.tin_hue, 0.65, 0.8);
-    assert_eq!(app.ink, expect);
+    let saturation = pos2(
+        sat.center().x,
+        sat.top() + 16.0 + (sat.height() - 21.0) * 0.65,
+    );
+    frames.touch(app, TouchPhase::Start, saturation);
+    frames.touch(app, TouchPhase::End, saturation);
+    let expect = hsv_to_rgb(app.tin_hue, 1.0, 0.7);
+    assert!((app.ink.r() as i16 - expect.r() as i16).abs() <= 2);
+    assert!((app.ink.g() as i16 - expect.g() as i16).abs() <= 2);
+    assert!((app.ink.b() as i16 - expect.b() as i16).abs() <= 2);
     assert!(app.tin_open);
     frames.settle(app);
     let tin = frames
@@ -2172,6 +2287,14 @@ fn ink_tin_keeps_color_picking_and_fits_after_resize() {
         !tin.shrink(0.5).intersects(dock),
         "colour wheel must not cover the tools"
     );
+    let well = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("ink-well-rect")))
+        .unwrap();
+    assert!(
+        (tin.center().x - well.center().x).abs() < 4.0,
+        "ink case should emerge beside the ink well"
+    );
     frames.snapshot("ink-tin");
     frames.size = vec2(900.0, 500.0);
     frames.settle(app);
@@ -2180,20 +2303,25 @@ fn ink_tin_keeps_color_picking_and_fits_after_resize() {
         .data(|d| d.get_temp::<Rect>(Id::new("tin-rect")))
         .unwrap();
     assert!(Rect::from_min_size(Pos2::ZERO, frames.size).contains_rect(tin));
-    frames.snapshot("ink-tin-short");
-    frames.size = vec2(1280.0, 860.0);
-    frames.settle(app);
     let save = frames
         .ctx
         .data(|d| d.get_temp::<Rect>(Id::new("ink-save-color")))
         .unwrap();
+    assert_eq!(save.size(), Vec2::splat(48.0));
+    assert!(
+        tin.contains_rect(save),
+        "save stays visible in a short window"
+    );
+    frames.snapshot("ink-tin-short");
     frames.touch(app, TouchPhase::Start, save.center());
     frames.touch(app, TouchPhase::End, save.center());
+    frames.size = vec2(1280.0, 860.0);
     frames.settle(app);
     assert!(!app.color_mixer_open);
+    let saved_ink = app.ink;
     assert_eq!(
         app.lib.index.custom_inks,
-        vec![[expect.r(), expect.g(), expect.b()]]
+        vec![[saved_ink.r(), saved_ink.g(), saved_ink.b()]]
     );
     app.save_ink_swatch();
     assert_eq!(
@@ -2210,7 +2338,7 @@ fn ink_tin_keeps_color_picking_and_fits_after_resize() {
         .unwrap();
     app.pick_free_ink(Color32::RED);
     frames.drag(app, custom.center(), custom.center());
-    assert_eq!(app.ink, expect, "saved colors can be selected again");
+    assert_eq!(app.ink, saved_ink, "saved colors can be selected again");
     frames.snapshot("ink-custom-swatch");
     frames.key(app, Key::Escape);
     assert!(!app.tin_open);
@@ -2286,6 +2414,15 @@ fn tools_can_be_stored_and_restored_by_dragging_between_panel_and_dock() {
         } else {
             "storage-mouse"
         });
+        frames.key(app, Key::Escape);
+        frames.settle(app);
+        let storage_button = frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new("dock-storage-button")))
+            .unwrap();
+        frames.drag(app, storage_button.center(), storage_button.center());
+        frames.settle(app);
+        assert_eq!(app.ink_panel_view, InkPanelView::Tools);
         let stored = frames
             .ctx
             .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", tool))))
@@ -2309,6 +2446,56 @@ fn tools_can_be_stored_and_restored_by_dragging_between_panel_and_dock() {
         assert!(app.lib.index.parked_tools.is_empty());
         assert!(app.dock_tool_drag.is_none());
     }
+}
+
+#[test]
+fn storage_expands_only_when_more_than_three_tools_are_parked() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Compact storage");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    app.parked_tools.extend(PARKABLE_TOOLS.into_iter().take(4));
+    app.set_ink_panel(true);
+    app.ink_panel_view = InkPanelView::Tools;
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let storage = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-tool-storage-rect")))
+        .unwrap();
+    assert!(storage.height() >= 108.0, "fourth tool has a second row");
+    let third = PARKABLE_TOOLS[3];
+    let well = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", third))))
+        .unwrap();
+    assert!(
+        storage.contains_rect(well),
+        "last stored tool remains visible"
+    );
+    frames.drag(app, well.center(), well.center());
+    assert!(!app.parked_tools.contains(&third));
+    frames.settle(app);
+    let storage = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-tool-storage-rect")))
+        .unwrap();
+    assert!(storage.height() <= 72.0, "three tools fit on one row");
+
+    app.parked_tools.extend(PARKABLE_TOOLS);
+    frames.settle(app);
+    let storage = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-tool-storage-rect")))
+        .unwrap();
+    let last = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", Tool::Image))))
+        .unwrap();
+    assert!(
+        storage.contains_rect(last),
+        "all eight tools remain accessible"
+    );
 }
 
 #[test]
@@ -2355,66 +2542,69 @@ fn hand_tool_is_available_and_owns_object_manipulation() {
 }
 
 #[test]
-fn ink_fields_use_continuous_meshes() {
-    let ctx = Context::default();
-    let output = ctx.run(RawInput::default(), |ctx| {
-        let painter = ctx.layer_painter(LayerId::background());
-        paint_sv_disk(&painter, pos2(102.0, 102.0), 96.0, 0.5);
-        paint_hue_ring(&painter, pos2(102.0, 102.0), 108.0, 136.0);
-    });
-    let meshes: Vec<_> = output
-        .shapes
-        .iter()
-        .filter_map(|shape| {
-            if let Shape::Mesh(mesh) = &shape.shape {
-                Some(mesh)
-            } else {
-                None
-            }
-        })
-        .collect();
-    assert_eq!(meshes.len(), 2, "one continuous mesh per colour field");
-    for mesh in &meshes {
-        assert!(mesh.is_valid());
+fn ink_tone_slider_reaches_white_color_and_black() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Precise ink");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    app.set_ink_panel(true);
+    app.color_mixer_open = true;
+    app.pick_free_ink(hsv_to_rgb(0.42, 0.2, 0.3));
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let channel_at = |frames: &Frames, channel: usize, value| {
+        let rect = frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new(("ink-slider", channel))))
+            .unwrap();
+        assert!(rect.width() >= 48.0);
+        pos2(
+            rect.center().x,
+            rect.top() + 16.0 + (rect.height() - 21.0) * value,
+        )
+    };
+    let hue = app.tin_hue;
+    for (tone, expected) in [
+        (0.0, Color32::WHITE),
+        (0.5, hsv_to_rgb(hue, 1.0, 1.0)),
+        (1.0, Color32::BLACK),
+        (0.5, hsv_to_rgb(hue, 1.0, 1.0)),
+    ] {
+        let point = channel_at(&frames, 1, tone);
+        frames.touch(app, TouchPhase::Start, point);
+        frames.touch(app, TouchPhase::End, point);
+        for (actual, expected) in app.ink.to_array().into_iter().zip(expected.to_array()) {
+            assert!((actual as i16 - expected as i16).abs() <= 2);
+        }
     }
-    let wash = &meshes[0].vertices;
-    assert!(
-        wash.iter()
-            .any(|v| v.color.r() < 12 && v.color.g() < 12 && v.color.b() < 12),
-        "the wash still reaches black"
-    );
-    assert!(
-        wash.iter()
-            .any(|v| v.color.r() as u16 + v.color.g() as u16 + v.color.b() as u16 > 600),
-        "the wash still reaches a light tint"
-    );
-    assert_eq!(
-        meshes[1].vertices.first().unwrap().color,
-        meshes[1].vertices.last().unwrap().color
-    );
+    assert!(frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("ink-slider", 2_usize))))
+        .is_none());
 }
 
 #[test]
-fn nib_slider_sets_width_below_color_presets() {
+fn nib_options_remain_available_outside_the_color_palette() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Nib");
     let app = &mut fixture.app;
     app.open_note(id);
     app.width = 2.0;
     app.nib_open = true;
+    app.ink_panel_view = InkPanelView::Nib;
     let mut frames = Frames::new(app);
     frames.settle(app);
+    frames.snapshot("ink-palette");
     let track = frames
         .ctx
         .data(|d| d.get_temp::<Rect>(Id::new("nib-track")))
         .unwrap();
-    let tin = frames
-        .ctx
-        .data(|d| d.get_temp::<Rect>(Id::new(("ink-swatch", 8))))
-        .expect("color preset");
     assert!(
-        track.top() >= tin.bottom() - 1.0,
-        "nib slip sits under the colour saucer"
+        frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new("dock-tool-storage-rect")))
+            .is_none(),
+        "storage stays out of the ink palette"
     );
     assert!(
         track.width() > track.height(),
@@ -2434,23 +2624,52 @@ fn nib_slider_sets_width_below_color_presets() {
         "the thin end stays a hairline, got {}",
         app.width
     );
-    let nib = frames
+    let preset = frames
         .ctx
-        .data(|d| d.get_temp::<Rect>(Id::new("nib-rect")))
-        .unwrap();
-    let storage = frames
-        .ctx
-        .data(|d| d.get_temp::<Rect>(Id::new("dock-tool-storage-rect")))
-        .unwrap();
-    assert!(
-        nib.bottom() <= storage.top(),
-        "storage must not cover the width slider"
-    );
-    let preset = nib.min + vec2(2.0 * 52.0 + 22.0, 22.0);
+        .data(|d| d.get_temp::<Rect>(Id::new(("nib-preset", 2_usize))))
+        .unwrap()
+        .center();
     frames.touch(app, TouchPhase::Start, preset);
     frames.touch(app, TouchPhase::End, preset);
     assert_eq!(app.width, 6.0);
     assert_eq!(app.last_ink_width, 6.0);
+    assert!(frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("ink-add-color")))
+        .is_none());
+    let back = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("ink-panel-back")))
+        .unwrap();
+    frames.drag(app, back.center(), back.center());
+    frames.settle(app);
+    assert!(frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("ink-swatch", 8))))
+        .is_some());
+    assert!(frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("nib-track")))
+        .is_none());
+    let add = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("ink-add-color")))
+        .unwrap();
+    frames.drag(app, add.center(), add.center());
+    frames.settle(app);
+    assert!(app.color_mixer_open);
+    let back = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("ink-mixer-back")))
+        .unwrap();
+    frames.drag(app, back.center(), back.center());
+    frames.settle(app);
+    assert!(!app.color_mixer_open);
+    assert_eq!(app.ink_panel_view, InkPanelView::Colors);
+    assert!(frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("tin-wheel")))
+        .is_none());
     frames.key(app, Key::Escape);
     assert!(!app.nib_open);
 }
@@ -2566,7 +2785,7 @@ fn colored_note_tools_preserve_ink_and_support_mouse_and_touch() {
             .iter()
             .find_map(|shape| {
                 if let Shape::Rect(rect) = &shape.shape {
-                    if rect.fill == fill && (rect.rect.width() - 40.0).abs() < 0.1 {
+                    if rect.fill == fill && (rect.rect.width() - 44.0).abs() < 0.1 {
                         return Some(rect.rect.center());
                     }
                 }
@@ -2614,6 +2833,21 @@ fn colored_note_tools_preserve_ink_and_support_mouse_and_touch() {
             !tin.shrink(0.5).intersects(dock),
             "colour wheel must not cover the tools"
         );
+        let well = frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new("ink-well-rect")))
+            .unwrap();
+        if edge.vertical() {
+            assert!(
+                tin.top() <= well.center().y && tin.bottom() >= well.center().y,
+                "colour column follows the dock down to the ink well"
+            );
+        } else {
+            assert!(
+                (tin.center().x - well.center().x).abs() < 12.0,
+                "colour column emerges from the ink well"
+            );
+        }
         frames.snapshot(if touch {
             "note-colors-vertical"
         } else {
@@ -3613,7 +3847,7 @@ fn tool_storage_handles_small_screens_cancel_and_tap_to_restore() {
         .data(|d| d.get_temp::<Rect>(Id::new("dock-tool-storage-rect")))
         .unwrap();
     assert!(
-        storage.height() > 80.0,
+        storage.height() >= 48.0,
         "tray scrolls into view while carrying a tool: {storage:?}"
     );
     frames.touch(app, TouchPhase::Move, storage.center());

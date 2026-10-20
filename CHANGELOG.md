@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.0 — 2026-10-20
+
+### Added
+- The ink case shows a colour column: tap the ink drop to pick a saved colour, or **+** for a mixer with a rainbow hue slider and one continuous white–colour–black slider. The check saves the custom colour; the back arrow returns to the swatches.
+- Swipe along the toolbar to reach tools on a small screen. Pull a tool across the toolbar to open its storage tray and release it there to park it; the tray keeps three slots and grows only when more tools are stored, and its button sits on the toolbar while tools are parked.
+
+### Changed
+- Toolbar wells and size controls use 48 px touch targets, with compact 36 px colour swatches showing more choices in the column. Tapping the active pen again, or holding a pen or eraser, opens the four size presets and the fine slider.
+- The guide no longer documents the retired sticky pad or the removed coach setup controls; it now explains the single coach switch and where its settings live.
+
+### Removed
+- The circular ink wheel; the mixer now uses two sliders.
+
 ## 0.4.0 — 2026-10-19
 
 ### Added

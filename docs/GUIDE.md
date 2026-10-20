@@ -10,12 +10,14 @@ Your notes stay on your computer in `~/.local/share/inkarchy`. Writing needs no 
 
 ### Exercise coach
 
-Click the **graduation cap** beside the paper style button, or **Notebook menu → Exercise coach**. Enable it for the current notebook; the choice is remembered. The long, thin bar beside the cap shows feedback on the latest completed, readable maths or physics step. Click the bar to see what it read and a short explanation, without revealing the solution. If the statement is on another page, select that page in the coach panel. On narrow windows, the notebook title can be edited from the notebook menu.
+Click the **graduation cap** beside the toolbar, or **Notebook menu → Exercise coach**. The panel has one switch, **Coach this book**; the choice is remembered for that notebook. Once on, the slim bar under the cap shows a qualitative verdict on the latest completed, readable maths or physics step: on track, check this step, possible error, or not enough information. It is an estimate, not a grade.
 
-- **Local · Ollama:** run Ollama on this computer and install a vision model with `ollama pull qwen3-vl:4b-instruct`. Enter its name and click **Test connection**, then **Apply settings**. Use an explicit Instruct variant: Thinking variants may consume the short response budget before producing a verdict. The first analysis includes model loading; CPU-only inference can be too slow for continuous feedback. There is no automatic switch to a remote provider.
-- **API · Gemini:** select the provider, enter a Gemini API key and choose **Use for session** or **Save in keyring**, then apply the settings. The default model is `gemini-3.5-flash-lite`. Enabled notebooks send the current page, response crops and any selected reference to Google; provider charges and data policies apply. Keys are never stored in notebook files or `library.json`. Saving a key uses Secret Service through `secret-tool` (`libsecret` on Arch); if the keyring is unavailable, the session option still works.
+The coach reads the `ai` block of `~/.local/share/inkarchy/library.json`: `provider` (`"Ollama"` or `"Gemini"`), `local_url`, `local_model` and `api_model`.
 
-The meter is a qualitative estimate, not a grade or probability. Unfinished formulas, unclear handwriting and missing statements stay neutral. Corrections invalidate the previous evaluation. Analysis runs in the background, starts after a short writing pause and samples continuous writing at most once every 1.2 seconds, using completed strokes. It makes no further requests while the page is unchanged. Provider errors suspend requests until **Retry analysis**; they do not interrupt writing. Timing details are available in the panel.
+- **Local · Ollama:** run Ollama on this computer and install a vision model with `ollama pull qwen3-vl:4b-instruct`. Use an explicit Instruct variant: Thinking variants may consume the short response budget before producing a verdict. The first analysis includes model loading; CPU-only inference can be too slow for continuous feedback. There is no automatic switch to a remote provider.
+- **API · Gemini:** store a key with `secret-tool store --label="Inkarchy Gemini API key" application inkarchy service gemini`, then set `"provider": "Gemini"`. Enabled notebooks send the current page to Google; provider charges and data policies apply. Keys are never stored in notebook files or `library.json`.
+
+Analysis runs in the background, starts after a short writing pause and samples continuous writing at most once every 1.2 seconds, using completed strokes. It makes no further requests while the page is unchanged. Unfinished formulas, unclear handwriting and missing statements stay neutral, and corrections invalidate the previous evaluation. Provider errors pause requests without interrupting writing.
 
 The optional local smoke test uses a synthetic vector-ink exercise, never your notebooks:
 
@@ -48,14 +50,6 @@ Choose lined, Cornell, grid, dotted, graph, or blank paper. The paper panel also
 
 <p align="center">
   <img src="screens/millimetre.png" alt="Graph paper and drawing tools" width="80%">
-</p>
-
-### Lectern objects
-
-Drag the sticky pad onto the page; hold a sticky for its color.
-
-<p align="center">
-  <img src="screens/sticky-notes.png" alt="Sticky notes on a dotted page" width="80%">
 </p>
 
 ### A shelf and a bin
@@ -164,9 +158,13 @@ windowrule = float, class:^(com\.clouddown\.inkarchy)$
 
 The lectern follows the stylus: in range, the hand pans and the nib writes. Put it down, the mouse writes again.
 
-Choose the Hand tool (`v`) to select, move, and resize page objects with the mouse or one finger. Its corner handles resize the selection. The Lasso tool only selects a group by drawing around it. `ctrl+d` duplicates the selection and `delete` removes it. Images switch to the Hand tool and are selected as soon as they are inserted. In Pages mode, tap an image’s red `−` mark to remove it, like a sticky note.
+Choose the Hand tool (`v`) to select, move, and resize page objects with the mouse or one finger. Its corner handles resize the selection. The Lasso tool only selects a group by drawing around it. `ctrl+d` duplicates the selection and `delete` removes it. Images switch to the Hand tool and are selected as soon as they are inserted. In Pages mode, tap an image’s red `−` mark to remove it.
 
-A finger on empty paper pans the canvas; two fingers pan even when something is selected. On the trackpad, two-finger drag scrolls and two-finger pinch zooms from finger distance (one finger may stay still while the other moves in or out). If the pad ignores a resting finger, use ctrl + two-finger scroll to zoom. Three-finger swipe is left to the desktop (workspace switching). On the screen, pinch still zooms. Choose **Draw with finger** in the notebook menu to use the pens by touch. The erasers and lasso work with a finger directly. Double-tap text to type. Double-tap a sticky to open it large for drawing with the dock; choose the Text tool to type. One tap leaves it on the page. Hold a sticky for its colour. Hold a pen, or tap the ink dot, to open the ink case. Tap a color swatch to use it, or **+** to mix and save a custom color. Choose one of four stroke widths or use the slider for precise adjustment. Drag a tool into the storage tray below to hide it; drag it back to the toolbar, or tap the stored tool, to restore it. Dragging a tool opens the tray automatically. Custom colors and stored tools are remembered across restarts. The area eraser uses that same size; its on-screen brush stays steady, so zooming out covers more of the page.
+A finger on empty paper pans the canvas; two fingers pan even when something is selected. On the trackpad, two-finger drag scrolls and two-finger pinch zooms from finger distance (one finger may stay still while the other moves in or out). If the pad ignores a resting finger, use ctrl + two-finger scroll to zoom. Three-finger swipe is left to the desktop (workspace switching). On the screen, pinch still zooms. Choose **Draw with finger** in the notebook menu to use the pens by touch. The erasers and lasso work with a finger directly. Double-tap text to type.
+
+The toolbar and size controls use 48 px touch targets; compact 36 px color swatches show more choices in the column. Tap the active pen again, or hold a pen or eraser, to adjust its size with four presets and a precise slider. Tap the ink drop for the color column; **+** replaces the swatches with a rainbow slider and one continuous white–color–black slider. The checkmark saves the color; the back arrow returns to the swatches.
+
+Swipe along the toolbar to reach tools on a small screen. Pull a tool out across the toolbar to open its storage tray, then release it there to hide it. Tap the storage button to find hidden tools; tap a stored tool or drag it back to restore it. Drag the dotted grip to move the toolbar. Custom colors and stored tools are remembered across restarts. The area eraser uses the size setting; its on-screen brush stays steady, so zooming out covers more of the page.
 
 | | Mouse | Stylus in range |
 |---|---|---|
@@ -205,7 +203,7 @@ A finger on empty paper pans the canvas; two fingers pan even when something is 
 | Pages | show or hide the green `+` tabs and the red `−` on each page |
 | Long press empty paper | open Pages manage mode |
 | Tap a `+` | add a unit page on that edge |
-| Tap a `−` | tear that page off, or the sticky under that mark. A drag pans instead, and the press that opened Pages does not count |
+| Tap a `−` | tear that page off. A drag pans instead, and the press that opened Pages does not count |
 | Long press a page, then drag | move it into a neighbour `+` slot, or swap with another page |
 | Escape, or Pages again | hide the marks |
 | ⋯ → Linked / Separate | flush sheet vs gutter between pages |
