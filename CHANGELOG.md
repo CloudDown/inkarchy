@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.0 — 2026-10-19
+
+### Added
+- Optional **exercise coach**: opt-in local Ollama or Gemini vision evaluation of handwritten maths and physics steps, shown as a qualitative meter beside the dock. Off by default and remembered per notebook. The model defaults to `qwen3-vl:4b-instruct` on a local Ollama; provider and model live in `library.json`, and Gemini keys load from the system keyring. Gemini sends page images to Google.
+- Pages mode replaces the header with an on-paper edit tray: linked or separate sheets, column or row flow, two to five pages per row, paper kind, tone, and Done. A pen long press on a page enters Pages mode, and dragging a page onto a neighbour slot moves or swaps it.
+- Paper tones (white, theme default, black) with matching rules, margin ink, writing ink and export. The ink case saves custom colours, and tools can be parked in the dock storage tray; both survive restarts.
+- PDF pages render progressively from a quick preview to detail matched to zoom and display density, up to 432 dpi within a per-page pixel budget. Visible pages come first, off-screen queued work is discarded, and a texture LRU plus a lossless disk cache speed up revisits.
+- Poppler (`pdftoppm`) renders when already installed and streams PPM pixels without temporary files; the linked hayro renderer remains the fallback, so installation adds no PDF engine dependency.
+- [PDF rendering budgets and measurements](docs/PDF-PERFORMANCE.md), with an ignored `pdf_pipeline_benchmark` comparing the former and current pipeline.
+
+### Changed
+- The writing coach panel is a single **Coach this book** switch; the notebook menu and the PDF search box are tidier.
+- The emoji picker decodes 40 px glyphs so its grid fills faster, while folder spine marks keep 96 px.
+
+### Removed
+- The sticky note pad and its colour wheel, large sheet, colour choices and gestures. Existing notebooks still open, and legacy sticky text stays selectable, movable and removable like other text.
+
+### Fixed
+- The long-press ring is drawn outside the fingertip instead of under it.
+
 ## 0.3.1 — 2026-10-15
 
 ### Added
