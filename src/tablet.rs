@@ -118,6 +118,9 @@ impl Default for PenSnapshot {
 pub struct TabletBridge {
     inner: Option<Inner>,
     dead: bool,
+    /// Test-only stylus override: real Wayland state is unreachable in tests.
+    #[cfg(test)]
+    test_pen: Option<PenSnapshot>,
 }
 
 struct Inner {
@@ -166,7 +169,15 @@ impl TabletBridge {
         Self {
             inner: None,
             dead: false,
+            #[cfg(test)]
+            test_pen: None,
         }
+    }
+
+    /// Drive the stylus snapshot without Wayland (tests only).
+    #[cfg(test)]
+    pub(crate) fn set_test_pen(&mut self, pen: Option<PenSnapshot>) {
+        self.test_pen = pen;
     }
 
     pub fn ready(&self) -> bool {
@@ -208,6 +219,10 @@ impl TabletBridge {
     }
 
     pub fn snapshot(&self) -> PenSnapshot {
+        #[cfg(test)]
+        if let Some(pen) = &self.test_pen {
+            return pen.clone();
+        }
         let Some(inner) = self.inner.as_ref() else {
             return PenSnapshot::default();
         };

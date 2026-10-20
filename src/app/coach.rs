@@ -14,7 +14,8 @@ pub(super) struct CoachUi {
 impl InkarchyApp {
     pub(super) fn ui_coach_badge(&mut self, ctx: &Context) {
         let bounds = note_controls_bounds(ctx);
-        let dock = ctx.data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
+        let dock = ctx
+            .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
             .unwrap_or(Rect::from_center_size(bounds.center(), vec2(48.0, 48.0)));
         let badge = sticky_pad_place(dock, self.dock_layout_edge(), bounds);
         Area::new(Id::new("inkarchy-coach-badge"))
@@ -186,14 +187,25 @@ impl InkarchyApp {
         // Only the raised cap is visible; the 44px hit target has no button plate.
         let (rect, button) = ui.allocate_exact_size(vec2(44.0, 44.0), Sense::click());
         let center = rect.center() - vec2(0.0, if button.hovered() { 1.0 } else { 0.0 });
-        paint_coach_icon(ui.painter(), center, self.look.ink, self.look.accent,
-            self.look.paper, self.look.shadow, self.coach_enabled());
+        paint_coach_icon(
+            ui.painter(),
+            center,
+            self.look.ink,
+            self.look.accent,
+            self.look.paper,
+            self.look.shadow,
+            self.coach_enabled(),
+        );
         button.widget_info(|| {
             WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Writing coach")
         });
         ui.ctx()
             .data_mut(|d| d.insert_temp(Id::new("coach-button-rect"), button.rect));
-        if button.clone().on_hover_text(format!("Writing coach · {}", self.coach_label())).clicked() {
+        if button
+            .clone()
+            .on_hover_text(format!("Writing coach · {}", self.coach_label()))
+            .clicked()
+        {
             self.open_coach();
         }
         button
@@ -208,11 +220,23 @@ impl InkarchyApp {
         ui.ctx()
             .data_mut(|d| d.insert_temp(Id::new("coach-meter-rect"), rect));
         let painter = ui.painter();
-        let track_y = if rect.width() >= 124.0 { rect.center().y + 10.0 } else { rect.center().y };
-        let track = Rect::from_center_size(pos2(rect.center().x, track_y), vec2((rect.width() - 8.0).max(1.0), 4.0));
+        let track_y = if rect.width() >= 124.0 {
+            rect.center().y + 10.0
+        } else {
+            rect.center().y
+        };
+        let track = Rect::from_center_size(
+            pos2(rect.center().x, track_y),
+            vec2((rect.width() - 8.0).max(1.0), 4.0),
+        );
         if rect.width() >= 124.0 {
-            painter.text(pos2(rect.center().x, rect.center().y - 7.0), Align2::CENTER_CENTER,
-                label, self.look.mono(11.0), self.look.fg.gamma_multiply(0.85));
+            painter.text(
+                pos2(rect.center().x, rect.center().y - 7.0),
+                Align2::CENTER_CENTER,
+                label,
+                self.look.mono(11.0),
+                self.look.fg.gamma_multiply(0.85),
+            );
         }
         painter.rect_filled(track, 2.0, mix_col(self.look.desk, self.look.fg, 0.18));
         let enabled = self.coach_enabled();
@@ -271,7 +295,8 @@ impl InkarchyApp {
         }
         let screen = ctx.screen_rect();
         let panel_width = (screen.width() - 48.0).clamp(220.0, 276.0);
-        let anchor = ctx.data(|d| d.get_temp::<Rect>(Id::new("coach-button-rect")))
+        let anchor = ctx
+            .data(|d| d.get_temp::<Rect>(Id::new("coach-button-rect")))
             .unwrap_or_else(|| Rect::from_min_size(screen.left_top(), vec2(44.0, 44.0)));
         let panel_pos = pos2(
             (anchor.center().x - panel_width * 0.5)
@@ -295,29 +320,47 @@ impl InkarchyApp {
                     .stroke(Stroke::new(1.0, fg.gamma_multiply(0.18)))
                     .show(ui, |ui| {
                         ui.set_width(panel_width - 16.0);
-                        ui.label(RichText::new("Writing coach").font(self.look.serif(18.0)).color(fg));
-                        ui.add_space(5.0);
-                        let (rect, toggle) = ui.allocate_exact_size(
-                            vec2(ui.available_width(), 56.0), Sense::click(),
+                        ui.label(
+                            RichText::new("Writing coach")
+                                .font(self.look.serif(18.0))
+                                .color(fg),
                         );
-                        toggle.widget_info(|| WidgetInfo::selected(
-                            WidgetType::Button, true, enabled, "Coach this notebook",
-                        ));
+                        ui.add_space(5.0);
+                        let (rect, toggle) = ui
+                            .allocate_exact_size(vec2(ui.available_width(), 56.0), Sense::click());
+                        toggle.widget_info(|| {
+                            WidgetInfo::selected(
+                                WidgetType::Button,
+                                true,
+                                enabled,
+                                "Coach this notebook",
+                            )
+                        });
                         let fill = if enabled {
                             mix_col(self.look.paper, self.look.green(), 0.28)
                         } else {
                             self.look.paper
                         };
-                        let (face, ink) = self.paint_note_surface(ui, rect.shrink(2.0), &toggle, fill, 10);
-                        let swatch = Rect::from_min_size(face.min + vec2(8.0, 6.0), vec2(58.0, 40.0));
+                        let (face, ink) =
+                            self.paint_note_surface(ui, rect.shrink(2.0), &toggle, fill, 10);
+                        let swatch =
+                            Rect::from_min_size(face.min + vec2(8.0, 6.0), vec2(58.0, 40.0));
                         self.paint_paper_swatch(ui.painter(), swatch, PaperKind::Lined);
                         ui.painter().circle_filled(
-                            swatch.right_top() - vec2(7.0, -7.0), 3.2,
-                            if enabled { self.look.green() } else { fg.gamma_multiply(0.55) },
+                            swatch.right_top() - vec2(7.0, -7.0),
+                            3.2,
+                            if enabled {
+                                self.look.green()
+                            } else {
+                                fg.gamma_multiply(0.55)
+                            },
                         );
                         ui.painter().text(
-                            pos2(swatch.right() + 12.0, face.center().y), Align2::LEFT_CENTER,
-                            "Coach this book", self.look.serif(15.0), ink,
+                            pos2(swatch.right() + 12.0, face.center().y),
+                            Align2::LEFT_CENTER,
+                            "Coach this book",
+                            self.look.serif(15.0),
+                            ink,
                         );
                         if toggle.on_hover_cursor(CursorIcon::PointingHand).clicked() {
                             if enabled {
@@ -330,15 +373,21 @@ impl InkarchyApp {
                             self.report_save(saved);
                         }
                         if self.lib.index.ai.provider == Provider::Gemini {
-                            ui.label(RichText::new("When on, page images are sent to Google.")
-                                .font(self.look.serif(13.0)).color(fg.gamma_multiply(0.7)));
+                            ui.label(
+                                RichText::new("When on, page images are sent to Google.")
+                                    .font(self.look.serif(13.0))
+                                    .color(fg.gamma_multiply(0.7)),
+                            );
                         }
                     });
             });
-        let clicked_outside = ctx.input(|input| input.pointer.primary_pressed()
-            && input.pointer.interact_pos().is_some_and(|pos| {
-                !panel.response.rect.contains(pos) && !anchor.contains(pos)
-            }));
+        let clicked_outside = ctx.input(|input| {
+            input.pointer.primary_pressed()
+                && input
+                    .pointer
+                    .interact_pos()
+                    .is_some_and(|pos| !panel.response.rect.contains(pos) && !anchor.contains(pos))
+        });
         if clicked_outside || ctx.input(|input| input.key_pressed(Key::Escape)) {
             self.coach.open = false;
         }

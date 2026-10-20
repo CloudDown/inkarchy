@@ -16,10 +16,13 @@ fn coach_settings_remember_notebook_and_do_not_shift_the_canvas() {
         .ctx
         .data(|d| d.get_temp::<Rect>(Id::new("coach-button-rect")))
         .unwrap();
-    assert!(!frames.output.as_ref().unwrap().shapes.iter().any(|shape| {
-        matches!(&shape.shape, Shape::Rect(r)
+    assert!(
+        !frames.output.as_ref().unwrap().shapes.iter().any(|shape| {
+            matches!(&shape.shape, Shape::Rect(r)
             if r.rect.width() >= 35.0 && cap.contains_rect(r.rect) && r.fill.a() > 0)
-    }), "graduation cap has no round button backing");
+        }),
+        "graduation cap has no round button backing"
+    );
     frames.drag(app, cap.center(), cap.center());
     assert!(app.coach.open);
     frames.settle(app);
@@ -105,7 +108,10 @@ fn writing_coach_shows_verdict_on_meter_without_cluttering_toggle_panel() {
     app.open_coach();
     let mut frames = Frames::new(app);
     frames.settle(app);
-    assert!(app.coach.session.result.is_some(), "coach result must survive rendering");
+    assert!(
+        app.coach.session.result.is_some(),
+        "coach result must survive rendering"
+    );
     frames.snapshot("writing-coach-verdict");
     frames.text_center("On track");
     frames.text_center("Coach this book");
@@ -463,20 +469,26 @@ fn pdf_page_chip_steps_once_and_accelerates_when_held() {
     let mut fixture = Fixture::new();
     let mut note = Note::blank("Pages", 0);
     note.sheet_join = SheetJoin::Separate;
-    note.pages = (0..30).map(|i| {
-        let mut page = crate::document::Page::at(0, i);
-        page.background = Some(PageBackground {
-            file: "source.pdf".into(), pdf_page: Some(i as u32), source_size: None,
-        });
-        page
-    }).collect();
+    note.pages = (0..30)
+        .map(|i| {
+            let mut page = crate::document::Page::at(0, i);
+            page.background = Some(PageBackground {
+                file: "source.pdf".into(),
+                pdf_page: Some(i as u32),
+                source_size: None,
+            });
+            page
+        })
+        .collect();
     let id = note.id;
     fixture.app.lib.insert_new(&note).unwrap();
     fixture.app.open_note(id);
     let app = &mut fixture.app;
     let mut frames = Frames::new(app);
     frames.settle(app);
-    let chip = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("pdf-page-number-rect")));
+    let chip = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("pdf-page-number-rect")));
     let chip = chip.expect("PDF page chip is visible");
     frames.drag(app, chip.center(), chip.center());
     frames.settle(app);
@@ -487,20 +499,44 @@ fn pdf_page_chip_steps_once_and_accelerates_when_held() {
     assert_eq!(app.pdf_page_target, 2);
     assert_eq!(app.page_in_view(app.canvas_rect), 1);
     frames.step(app, vec![Event::PointerMoved(next)]);
-    frames.step(app, vec![Event::PointerButton {
-        pos: next, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE,
-    }]);
+    frames.step(
+        app,
+        vec![Event::PointerButton {
+            pos: next,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        }],
+    );
     assert_eq!(app.pdf_page_target, 3, "a page turns when the finger lands");
-    for _ in 0..150 { frames.step(app, vec![]); }
-    assert!(app.pdf_page_target >= 12, "holding accelerates the page turns");
+    for _ in 0..150 {
+        frames.step(app, vec![]);
+    }
+    assert!(
+        app.pdf_page_target >= 12,
+        "holding accelerates the page turns"
+    );
     let target = app.pdf_page_target;
-    frames.step(app, vec![Event::PointerButton {
-        pos: next, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE,
-    }]);
+    frames.step(
+        app,
+        vec![Event::PointerButton {
+            pos: next,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }],
+    );
     frames.settle(app);
-    assert_eq!(app.pdf_page_target, target, "release does not turn an extra page");
+    assert_eq!(
+        app.pdf_page_target, target,
+        "release does not turn an extra page"
+    );
     assert_eq!(app.page_in_view(app.canvas_rect), target - 1);
-    assert_eq!(app.page_cells()[1], (0, 1), "holding the stepper must not move pages");
+    assert_eq!(
+        app.page_cells()[1],
+        (0, 1),
+        "holding the stepper must not move pages"
+    );
 }
 
 #[test]
@@ -509,36 +545,64 @@ fn pdf_search_field_opens_in_header_and_stays_open_while_editing() {
     let mut note = Note::blank("Search PDF", 0);
     note.pages.push(crate::document::Page::at(0, 1));
     note.pages[0].background = Some(PageBackground {
-        file: "source.pdf".into(), pdf_page: Some(0), source_size: None,
+        file: "source.pdf".into(),
+        pdf_page: Some(0),
+        source_size: None,
     });
     note.pages[1].background = Some(PageBackground {
-        file: "source.pdf".into(), pdf_page: Some(1), source_size: None,
+        file: "source.pdf".into(),
+        pdf_page: Some(1),
+        source_size: None,
     });
     let id = note.id;
     fixture.app.lib.insert_new(&note).unwrap();
     fixture.app.open_note(id);
     let app = &mut fixture.app;
-    app.pdf_text.insert(format!("{id}:source.pdf:0"), "formula formula".into());
-    app.pdf_text.insert(format!("{id}:source.pdf:1"), "a formula".into());
+    app.pdf_text
+        .insert(format!("{id}:source.pdf:0"), "formula formula".into());
+    app.pdf_text
+        .insert(format!("{id}:source.pdf:1"), "a formula".into());
     let mut frames = Frames::new(app);
     frames.settle(app);
-    frames.step_with_modifiers(app, vec![Event::Key {
-        key: Key::F,
-        physical_key: None,
-        pressed: true,
-        repeat: false,
-        modifiers: Modifiers::COMMAND,
-    }], Modifiers::COMMAND);
-    let field = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("pdf-search-field-rect"))).unwrap();
-    assert!(field.width() > 100.0, "Ctrl+F opens the search bubble: {field:?}");
-    assert!(frames.ctx.memory(|memory| memory.focused()).is_some(), "Ctrl+F focuses search input");
+    frames.step_with_modifiers(
+        app,
+        vec![Event::Key {
+            key: Key::F,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::COMMAND,
+        }],
+        Modifiers::COMMAND,
+    );
+    let field = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("pdf-search-field-rect")))
+        .unwrap();
+    assert!(
+        field.width() > 100.0,
+        "Ctrl+F opens the search bubble: {field:?}"
+    );
+    assert!(
+        frames.ctx.memory(|memory| memory.focused()).is_some(),
+        "Ctrl+F focuses search input"
+    );
     frames.key(app, Key::Escape);
     frames.settle(app);
-    let icon = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("pdf-search-button-rect"))).unwrap();
+    let icon = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("pdf-search-button-rect")))
+        .unwrap();
     frames.drag(app, icon.center(), icon.center());
     frames.settle(app);
-    let field = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("pdf-search-field-rect"))).unwrap();
-    assert!(field.right() <= icon.left() && field.bottom() <= 52.0, "field {field:?} icon {icon:?}");
+    let field = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("pdf-search-field-rect")))
+        .unwrap();
+    assert!(
+        field.right() <= icon.left() && field.bottom() <= 52.0,
+        "field {field:?} icon {icon:?}"
+    );
     frames.drag(app, field.center(), field.center());
     let tool = app.tool;
     frames.step(app, vec![Event::Text("formula".into())]);
@@ -561,19 +625,30 @@ fn pdf_search_field_opens_in_header_and_stays_open_while_editing() {
     frames.settle(app);
     frames.text_center("2/3");
     frames.key(app, Key::L);
-    assert_eq!(app.tool, tool, "typing a search must not activate a drawing tool");
+    assert_eq!(
+        app.tool, tool,
+        "typing a search must not activate a drawing tool"
+    );
     assert!(app.pdf_search_open);
     frames.key(app, Key::Escape);
     frames.settle(app);
     assert!(!app.pdf_search_open);
     frames.size = vec2(360.0, 640.0);
     frames.settle(app);
-    let icon = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("pdf-search-button-rect"))).unwrap();
+    let icon = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("pdf-search-button-rect")))
+        .unwrap();
     frames.drag(app, icon.center(), icon.center());
     frames.settle(app);
-    let field = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("pdf-search-field-rect"))).unwrap();
-    assert!(field.width() >= 60.0 && field.left() >= 0.0 && field.right() <= icon.left(),
-        "compact header: field {field:?} icon {icon:?}");
+    let field = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("pdf-search-field-rect")))
+        .unwrap();
+    assert!(
+        field.width() >= 60.0 && field.left() >= 0.0 && field.right() <= icon.left(),
+        "compact header: field {field:?} icon {icon:?}"
+    );
 }
 
 #[test]
@@ -1073,13 +1148,17 @@ fn responsive_note_controls_do_not_overlap_through_resizes() {
                         assert!(!face.intersects(*other), "header buttons overlap");
                     }
                 }
-                let [menu, cap, meter] =
-                    ["notebook-menu-button-rect", "coach-button-rect", "coach-meter-rect"].map(|key| {
-                        frames
-                            .ctx
-                            .data(|d| d.get_temp::<Rect>(Id::new(key)))
-                            .unwrap()
-                    });
+                let [menu, cap, meter] = [
+                    "notebook-menu-button-rect",
+                    "coach-button-rect",
+                    "coach-meter-rect",
+                ]
+                .map(|key| {
+                    frames
+                        .ctx
+                        .data(|d| d.get_temp::<Rect>(Id::new(key)))
+                        .unwrap()
+                });
                 if edge == DockEdge::Bottom && size.x == 1024.0 && accessory == 1 {
                     frames.snapshot("exercise-coach-header-1024");
                 }
@@ -1090,7 +1169,10 @@ fn responsive_note_controls_do_not_overlap_through_resizes() {
                     );
                 }
                 assert!(cap.top() > 52.0, "coach badge is beside the dock");
-                assert!(!cap.intersects(controls[1].1), "coach badge stays clear of dock");
+                assert!(
+                    !cap.intersects(controls[1].1),
+                    "coach badge stays clear of dock"
+                );
                 if size.x >= 760.0 {
                     assert!(
                         meter
@@ -1135,8 +1217,15 @@ fn pages_mode_adds_a_sheet_and_toggle_hides_the_pluses() {
     app.fitted_cell = None;
     frames.settle(app);
     let pages = app.note.as_ref().unwrap().pages.len();
-    let manage = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("pages-button-rect"))).unwrap().center();
-    frames.drag(app, manage, manage);
+    let more = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("notebook-menu-button-rect")))
+        .unwrap()
+        .center();
+    frames.drag(app, more, more);
+    frames.settle(app);
+    let edit = frames.text_center("Edit pages");
+    frames.drag(app, edit, edit);
     frames.settle(app);
     assert!(app.sheet_tabs_on);
     let canvas = app.canvas_rect;
@@ -1186,14 +1275,11 @@ fn pages_mode_arranges_six_pages_without_losing_the_visible_page_or_its_content(
     app.fitted_cell = Some((0, 4));
     app.enter_pages_mode();
     frames.settle(app);
-    let button = frames
+    let two = frames
         .ctx
-        .data(|data| data.get_temp::<Rect>(Id::new("page-layout-button-rect")))
-        .expect("arrangement control appears in Pages mode");
-    frames.drag(app, button.center(), button.center());
-    frames.settle(app);
-    let choice = frames.text_center("Two per row");
-    frames.drag(app, choice, choice);
+        .data(|data| data.get_temp::<Rect>(Id::new(("strip-columns", "2"))))
+        .expect("pages-per-row slider appears in Pages mode");
+    frames.drag(app, two.center(), two.center());
     frames.settle(app);
     let note = app.note.as_ref().unwrap();
     let cells: Vec<_> = note.pages.iter().map(|page| (page.col, page.row)).collect();
@@ -1324,9 +1410,12 @@ fn compact_controls_keep_drag_selection_and_wheel_actions_accessible() {
     frames.settle(app);
     assert!(app.sheet_tabs_on);
     frames.snapshot("responsive-page-selection-small");
-    let manage = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("pages-button-rect"))).unwrap().center();
-    frames.touch(app, TouchPhase::Start, manage);
-    frames.touch(app, TouchPhase::End, manage);
+    let done = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("strip-tray", "Done"))))
+        .expect("the tray offers Done");
+    frames.touch(app, TouchPhase::Start, done.center());
+    frames.touch(app, TouchPhase::End, done.center());
     frames.settle(app);
     assert!(!app.sheet_tabs_on);
 }
@@ -1698,9 +1787,18 @@ fn fit_page_button_is_in_the_header_not_the_notebook_menu() {
     app.open_note(id);
     let mut frames = Frames::new(app);
     frames.settle(app);
-    let full = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("fullscreen-button-rect"))).unwrap();
-    assert!(full.top() < 52.0, "fullscreen control belongs in the top bar");
-    let more = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("notebook-menu-button-rect"))).unwrap();
+    let full = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("fullscreen-button-rect")))
+        .unwrap();
+    assert!(
+        full.top() < 52.0,
+        "fullscreen control belongs in the top bar"
+    );
+    let more = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("notebook-menu-button-rect")))
+        .unwrap();
     frames.drag(app, more.center(), more.center());
     frames.settle(app);
     assert!(!frames.output.as_ref().unwrap().shapes.iter().any(|shape| {
@@ -1710,10 +1808,23 @@ fn fit_page_button_is_in_the_header_not_the_notebook_menu() {
     app.fitted_cell = None;
     frames.drag(app, full.center(), full.center());
     frames.step(app, vec![]);
-    assert_eq!(app.fitted_cell, Some((0, 0)), "button fits the current page");
-    assert!(!frames.output.as_ref().unwrap().viewport_output.values().any(|viewport| {
-        viewport.commands.iter().any(|command| matches!(command, ViewportCommand::Fullscreen(_)))
-    }));
+    assert_eq!(
+        app.fitted_cell,
+        Some((0, 0)),
+        "button fits the current page"
+    );
+    assert!(!frames
+        .output
+        .as_ref()
+        .unwrap()
+        .viewport_output
+        .values()
+        .any(|viewport| {
+            viewport
+                .commands
+                .iter()
+                .any(|command| matches!(command, ViewportCommand::Fullscreen(_)))
+        }));
 }
 
 #[test]
@@ -1724,13 +1835,16 @@ fn notebook_menu_keeps_actions_and_keyboard_dismissal() {
     app.open_note(id);
     let mut frames = Frames::new(app);
     frames.settle(app);
-    let more = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("notebook-menu-button-rect"))).unwrap().center();
+    let more = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("notebook-menu-button-rect")))
+        .unwrap()
+        .center();
     frames.drag(app, more, more);
     frames.settle(app);
     assert!(Popup::is_any_open(&frames.ctx));
     let last = frames.text_center("Area eraser");
     frames.text_center("Stroke eraser");
-    frames.text_center("Separate pages");
     assert!(
         frames.output.as_ref().unwrap().shapes.iter().any(|shape| {
             matches!(&shape.shape, Shape::Text(text) if text.galley.text() == "Area eraser")
@@ -1751,7 +1865,10 @@ fn notebook_menu_keeps_actions_and_keyboard_dismissal() {
         Modifiers::COMMAND,
     );
     frames.settle(app);
-    assert!(app.export_picker_open, "Ctrl+S still opens the export picker");
+    assert!(
+        app.export_picker_open,
+        "Ctrl+S still opens the export picker"
+    );
     frames.text_center("PNG image");
     frames.text_center("PDF document");
     frames.snapshot("download-canson");
@@ -1761,16 +1878,22 @@ fn notebook_menu_keeps_actions_and_keyboard_dismissal() {
     assert!(!app.export_picker_open);
     frames.drag(app, more, more);
     frames.settle(app);
-    let separate = frames.text_center("Separate pages");
-    frames.drag(app, separate, separate);
-    assert_eq!(app.note.as_ref().unwrap().sheet_join, SheetJoin::Separate);
+    let finger = frames.text_center("Draw with finger");
+    let was_finger = app.lib.index.finger_draw;
+    frames.drag(app, finger, finger);
+    assert_eq!(
+        app.lib.index.finger_draw, !was_finger,
+        "the ⋮ menu applies a settings toggle on the first click"
+    );
     assert!(
         Popup::is_any_open(&frames.ctx),
         "toggling a setting keeps the ⋮ menu open until an outside click"
     );
-    let linked = frames.text_center("Linked pages");
-    frames.drag(app, linked, linked);
-    assert_eq!(app.note.as_ref().unwrap().sheet_join, SheetJoin::Linked);
+    frames.drag(app, finger, finger);
+    assert_eq!(
+        app.lib.index.finger_draw, was_finger,
+        "a second click toggles the setting back"
+    );
     assert!(Popup::is_any_open(&frames.ctx));
     frames.key(app, Key::Escape);
     assert!(!Popup::is_any_open(&frames.ctx));
@@ -1813,15 +1936,94 @@ fn paper_style_is_available_in_pages_mode_even_with_one_page() {
     app.open_note(id);
     let mut frames = Frames::new(app);
     frames.settle(app);
-    assert!(frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("page-paper-button-rect"))).is_none());
+    assert!(
+        frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new(("strip-paper", "Lined"))))
+            .is_none(),
+        "paper swatches live inside Pages edit, not the writing canvas"
+    );
     app.enter_pages_mode();
     frames.settle(app);
-    let paper = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("page-paper-button-rect"))).unwrap();
-    frames.drag(app, paper.center(), paper.center());
-    frames.settle(app);
-    let lined = frames.text_center("Lined");
-    frames.drag(app, lined, lined);
+    let lined = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("strip-paper", "Lined"))))
+        .unwrap();
+    frames.drag(app, lined.center(), lined.center());
     assert_eq!(app.note.as_ref().unwrap().paper, PaperKind::Lined);
+}
+
+#[test]
+fn pages_edit_replaces_the_header_with_a_canvas_tray() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Tray");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    assert!(frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("top-rect")))
+        .is_some());
+    let more = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("notebook-menu-button-rect")))
+        .unwrap()
+        .center();
+    frames.drag(app, more, more);
+    frames.settle(app);
+    let edit = frames.text_center("Edit pages");
+    frames.drag(app, edit, edit);
+    frames.settle(app);
+    assert!(app.sheet_tabs_on);
+    let header_rule = |frames: &Frames| {
+        frames.output.as_ref().unwrap().shapes.iter().any(|shape| {
+            matches!(
+                &shape.shape,
+                Shape::LineSegment { points: [a, b], stroke: _ }
+                    if (a.y - b.y).abs() < 0.5 && a.y > 40.0 && a.y < 60.0
+            )
+        })
+    };
+    assert!(
+        !header_rule(&frames),
+        "the whole header disappears while editing pages"
+    );
+    frames.snapshot("pages-edit-tray");
+    let size = frames.size;
+    frames.size = vec2(700.0, 640.0);
+    frames.settle(app);
+    frames.snapshot("pages-edit-tray-two-rows");
+    frames.size = vec2(420.0, 640.0);
+    frames.settle(app);
+    frames.snapshot("pages-edit-tray-compact");
+    frames.size = size;
+    frames.settle(app);
+    let strip = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("pages-strip-rect")))
+        .expect("the canvas tray appears");
+    assert!(
+        app.canvas_rect.contains(strip.min) && strip.bottom() <= app.canvas_rect.bottom() + 1.0
+    );
+    let separate = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("strip-tray", "Separate"))))
+        .expect("the tray offers join controls");
+    frames.drag(app, separate.center(), separate.center());
+    assert_eq!(app.note.as_ref().unwrap().sheet_join, SheetJoin::Separate);
+    let done = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("strip-tray", "Done"))))
+        .expect("the tray offers Done");
+    frames.touch(app, TouchPhase::Start, done.center());
+    frames.touch(app, TouchPhase::End, done.center());
+    frames.settle(app);
+    assert!(!app.sheet_tabs_on);
+    assert!(
+        header_rule(&frames),
+        "the header returns after leaving pages edit"
+    );
 }
 
 #[test]
@@ -1832,31 +2034,50 @@ fn pdf_pages_can_be_arranged_horizontally_or_two_per_row() {
     app.open_note(id);
     let note = app.note.as_mut().unwrap();
     note.sheet_join = SheetJoin::Separate;
-    note.pages = (0..5).map(|index| {
-        let mut page = crate::document::Page::at(0, index);
-        page.background = Some(PageBackground {
-            file: "source.pdf".into(), pdf_page: Some(index as u32), source_size: None,
-        });
-        page
-    }).collect();
+    note.pages = (0..5)
+        .map(|index| {
+            let mut page = crate::document::Page::at(0, index);
+            page.background = Some(PageBackground {
+                file: "source.pdf".into(),
+                pdf_page: Some(index as u32),
+                source_size: None,
+            });
+            page
+        })
+        .collect();
     let mut frames = Frames::new(app);
     frames.settle(app);
     app.enter_pages_mode();
     frames.settle(app);
-    let button = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("page-layout-button-rect"))).unwrap();
-    for (label, expected) in [
-        ("Horizontal", vec![(0, 0), (1, 0), (2, 0), (3, 0), (4, 0)]),
-        ("Two per row", vec![(0, 0), (1, 0), (0, 1), (1, 1), (0, 2)]),
+    for (well, expected) in [
+        (
+            Id::new(("strip-columns", "all")),
+            vec![(0, 0), (1, 0), (2, 0), (3, 0), (4, 0)],
+        ),
+        (
+            Id::new(("strip-columns", "2")),
+            vec![(0, 0), (1, 0), (0, 1), (1, 1), (0, 2)],
+        ),
     ] {
-        frames.drag(app, button.center(), button.center());
-        frames.settle(app);
-        let choice = frames.text_center(label);
-        frames.drag(app, choice, choice);
+        let target = frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(well))
+            .expect("tray control");
+        frames.drag(app, target.center(), target.center());
         frames.settle(app);
         let note = app.note.as_ref().unwrap();
-        assert_eq!(note.pages.iter().map(|page| (page.col, page.row)).collect::<Vec<_>>(), expected);
+        assert_eq!(
+            note.pages
+                .iter()
+                .map(|page| (page.col, page.row))
+                .collect::<Vec<_>>(),
+            expected
+        );
         for (index, page) in note.pages.iter().enumerate() {
-            assert_eq!(page.background.as_ref().unwrap().pdf_page, Some(index as u32));
+            assert_eq!(
+                page.background.as_ref().unwrap().pdf_page,
+                Some(index as u32)
+            );
         }
     }
 }
@@ -1872,13 +2093,28 @@ fn notebook_menu_stays_clear_of_right_tool_case() {
     for size in [vec2(1280.0, 860.0), vec2(360.0, 640.0), vec2(320.0, 280.0)] {
         frames.size = size;
         frames.settle(app);
-        let more = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("notebook-menu-button-rect"))).unwrap();
+        let more = frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new("notebook-menu-button-rect")))
+            .unwrap();
         frames.drag(app, more.center(), more.center());
         frames.settle(app);
-        let menu = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("notebook-menu-rect"))).unwrap();
-        let dock = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("dock-rect"))).unwrap();
-        assert!(menu.right() + 4.0 <= dock.left(), "{size:?}: menu {menu:?} covers dock {dock:?}");
-        assert!(menu.left() >= 0.0 && menu.bottom() <= size.y, "{size:?}: menu {menu:?} outside window");
+        let menu = frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new("notebook-menu-rect")))
+            .unwrap();
+        let dock = frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
+            .unwrap();
+        assert!(
+            menu.right() + 4.0 <= dock.left(),
+            "{size:?}: menu {menu:?} covers dock {dock:?}"
+        );
+        assert!(
+            menu.left() >= 0.0 && menu.bottom() <= size.y,
+            "{size:?}: menu {menu:?} outside window"
+        );
         frames.key(app, Key::Escape);
     }
 }
@@ -1983,9 +2219,7 @@ fn ink_tin_keeps_color_picking_and_fits_after_resize() {
 
 #[test]
 fn tools_can_be_stored_and_restored_by_dragging_between_panel_and_dock() {
-    for (touch, tool) in [
-        (false, Tool::Fineliner), (true, Tool::Fineliner),
-    ] {
+    for (touch, tool) in [(false, Tool::Fineliner), (true, Tool::Fineliner)] {
         let mut fixture = Fixture::new();
         let id = fixture.notebook("Tool storage");
         let app = &mut fixture.app;
@@ -2042,8 +2276,10 @@ fn tools_can_be_stored_and_restored_by_dragging_between_panel_and_dock() {
             "store {tool:?} touch={touch}"
         );
         assert_eq!(app.lib.index.parked_tools, vec![tool]);
-        assert!(app.note.as_ref().unwrap().pages[0].texts.is_empty(),
-            "storing a tool must not place a sticky note");
+        assert!(
+            app.note.as_ref().unwrap().pages[0].texts.is_empty(),
+            "storing a tool must not place a sticky note"
+        );
         frames.settle(app);
         frames.snapshot(if touch {
             "storage-touch"
@@ -2468,6 +2704,10 @@ fn pages_mode_tear_badge_removes_a_page_and_leaves_ink() {
         }
         assert_eq!(app.note.as_ref().unwrap().pages.len(), 2);
         frames.step(app, vec![]);
+        // The canvas grows when the header folds away: recompute the band.
+        let paper = app.unit_screen_rect(app.canvas_rect, 1, 0);
+        let minus = page_minus_band(paper);
+        let hit = minus.center();
         // A stylus tap often leaves the press point. That still deletes.
         let wobble = hit + vec2(18.0, 6.0);
         assert!(minus.contains(wobble));
@@ -2521,7 +2761,11 @@ fn double_tap_on_page_leaves_pages_mode_without_moving_it() {
         app.open_note(id);
         let mut frames = Frames::new(app);
         frames.settle(app);
-        app.camera = Camera { pan: vec2(200.0, 100.0), zoom: 0.3, stretch_y: None };
+        app.camera = Camera {
+            pan: vec2(200.0, 100.0),
+            zoom: 0.3,
+            stretch_y: None,
+        };
         app.fitted_cell = None;
         app.need_fit = false;
         let before = serde_json::to_value(&app.note.as_ref().unwrap().pages).unwrap();
@@ -2538,19 +2782,29 @@ fn double_tap_on_page_leaves_pages_mode_without_moving_it() {
                     frames.touch(app, TouchPhase::End, pos);
                 } else {
                     for pressed in [true, false] {
-                        frames.step(app, vec![Event::PointerButton {
-                            pos,
-                            button: PointerButton::Primary,
-                            pressed,
-                            modifiers: Modifiers::NONE,
-                        }]);
+                        frames.step(
+                            app,
+                            vec![Event::PointerButton {
+                                pos,
+                                button: PointerButton::Primary,
+                                pressed,
+                                modifiers: Modifiers::NONE,
+                            }],
+                        );
                     }
                 }
-                assert_eq!(app.sheet_tabs_on, tap == 0, "exit after second tap at {pos:?} (touch={touch})");
+                assert_eq!(
+                    app.sheet_tabs_on,
+                    tap == 0,
+                    "exit after second tap at {pos:?} (touch={touch})"
+                );
             }
             frames.settle(app);
         }
-        assert_eq!(serde_json::to_value(&app.note.as_ref().unwrap().pages).unwrap(), before);
+        assert_eq!(
+            serde_json::to_value(&app.note.as_ref().unwrap().pages).unwrap(),
+            before
+        );
     }
 }
 
@@ -2596,6 +2850,55 @@ fn long_press_on_page_enters_pages_mode() {
             modifiers: Modifiers::NONE,
         }],
     );
+}
+
+#[test]
+fn pen_long_press_on_page_enters_pages_mode() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Pen hold pages");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    assert!(!app.sheet_tabs_on);
+    let screen = app
+        .camera
+        .to_screen(pos2(PAGE_W * 0.5, PAGE_H * 0.5), app.canvas_rect);
+    // A stylus press on lectern paper never injects Pointer events
+    // (inject_pen_pointer only forwards chrome presses), so egui's pointer
+    // stays idle; the tablet snapshot alone must drive the pages long-hold.
+    let pen = |pressed: bool, down: bool, released: bool| PenSnapshot {
+        pos: Some(screen),
+        samples: Vec::new(),
+        down,
+        pressed,
+        released,
+        eraser: false,
+        lasso_btn: false,
+        air_toggle: false,
+        pressure: Some(0.5),
+        in_proximity: true,
+        pinch_zoom: 1.0,
+        pinch_pan: Vec2::ZERO,
+        pinching: false,
+    };
+    app.tablet.set_test_pen(Some(pen(true, true, false)));
+    frames.step(app, vec![]);
+    app.tablet.set_test_pen(Some(pen(false, true, false)));
+    for _ in 0..30 {
+        frames.step(app, vec![]);
+    }
+    assert!(
+        app.sheet_tabs_on,
+        "stylus hold on empty paper opens Pages manage mode"
+    );
+    assert_eq!(app.pages_jiggle_cell, Some((0, 0)));
+    assert!(!app.sheet_tabs(app.canvas_rect).is_empty());
+    app.tablet.set_test_pen(Some(pen(false, false, true)));
+    frames.step(app, vec![]);
+    app.tablet.set_test_pen(None);
+    frames.settle(app);
+    assert!(app.sheet_tabs_on, "released hold keeps Pages manage mode");
 }
 
 #[test]

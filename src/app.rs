@@ -143,18 +143,18 @@ enum PageArrangement {
     Column,
     Row,
     TwoColumns,
+    ThreeColumns,
+    FourColumns,
 }
 
 impl PageArrangement {
-    const ALL: [Self; 3] = [Self::Column, Self::Row, Self::TwoColumns];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Column => "Vertical",
-            Self::Row => "Horizontal",
-            Self::TwoColumns => "Two per row",
-        }
-    }
+    const ALL: [Self; 5] = [
+        Self::Column,
+        Self::Row,
+        Self::TwoColumns,
+        Self::ThreeColumns,
+        Self::FourColumns,
+    ];
 
     fn cell(self, index: usize) -> (i32, i32) {
         let index = index as i32;
@@ -162,6 +162,8 @@ impl PageArrangement {
             Self::Column => (0, index),
             Self::Row => (index, 0),
             Self::TwoColumns => (index % 2, index / 2),
+            Self::ThreeColumns => (index % 3, index / 3),
+            Self::FourColumns => (index % 4, index / 4),
         }
     }
 }
@@ -244,8 +246,7 @@ struct SpineWheel {
 
 #[derive(Clone, Copy)]
 enum MoreAct {
-    Linked,
-    Separate,
+    Pages,
     FingerDraw,
     EraseStroke,
     EraseArea,
@@ -1690,7 +1691,9 @@ impl InkarchyApp {
                         ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
                     } else if self.pdf_search_open {
                         self.pdf_search_open = false;
-                        ctx.memory_mut(|memory| memory.surrender_focus(Id::new("pdf-search-input")));
+                        ctx.memory_mut(|memory| {
+                            memory.surrender_focus(Id::new("pdf-search-input"))
+                        });
                         ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
                     } else if self.coach.open {
                         self.coach.open = false;
@@ -4714,8 +4717,10 @@ impl InkarchyApp {
     fn take_pages_manage_hold(
         &mut self,
         ui: &Ui,
+        resp: &Response,
         rect: Rect,
         screen: &mut Pos2,
+        pen_press: bool,
         primary_down: bool,
         primary_pressed: &mut bool,
         primary_released: &mut bool,
@@ -4732,7 +4737,13 @@ impl InkarchyApp {
         if *primary_pressed {
             let paper = self.camera.to_paper(*screen, rect);
             let cell = self.page_unit_at(*screen, rect);
-            let blocked = self.sticky_at(paper).is_some() || self.hit_object(paper).is_some();
+            // A pointer press claimed by whatever floats above the canvas (⋮
+            // menu rows, the coach board) must not start the pages long-hold.
+            // A stylus press never goes through egui's hit test (no Pointer
+            // events on lectern paper), so it arms as it always has.
+            let blocked = (!pen_press && !resp.is_pointer_button_down_on())
+                || self.sticky_at(paper).is_some()
+                || self.hit_object(paper).is_some();
             if let Some((col, row)) = cell.filter(|_| !blocked) {
                 self.pages_manage_hold = Some(PagesManageHold {
                     col,
@@ -4812,153 +4823,506 @@ impl InkarchyApp {
         }
     }
 
-    fn paper_tone_picker_row(&self, ui: &mut Ui) -> Option<PaperTone> {
-        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
-        let current = self.note.as_ref().map(|note| note.paper_tone);
-        let tones = [PaperTone::White, PaperTone::Default, PaperTone::Black];
-        let mut picked = None;
-        for (index, tone) in tones.into_iter().enumerate() {
-            let width = row.width() / tones.len() as f32;
-            let cell = Rect::from_min_size(
-                pos2(row.min.x + index as f32 * width, row.min.y),
-                vec2(width, row.height()),
+    /// One well of the pages-edit tray. Returns true when tapped.
+    fn tray_well(
+        &mut self,
+        ui: &mut Ui,
+        rect: Rect,
+        on: bool,
+        label: &str,
+        tip: &str,
+        icon: impl Fn(&Painter, Pos2, Color32),
+    ) -> bool {
+        let resp = ui.interact(rect, ui.id().with(("strip-tray", label)), Sense::click());
+        resp.widget_info(|| WidgetInfo::selected(WidgetType::Button, true, on, label));
+        let fill = if on {
+            mix_col(self.look.paper, self.look.accent, 0.34)
+        } else {
+            self.look.paper
+        };
+        let (face, fg) = self.paint_note_surface(ui, rect.shrink(2.0), &resp, fill, 10);
+        if on {
+            ui.painter().rect_stroke(
+                face.shrink(2.0),
+                8.0,
+                Stroke::new(1.3, self.look.accent),
+                StrokeKind::Inside,
             );
-            let response = ui.interact(cell, ui.id().with(("paper-tone", tone)), Sense::click());
-            let center = cell.center();
-            let fill = self.look.paper_surface(tone);
-            if current == Some(tone) {
-                ui.painter()
-                    .circle_stroke(center, 12.0, Stroke::new(1.6, self.look.accent));
-            }
-            ui.painter().circle_filled(center, 9.0, fill);
-            ui.painter().circle_stroke(
-                center,
-                9.0,
-                Stroke::new(1.0, self.look.ink.gamma_multiply(0.42)),
-            );
-            response.widget_info(|| {
-                WidgetInfo::selected(
-                    WidgetType::Button,
-                    ui.is_enabled(),
-                    current == Some(tone),
-                    ["White", "Sand", "Black"][index],
-                )
-            });
-            if response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
-                picked = Some(tone);
-            }
         }
-        picked
+        icon(ui.painter(), face.center(), fg);
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(Id::new(("strip-tray", label)), rect));
+        resp.on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text(tip)
+            .clicked()
     }
 
-    fn page_layout_picker(&mut self, button: &Response) {
-        let current = self.page_arrangement();
-        let mut picked = None;
-        Popup::menu(button)
-            // This control sits near the bottom edge; anchor the editor above it
-            // so the page picker remains visible instead of opening off-screen.
-            .align(egui::RectAlign::BOTTOM_START)
-            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
-            .frame(self.note_popup_frame())
-            .show(|ui| {
-                ui.set_width(224.0);
-                ui.spacing_mut().item_spacing = vec2(0.0, 4.0);
-                self.menu_head(ui, "Arrange pages");
-                for layout in PageArrangement::ALL {
-                    let (rect, response) =
-                        ui.allocate_exact_size(vec2(ui.available_width(), 54.0), Sense::click());
-                    response.widget_info(|| {
-                        WidgetInfo::selected(
-                            WidgetType::Button,
-                            ui.is_enabled(),
-                            current == Some(layout),
-                            layout.label(),
-                        )
+    /// Primary exit of Pages edit: an accent key with a bold check.
+    fn tray_done(&mut self, ui: &mut Ui, rect: Rect) -> bool {
+        let resp = ui.interact(rect, ui.id().with(("strip-tray", "Done")), Sense::click());
+        resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "Done"));
+        let fill = mix_col(
+            self.look.paper,
+            self.look.accent,
+            if resp.hovered() { 0.34 } else { 0.2 },
+        );
+        let (face, fg) = self.paint_raised_face(
+            ui.painter(),
+            rect.shrink(2.0),
+            fill,
+            10,
+            resp.is_pointer_button_down_on(),
+        );
+        let c = face.center();
+        ui.painter().add(Shape::line(
+            vec![
+                c + vec2(-7.5, 0.0),
+                c + vec2(-2.0, 5.5),
+                c + vec2(8.0, -6.0),
+            ],
+            Stroke::new(2.4, fg),
+        ));
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(Id::new(("strip-tray", "Done")), rect));
+        resp.on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text("Done arranging pages")
+            .clicked()
+    }
+
+    /// One control for page flow: a vertical stack, two to four per row, or a
+    /// single horizontal row. The last stop is the row, so orientation and
+    /// density never contradict each other.
+    fn tray_flow_slider(&mut self, ui: &mut Ui, rect: Rect, arrangement: Option<PageArrangement>) {
+        let current = match arrangement {
+            Some(PageArrangement::TwoColumns) => 2,
+            Some(PageArrangement::ThreeColumns) => 3,
+            Some(PageArrangement::FourColumns) => 4,
+            Some(PageArrangement::Row) => 5,
+            _ => 1,
+        };
+        let resp = ui.interact(rect, ui.id().with("strip-columns"), Sense::click());
+        resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "Page flow"));
+        let p = ui.painter().clone();
+        // Recessed pill: the five stops read as one scale.
+        p.rect_filled(rect, 11.0, mix_col(self.look.paper, self.look.ink, 0.05));
+        p.rect_stroke(
+            rect,
+            11.0,
+            Stroke::new(1.0, self.look.ink.gamma_multiply(0.12)),
+            StrokeKind::Inside,
+        );
+        let span = (rect.width() - 32.0).max(32.0);
+        let track_y = rect.bottom() - 9.0;
+        let detent_x = |n: f32| rect.left() + 16.0 + (n - 1.0) * span / 4.0;
+        let spacing = span / 4.0;
+        p.line_segment(
+            [pos2(detent_x(1.0), track_y), pos2(detent_x(5.0), track_y)],
+            Stroke::new(2.0, self.look.ink.gamma_multiply(0.22)),
+        );
+        let hover = resp.hover_pos();
+        let hovered_detent = hover.map(|pos| {
+            (((pos.x - detent_x(1.0)) / (span / 4.0))
+                .round()
+                .clamp(0.0, 4.0) as u8)
+                + 1
+        });
+        for n in 1..=5u8 {
+            let node = pos2(detent_x(n as f32), track_y);
+            let on = current == n;
+            let name = if n == 5 {
+                "all".to_owned()
+            } else {
+                n.to_string()
+            };
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(
+                    Id::new(("strip-columns", name)),
+                    Rect::from_center_size(
+                        pos2(node.x, rect.center().y),
+                        vec2(spacing, rect.height() - 2.0),
+                    ),
+                )
+            });
+            if hover.is_some_and(|h| (h.x - node.x).abs() <= spacing * 0.5) {
+                p.circle_filled(
+                    pos2(node.x, rect.center().y - 4.0),
+                    (spacing * 0.36).min(15.0),
+                    self.look.ink.gamma_multiply(0.07),
+                );
+            }
+            let fg = if on {
+                self.look.accent
+            } else {
+                self.look.ink.gamma_multiply(0.62)
+            };
+            if spacing >= 46.0 {
+                let cell = ((spacing - 8.0) / 4.0).clamp(4.0, 7.0);
+                let (cols, rows) = match n {
+                    1 => (1, 3),
+                    2 => (2, 2),
+                    3 => (3, 2),
+                    4 => (4, 2),
+                    _ => (4, 1),
+                };
+                paint_grid_icon_sized(
+                    &p,
+                    pos2(node.x, rect.center().y - 4.0),
+                    cols,
+                    rows,
+                    cell,
+                    cell * 0.38,
+                    fg,
+                );
+            } else if n == 5 {
+                // Narrow: three small pages in a row still reads "all in one row".
+                for dx in [-7.0, 0.0, 7.0] {
+                    p.rect_stroke(
+                        Rect::from_center_size(
+                            pos2(node.x + dx, rect.center().y - 4.0),
+                            Vec2::splat(4.6),
+                        ),
+                        1.0,
+                        Stroke::new(1.0, fg),
+                        StrokeKind::Inside,
+                    );
+                }
+            } else {
+                p.text(
+                    pos2(node.x, rect.center().y - 4.0),
+                    Align2::CENTER_CENTER,
+                    n.to_string(),
+                    self.look.mono(10.0),
+                    fg,
+                );
+            }
+            p.circle_filled(
+                node,
+                if on { 4.5 } else { 3.0 },
+                if on {
+                    self.look.accent
+                } else {
+                    self.look.ink.gamma_multiply(0.4)
+                },
+            );
+        }
+        let resp = resp
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text_at_pointer(match hovered_detent {
+                Some(1) => "One page per row".to_owned(),
+                Some(2) => "Two pages per row".to_owned(),
+                Some(3) => "Three pages per row".to_owned(),
+                Some(4) => "Four pages per row".to_owned(),
+                Some(_) => "All pages in one row".to_owned(),
+                None => "Page flow".to_owned(),
+            });
+        if resp.clicked() {
+            let target = hovered_detent.unwrap_or(current);
+            self.arrange_pages(match target {
+                2 => PageArrangement::TwoColumns,
+                3 => PageArrangement::ThreeColumns,
+                4 => PageArrangement::FourColumns,
+                5 => PageArrangement::Row,
+                _ => PageArrangement::Column,
+            });
+        }
+    }
+
+    /// Pages edit lives on the paper: this tray replaces the whole header while
+    /// arranging sheets. One row on a wide lectern — sheets, flow, paper, tone,
+    /// done — and two rows when the canvas is narrow. Icon-only keys, grouped
+    /// by hairlines, each explained on hover.
+    fn ui_pages_edit_strip(&mut self, ctx: &Context) {
+        if !self.sheet_tabs_on || !Camera::valid_viewport(self.canvas_rect) {
+            return;
+        }
+        let canvas = self.canvas_rect;
+        let arrangement = self.page_arrangement();
+        let join = self
+            .note
+            .as_ref()
+            .map(|note| note.sheet_join)
+            .unwrap_or(SheetJoin::Linked);
+        let tone = self
+            .note
+            .as_ref()
+            .map(|note| note.paper_tone)
+            .unwrap_or(PaperTone::Default);
+
+        // Wide canvases get a single instrument row; below that the tray folds
+        // on two rows (structure then surface) until it turns compact.
+        let wide = canvas.width() >= 900.0;
+        let width = if wide {
+            840.0
+        } else {
+            (canvas.width() - 16.0).min(620.0).max(280.0)
+        };
+        let compact = !wide && width < 450.0;
+        let pad = if wide {
+            16.0
+        } else if compact {
+            11.0
+        } else {
+            14.0
+        };
+        let well_w = if wide {
+            46.0
+        } else if compact {
+            38.0
+        } else {
+            44.0
+        };
+        let well_h = if wide {
+            44.0
+        } else if compact {
+            36.0
+        } else {
+            42.0
+        };
+        let gap = if compact { 4.0 } else { 6.0 };
+        let sep = if wide {
+            16.0
+        } else if compact {
+            12.0
+        } else {
+            16.0
+        };
+        let done_w = if wide {
+            56.0
+        } else if compact {
+            46.0
+        } else {
+            52.0
+        };
+        let row_gap = 8.0;
+        let rows_h = if wide { well_h } else { well_h * 2.0 + row_gap };
+        let tray_h = pad * 2.0 + rows_h;
+        let strip = Rect::from_min_size(
+            pos2(
+                canvas.center().x - width * 0.5,
+                (canvas.bottom() - tray_h - 12.0).max(canvas.top() + 4.0),
+            ),
+            vec2(width, tray_h),
+        );
+        let row_a = strip.top() + pad;
+        let row_b = row_a + well_h + row_gap;
+        let surface_y = if wide { row_a } else { row_b };
+
+        let linked = Rect::from_min_size(pos2(strip.left() + pad, row_a), vec2(well_w, well_h));
+        let separate = linked.translate(vec2(well_w + gap, 0.0));
+        let done = Rect::from_min_size(
+            pos2(strip.right() - pad - done_w, row_a),
+            vec2(done_w, well_h),
+        );
+        let swatch_w = if compact { 34.0 } else { 40.0 };
+        let swatch_gap = if compact { 4.0 } else { 5.0 };
+        let paper_w = swatch_w * PaperKind::ALL.len() as f32
+            + swatch_gap * PaperKind::ALL.len().saturating_sub(1) as f32;
+        // Wide: the appearance cluster hangs right of the flow control, before
+        // the done key. Narrow: papers start on the left, tones on the right.
+        let (tone_step, tone_right, paper_x) = if wide {
+            let step = 34.0;
+            let right = done.left() - sep - step * 0.5;
+            let left = right - 2.0 * step - (step - 2.0) * 0.5;
+            (step, right, left - sep - paper_w)
+        } else {
+            let x = strip.left() + pad;
+            let right = strip.right() - pad - 12.0;
+            let step = ((right - (x + paper_w) - 6.0) / 2.5).clamp(22.0, 34.0);
+            (step, right, x)
+        };
+        let paper_end = paper_x + paper_w;
+        let tone_left = tone_right - 2.0 * tone_step - (tone_step - 2.0) * 0.5;
+        let dot_r = (tone_step * 0.3).clamp(8.0, 11.0);
+        let flow_x = separate.right() + sep;
+        let flow_right = if wide {
+            paper_x - sep
+        } else {
+            done.left() - sep
+        };
+        let flow = Rect::from_min_size(
+            pos2(flow_x, row_a),
+            vec2((flow_right - flow_x).max(44.0), well_h),
+        );
+        let icon_scale = (well_w / 42.0).clamp(0.85, 1.2);
+        let paper_tex = self.paper_tex(ctx);
+        Area::new(Id::new("pages-edit-strip"))
+            .fixed_pos(strip.min)
+            .order(Order::Foreground)
+            .show(ctx, |ui| {
+                let p = ui.painter().clone();
+                p.rect_filled(
+                    strip.translate(vec2(0.0, 4.0)),
+                    16.0,
+                    self.look.shadow.gamma_multiply(0.45),
+                );
+                p.rect_filled(strip, 16.0, self.look.paper);
+                let grain = p.add(Shape::Noop);
+                p.set(grain, paper_grain(strip.shrink(1.0), 15, &paper_tex));
+                p.rect_stroke(
+                    strip,
+                    16.0,
+                    Stroke::new(1.0, self.look.desk_edge),
+                    StrokeKind::Inside,
+                );
+                p.rect_stroke(
+                    strip.shrink(3.0),
+                    13.0,
+                    Stroke::new(1.0, self.look.ink.gamma_multiply(0.06)),
+                    StrokeKind::Inside,
+                );
+                // Hairlines keep each cluster of the instrument distinct.
+                let mut dividers = vec![
+                    ((separate.right() + flow.left()) * 0.5, row_a),
+                    (
+                        (paper_end + tone_left) * 0.5,
+                        if wide { row_a } else { row_b },
+                    ),
+                ];
+                if wide {
+                    dividers.push(((flow.right() + paper_x) * 0.5, row_a));
+                }
+                for (x, row_y) in dividers {
+                    p.vline(
+                        x,
+                        (row_y + 3.0)..=(row_y + well_h - 3.0),
+                        Stroke::new(1.0, self.look.ink.gamma_multiply(0.14)),
+                    );
+                }
+                if self.tray_well(
+                    ui,
+                    linked,
+                    join == SheetJoin::Linked,
+                    "Linked",
+                    "Linked pages — one sheet",
+                    |p, c, fg| paint_join_linked(p, c, fg, icon_scale),
+                ) {
+                    self.set_sheet_join(SheetJoin::Linked);
+                }
+                if self.tray_well(
+                    ui,
+                    separate,
+                    join == SheetJoin::Separate,
+                    "Separate",
+                    "Separate pages — a gutter",
+                    |p, c, fg| paint_join_separate(p, c, fg, icon_scale),
+                ) {
+                    self.set_sheet_join(SheetJoin::Separate);
+                }
+                self.tray_flow_slider(ui, flow, arrangement);
+                if self.tray_done(ui, done) {
+                    self.leave_pages_mode();
+                }
+                for (index, kind) in PaperKind::ALL.into_iter().enumerate() {
+                    let swatch = Rect::from_min_size(
+                        pos2(paper_x + index as f32 * (swatch_w + swatch_gap), surface_y),
+                        vec2(swatch_w, well_h),
+                    );
+                    let on = self.note.as_ref().is_some_and(|note| note.paper == kind);
+                    let resp = ui.interact(
+                        swatch,
+                        ui.id().with(("strip-paper", kind.label())),
+                        Sense::click(),
+                    );
+                    resp.widget_info(|| {
+                        WidgetInfo::selected(WidgetType::Button, true, on, kind.label())
                     });
-                    let fill = if current == Some(layout) {
-                        mix_col(self.look.paper, self.look.green(), 0.28)
-                    } else {
-                        self.look.paper
-                    };
-                    let (face, fg) =
-                        self.paint_note_surface(ui, rect.shrink(2.0), &response, fill, 10);
-                    let preview = Rect::from_center_size(
-                        pos2(face.left() + 28.0, face.center().y),
-                        vec2(40.0, 32.0),
-                    );
-                    let count = if layout == PageArrangement::TwoColumns {
-                        6
-                    } else {
-                        3
-                    };
-                    let cells: Vec<_> = (0..count).map(|index| layout.cell(index)).collect();
-                    let max_col = cells.iter().map(|cell| cell.0).max().unwrap_or(0);
-                    let max_row = cells.iter().map(|cell| cell.1).max().unwrap_or(0);
-                    let paper_size = vec2(7.0, 8.0);
-                    let step = vec2(9.5, 10.0);
-                    let group = vec2(
-                        max_col as f32 * step.x + paper_size.x,
-                        max_row as f32 * step.y + paper_size.y,
-                    );
-                    let start = preview.center() - group * 0.5;
-                    for (col, row) in cells {
-                        let miniature = Rect::from_min_size(
-                            start + vec2(col as f32 * step.x, row as f32 * step.y),
-                            paper_size,
+                    let p = ui.painter();
+                    self.paint_paper_swatch(p, swatch.shrink(2.0), kind);
+                    if on {
+                        p.rect_stroke(
+                            swatch,
+                            8.0,
+                            Stroke::new(1.8, self.look.accent),
+                            StrokeKind::Outside,
                         );
-                        ui.painter().rect_stroke(
-                            miniature,
-                            1.0,
-                            Stroke::new(1.0, fg.gamma_multiply(0.72)),
+                    } else {
+                        p.rect_stroke(
+                            swatch,
+                            8.0,
+                            Stroke::new(
+                                1.0,
+                                self.look.ink.gamma_multiply(if resp.hovered() {
+                                    0.34
+                                } else {
+                                    0.18
+                                }),
+                            ),
                             StrokeKind::Inside,
                         );
                     }
-                    ui.painter().text(
-                        pos2(face.left() + 57.0, face.center().y),
-                        Align2::LEFT_CENTER,
-                        layout.label(),
-                        self.look.serif(16.0),
-                        fg,
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(Id::new(("strip-paper", kind.label())), swatch)
+                    });
+                    if resp
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text(format!("{} paper", kind.label()))
+                        .clicked()
+                    {
+                        self.set_paper(kind);
+                    }
+                }
+                for (index, (name, tone_choice)) in [
+                    ("White", PaperTone::White),
+                    ("Sand", PaperTone::Default),
+                    ("Black", PaperTone::Black),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let cell = Rect::from_center_size(
+                        pos2(
+                            tone_right - (2 - index) as f32 * tone_step,
+                            surface_y + well_h * 0.5,
+                        ),
+                        vec2(tone_step - 2.0, well_h),
                     );
-                    if response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
-                        picked = Some(layout);
+                    let on = tone == tone_choice;
+                    let resp =
+                        ui.interact(cell, ui.id().with(("strip-tone", name)), Sense::click());
+                    resp.widget_info(|| WidgetInfo::selected(WidgetType::Button, true, on, name));
+                    let p = ui.painter();
+                    let dot = self.look.paper_surface(tone_choice);
+                    if resp.hovered() && !on {
+                        p.circle_stroke(
+                            cell.center(),
+                            dot_r + 3.0,
+                            Stroke::new(1.0, self.look.ink.gamma_multiply(0.25)),
+                        );
+                    }
+                    p.circle_filled(cell.center(), dot_r, dot);
+                    p.circle_stroke(
+                        cell.center(),
+                        dot_r,
+                        Stroke::new(1.0, self.look.ink.gamma_multiply(0.42)),
+                    );
+                    if on {
+                        p.circle_stroke(
+                            cell.center(),
+                            dot_r + 3.0,
+                            Stroke::new(1.6, self.look.accent),
+                        );
+                        paint_check(
+                            p,
+                            cell.center(),
+                            well_glyph(dot, self.look.paper, self.look.ink),
+                        );
+                    }
+                    ui.ctx()
+                        .data_mut(|d| d.insert_temp(Id::new(("strip-tone", name)), cell));
+                    if resp
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text(match tone_choice {
+                            PaperTone::White => "White pages",
+                            PaperTone::Default => "Sand pages",
+                            PaperTone::Black => "Black pages",
+                        })
+                        .clicked()
+                    {
+                        self.set_paper_tone(tone_choice);
                     }
                 }
             });
-        if let Some(layout) = picked {
-            self.arrange_pages(layout);
-            Popup::close_all(&button.ctx);
-        }
-    }
-
-    fn page_paper_picker(&mut self, button: &Response) {
-        let mut picked_paper = None;
-        let mut picked_tone = None;
-        Popup::menu(button)
-            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
-            .frame(self.note_popup_frame())
-            .show(|ui| {
-                ui.set_width(224.0);
-                self.menu_head(ui, "Paper style");
-                ScrollArea::vertical()
-                    .max_height((button.ctx.screen_rect().height() - 124.0).max(88.0))
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        let current = self.note.as_ref().map(|note| note.paper);
-                        for kind in PaperKind::ALL {
-                            if self.paper_kind_row(ui, kind, current == Some(kind)) {
-                                picked_paper = Some(kind);
-                            }
-                        }
-                        picked_tone = self.paper_tone_picker_row(ui);
-                    });
-            });
-        if let Some(kind) = picked_paper {
-            self.set_paper(kind);
-        }
-        if let Some(tone) = picked_tone {
-            self.set_paper_tone(tone);
-        }
+        ctx.data_mut(|d| d.insert_temp(Id::new("pages-strip-rect"), strip));
     }
 
     fn ui_pdf_page_number(&mut self, ctx: &Context) {
@@ -4978,10 +5342,16 @@ impl InkarchyApp {
             ))
             .order(Order::Foreground)
             .show(ctx, |ui| {
-                let (hit, response) = ui.allocate_exact_size(vec2(visible_width.max(44.0), 44.0), Sense::click());
+                let (hit, response) =
+                    ui.allocate_exact_size(vec2(visible_width.max(44.0), 44.0), Sense::click());
                 ctx.data_mut(|d| d.insert_temp(Id::new("pdf-page-number-rect"), hit));
-                response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true,
-                    format!("Go to page {current} of {page_count}")));
+                response.widget_info(|| {
+                    WidgetInfo::labeled(
+                        WidgetType::Button,
+                        true,
+                        format!("Go to page {current} of {page_count}"),
+                    )
+                });
                 let rect = Rect::from_center_size(hit.center(), vec2(visible_width, 26.0));
                 let fill = mix_col(
                     self.look.desk,
@@ -4989,9 +5359,16 @@ impl InkarchyApp {
                     if response.hovered() { 0.26 } else { 0.13 },
                 );
                 ui.painter().rect_filled(rect, 8.0, fill);
-                ui.painter().text(rect.center(), Align2::CENTER_CENTER, current.to_string(),
-                    self.look.mono(13.0), self.look.fg);
-                response.on_hover_text("Go to page").on_hover_cursor(CursorIcon::PointingHand)
+                ui.painter().text(
+                    rect.center(),
+                    Align2::CENTER_CENTER,
+                    current.to_string(),
+                    self.look.mono(13.0),
+                    self.look.fg,
+                );
+                response
+                    .on_hover_text("Go to page")
+                    .on_hover_cursor(CursorIcon::PointingHand)
             });
         if number.inner.clicked() {
             self.pdf_page_target = current;
@@ -5006,27 +5383,49 @@ impl InkarchyApp {
                 ui.horizontal(|ui| {
                     let back = self.note_action(ui, "−", 44.0, false);
                     ui.vertical_centered(|ui| {
-                        ui.label(RichText::new(self.pdf_page_target.to_string())
-                            .font(self.look.serif(24.0)).color(self.look.ink));
-                        ui.label(RichText::new(format!("of {page_count}"))
-                            .font(self.look.mono(11.0)).color(self.look.ink.gamma_multiply(0.6)));
+                        ui.label(
+                            RichText::new(self.pdf_page_target.to_string())
+                                .font(self.look.serif(24.0))
+                                .color(self.look.ink),
+                        );
+                        ui.label(
+                            RichText::new(format!("of {page_count}"))
+                                .font(self.look.mono(11.0))
+                                .color(self.look.ink.gamma_multiply(0.6)),
+                        );
                     });
                     let next = self.note_action(ui, "+", 44.0, false);
                     let held = if let Some((direction, _, _)) = self.pdf_page_repeat {
-                        ui.input(|input| input.pointer.primary_down()).then_some(direction)
-                    } else if back.is_pointer_button_down_on() { Some(-1) }
-                        else if next.is_pointer_button_down_on() { Some(1) } else { None };
+                        ui.input(|input| input.pointer.primary_down())
+                            .then_some(direction)
+                    } else if back.is_pointer_button_down_on() {
+                        Some(-1)
+                    } else if next.is_pointer_button_down_on() {
+                        Some(1)
+                    } else {
+                        None
+                    };
                     let now = ui.input(|input| input.time);
                     let was_held = self.pdf_page_repeat.is_some();
                     let step = if let Some(direction) = held {
                         ctx.request_repaint_after(Duration::from_millis(20));
                         match &mut self.pdf_page_repeat {
-                            Some((held_direction, started, next_repeat)) if *held_direction == direction => {
+                            Some((held_direction, started, next_repeat))
+                                if *held_direction == direction =>
+                            {
                                 if now >= *next_repeat {
-                                    *next_repeat = now + if now - *started >= 2.0 { 0.055 }
-                                        else if now - *started >= 1.0 { 0.11 } else { 0.20 };
+                                    *next_repeat = now
+                                        + if now - *started >= 2.0 {
+                                            0.055
+                                        } else if now - *started >= 1.0 {
+                                            0.11
+                                        } else {
+                                            0.20
+                                        };
                                     Some(direction)
-                                } else { None }
+                                } else {
+                                    None
+                                }
                             }
                             _ => {
                                 self.pdf_page_repeat = Some((direction, now, now + 0.45));
@@ -5035,15 +5434,22 @@ impl InkarchyApp {
                         }
                     } else {
                         self.pdf_page_repeat = None;
-                        if was_held { None }
-                        else if back.clicked() { Some(-1) }
-                        else if next.clicked() { Some(1) }
-                        else { None }
+                        if was_held {
+                            None
+                        } else if back.clicked() {
+                            Some(-1)
+                        } else if next.clicked() {
+                            Some(1)
+                        } else {
+                            None
+                        }
                     };
                     if let Some(direction) = step {
                         self.pdf_page_target = if direction < 0 {
                             self.pdf_page_target.saturating_sub(1).max(1)
-                        } else { (self.pdf_page_target + 1).min(page_count) };
+                        } else {
+                            (self.pdf_page_target + 1).min(page_count)
+                        };
                         self.jump_to_page(self.pdf_page_target - 1);
                     }
                 });
@@ -5063,25 +5469,31 @@ impl InkarchyApp {
             self.pdf_search_open = !self.pdf_search_open;
         }
         if !self.pdf_search_open {
-            button.ctx.memory_mut(|memory| memory.surrender_focus(Id::new("pdf-search-input")));
+            button
+                .ctx
+                .memory_mut(|memory| memory.surrender_focus(Id::new("pdf-search-input")));
             return None;
         }
         let width = ui.available_width().min(420.0).max(1.0);
         let (outer, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
-        ui.ctx().data_mut(|d| d.insert_temp(Id::new("pdf-search-field-rect"), outer));
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(Id::new("pdf-search-field-rect"), outer));
         self.paint_search_capsule(ui, outer, false);
         let show_arrows = width >= 250.0;
         let show_count = width >= 160.0;
         let mut right = outer.right() - 10.0;
-        let close_rect = Rect::from_center_size(pos2(right - 12.0, outer.center().y), vec2(24.0, 30.0));
+        let close_rect =
+            Rect::from_center_size(pos2(right - 12.0, outer.center().y), vec2(24.0, 30.0));
         right -= 28.0;
         let next_rect = show_arrows.then(|| {
-            let rect = Rect::from_center_size(pos2(right - 12.0, outer.center().y), vec2(24.0, 30.0));
+            let rect =
+                Rect::from_center_size(pos2(right - 12.0, outer.center().y), vec2(24.0, 30.0));
             right -= 28.0;
             rect
         });
         let previous_rect = show_arrows.then(|| {
-            let rect = Rect::from_center_size(pos2(right - 12.0, outer.center().y), vec2(24.0, 30.0));
+            let rect =
+                Rect::from_center_size(pos2(right - 12.0, outer.center().y), vec2(24.0, 30.0));
             right -= 28.0;
             rect
         });
@@ -5093,26 +5505,35 @@ impl InkarchyApp {
             pos2(outer.left() + 12.0, outer.top() + 6.0),
             pos2((right - 6.0).max(outer.left() + 13.0), outer.bottom() - 6.0),
         );
-        let enter_step = ui.ctx().memory(|memory| memory.has_focus(Id::new("pdf-search-input")))
-            .then(|| ui.input(|i| i.key_pressed(Key::Enter).then_some(if i.modifiers.shift { -1 } else { 1 })))
+        let enter_step = ui
+            .ctx()
+            .memory(|memory| memory.has_focus(Id::new("pdf-search-input")))
+            .then(|| {
+                ui.input(|i| {
+                    i.key_pressed(Key::Enter)
+                        .then_some(if i.modifiers.shift { -1 } else { 1 })
+                })
+            })
             .flatten();
-        let edit = ui.scope_builder(UiBuilder::new().max_rect(inner), |ui| {
-            ui.set_min_size(inner.size());
-            let hint = self.look.fg.gamma_multiply(0.42);
-            ui.visuals_mut().override_text_color = Some(self.look.fg);
-            ui.visuals_mut().widgets.noninteractive.fg_stroke = Stroke::new(1.0, hint);
-            ui.add_sized(
-                inner.size(),
+        let edit = ui
+            .scope_builder(UiBuilder::new().max_rect(inner), |ui| {
+                ui.set_min_size(inner.size());
+                let hint = self.look.fg.gamma_multiply(0.42);
+                ui.visuals_mut().override_text_color = Some(self.look.fg);
+                ui.visuals_mut().widgets.noninteractive.fg_stroke = Stroke::new(1.0, hint);
+                ui.add_sized(
+                    inner.size(),
                     TextEdit::singleline(&mut self.pdf_search_query)
                         .id(Id::new("pdf-search-input"))
-                    .hint_text("Search a word or phrase…")
-                    .font(self.look.mono(14.0))
-                    .text_color(self.look.fg)
-                    .frame(false)
-                    .margin(Margin::ZERO)
-                    .vertical_align(Align::Center),
-            )
-        }).inner;
+                        .hint_text("Search a word or phrase…")
+                        .font(self.look.mono(14.0))
+                        .text_color(self.look.fg)
+                        .frame(false)
+                        .margin(Margin::ZERO)
+                        .vertical_align(Align::Center),
+                )
+            })
+            .inner;
         if edit.has_focus() {
             self.paint_search_capsule(ui, outer, true);
         }
@@ -5133,24 +5554,30 @@ impl InkarchyApp {
                         let pdf_page = bg.pdf_page?;
                         let key = format!("{}:{}:{pdf_page}", note.id, bg.file);
                         let text = self.pdf_text.get(&key)?;
-                        let count = if query.is_empty() { 0 } else { text.matches(&query).count() };
+                        let count = if query.is_empty() {
+                            0
+                        } else {
+                            text.matches(&query).count()
+                        };
                         (count > 0).then_some((index, count))
                     })
                     .collect()
             })
             .unwrap_or_default();
         let total: usize = matches.iter().map(|(_, count)| count).sum();
-        let pending = !query.is_empty() && self.note.as_ref().is_some_and(|note| {
-            note.pages.iter().any(|page| {
-                page.background.as_ref().is_some_and(|bg| {
-                    bg.pdf_page.is_some_and(|pdf_page| {
-                        self.pdf_text_pending
-                            .contains(&format!("{}:{}:{pdf_page}", note.id, bg.file))
+        let pending = !query.is_empty()
+            && self.note.as_ref().is_some_and(|note| {
+                note.pages.iter().any(|page| {
+                    page.background.as_ref().is_some_and(|bg| {
+                        bg.pdf_page.is_some_and(|pdf_page| {
+                            self.pdf_text_pending
+                                .contains(&format!("{}:{}:{pdf_page}", note.id, bg.file))
+                        })
                     })
                 })
-            })
-        });
-        let first = query != self.pdf_search_seen_query || (self.pdf_search_last_count == 0 && total > 0);
+            });
+        let first =
+            query != self.pdf_search_seen_query || (self.pdf_search_last_count == 0 && total > 0);
         if query != self.pdf_search_seen_query {
             self.pdf_search_match = 0;
             self.pdf_search_seen_query = query.clone();
@@ -5164,7 +5591,13 @@ impl InkarchyApp {
 
         let close = ui.interact(close_rect, ui.id().with("pdf-search-close"), Sense::click());
         close.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "Close search"));
-        ui.painter().text(close_rect.center(), Align2::CENTER_CENTER, "×", self.look.mono(19.0), self.look.fg);
+        ui.painter().text(
+            close_rect.center(),
+            Align2::CENTER_CENTER,
+            "×",
+            self.look.mono(19.0),
+            self.look.fg,
+        );
         let mut step = 0_i8;
         for (rect, label, direction, name) in [
             (previous_rect, "↑", -1, "Previous match"),
@@ -5173,8 +5606,15 @@ impl InkarchyApp {
             if let Some(rect) = rect {
                 let response = ui.interact(rect, ui.id().with(name), Sense::click());
                 response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, total > 0, name));
-                ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, self.look.mono(17.0),
-                    self.look.fg.gamma_multiply(if total > 0 { 1.0 } else { 0.35 }));
+                ui.painter().text(
+                    rect.center(),
+                    Align2::CENTER_CENTER,
+                    label,
+                    self.look.mono(17.0),
+                    self.look
+                        .fg
+                        .gamma_multiply(if total > 0 { 1.0 } else { 0.35 }),
+                );
                 if response.clicked() && total > 0 {
                     step = direction;
                     edit.request_focus();
@@ -5182,13 +5622,41 @@ impl InkarchyApp {
             }
         }
         if show_count {
-            let count = if query.is_empty() { "0/0".to_owned() }
-                else if pending { format!("{}/{}+", if total == 0 { 0 } else { self.pdf_search_match + 1 }, total) }
-                else { format!("{}/{}", if total == 0 { 0 } else { self.pdf_search_match + 1 }, total) };
-            ui.painter().text(pos2(count_right - 30.0, outer.center().y), Align2::CENTER_CENTER,
-                count, self.look.mono(11.0), self.look.fg.gamma_multiply(0.78));
-            ui.painter().vline(right + 3.0, outer.y_range().shrink(8.0),
-                Stroke::new(1.0, self.look.desk_edge));
+            let count = if query.is_empty() {
+                "0/0".to_owned()
+            } else if pending {
+                format!(
+                    "{}/{}+",
+                    if total == 0 {
+                        0
+                    } else {
+                        self.pdf_search_match + 1
+                    },
+                    total
+                )
+            } else {
+                format!(
+                    "{}/{}",
+                    if total == 0 {
+                        0
+                    } else {
+                        self.pdf_search_match + 1
+                    },
+                    total
+                )
+            };
+            ui.painter().text(
+                pos2(count_right - 30.0, outer.center().y),
+                Align2::CENTER_CENTER,
+                count,
+                self.look.mono(11.0),
+                self.look.fg.gamma_multiply(0.78),
+            );
+            ui.painter().vline(
+                right + 3.0,
+                outer.y_range().shrink(8.0),
+                Stroke::new(1.0, self.look.desk_edge),
+            );
         }
         if total > 0 {
             if let Some(direction) = enter_step {
@@ -5212,37 +5680,17 @@ impl InkarchyApp {
                 index -= count;
             }
         }
-        let outside = ui.input(|i| i.pointer.any_click() && i.pointer.interact_pos()
-            .is_some_and(|pos| !outer.contains(pos) && !button.rect.contains(pos)));
+        let outside = ui.input(|i| {
+            i.pointer.any_click()
+                && i.pointer
+                    .interact_pos()
+                    .is_some_and(|pos| !outer.contains(pos) && !button.rect.contains(pos))
+        });
         if close.clicked() || outside {
             self.pdf_search_open = false;
             ui.memory_mut(|memory| memory.surrender_focus(edit.id));
         }
         Some(outer)
-    }
-
-    fn paper_kind_row(&self, ui: &mut Ui, kind: PaperKind, on: bool) -> bool {
-        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 56.0), Sense::click());
-        resp.widget_info(|| {
-            WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), on, kind.label())
-        });
-        let fill = if on {
-            mix_col(self.look.paper, self.look.green(), 0.28)
-        } else {
-            self.look.paper
-        };
-        let (face, fg) = self.paint_note_surface(ui, rect.shrink(2.0), &resp, fill, 10);
-        let swatch = Rect::from_min_size(face.min + vec2(8.0, 6.0), vec2(58.0, 40.0));
-        let p = ui.painter();
-        self.paint_paper_swatch(p, swatch, kind);
-        p.text(
-            pos2(swatch.max.x + 12.0, face.center().y),
-            Align2::LEFT_CENTER,
-            kind.label(),
-            self.look.serif(16.0),
-            fg,
-        );
-        resp.on_hover_cursor(CursorIcon::PointingHand).clicked()
     }
 
     /// Close crop of the ruling. A whole page fitted in the row hides the pattern.
@@ -5350,6 +5798,33 @@ impl InkarchyApp {
         );
     }
 
+    /// Light-blue action row for entering Pages edit, tinted like the tray's
+    /// active wells on the paper.
+    fn menu_pages_row(&self, ui: &mut Ui, label: &str) -> bool {
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::click());
+        resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), label));
+        if resp.gained_focus() {
+            resp.scroll_to_me(Some(Align::Center));
+        }
+        let fill = mix_col(self.look.paper, self.look.accent, 0.34);
+        let (face, fg) = self.paint_note_surface(ui, rect.shrink(2.0), &resp, fill, 12);
+        paint_grid_icon(
+            ui.painter(),
+            pos2(face.min.x + 16.0, face.center().y),
+            2,
+            2,
+            fg,
+        );
+        ui.painter().text(
+            pos2(face.min.x + 32.0, face.center().y),
+            Align2::LEFT_CENTER,
+            label,
+            self.look.mono(13.0),
+            fg,
+        );
+        resp.on_hover_cursor(CursorIcon::PointingHand).clicked()
+    }
+
     fn menu_row(
         &self,
         ui: &mut Ui,
@@ -5401,23 +5876,6 @@ impl InkarchyApp {
             );
         }
         resp.on_hover_cursor(CursorIcon::PointingHand).clicked()
-    }
-
-    /// Small section name, with the group rule directly under it.
-    fn menu_head(&self, ui: &mut Ui, title: &str) {
-        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
-        ui.painter().text(
-            pos2(rect.min.x + 12.0, rect.top() + 9.0),
-            Align2::LEFT_CENTER,
-            title,
-            self.look.mono(11.0),
-            self.look.fg.gamma_multiply(0.62),
-        );
-        ui.painter().hline(
-            rect.x_range().shrink(10.0),
-            rect.bottom() - 1.0,
-            Stroke::new(1.0_f32, self.look.fg.gamma_multiply(0.28)),
-        );
     }
 
     /// Ink-on-paper section label for the notebook's settings sheet.
@@ -5640,152 +6098,110 @@ impl InkarchyApp {
             self.handle_drops_and_paste(ctx);
         }
 
-        TopBottomPanel::top("rule")
-            .exact_height(52.0)
-            .show_separator_line(false)
-            .frame(Frame::NONE.fill(self.look.desk))
-            .show(ctx, |ui| {
-                let bar = ui.max_rect();
-                ctx.data_mut(|d| d.insert_temp(Id::new("top-rect"), bar));
-                ui.painter().hline(
-                    bar.x_range(),
-                    bar.max.y - 0.5,
-                    Stroke::new(1.0_f32, self.look.desk_deep),
-                );
-                ui.horizontal_centered(|ui| {
-                    ui.add_space(6.0);
-                    let exit = self.shelf_exit_btn(ui);
-                    if Self::activate_navigation_touch(ctx, &exit) {
-                        self.close_desk();
-                        return;
-                    }
-                    ctx.data_mut(|d| d.insert_temp(Id::new("header-left-end"), exit.rect.right()));
-                    ui.add_space(8.0);
-                    let chrome = self.chrome_btn();
-                    if !title_in_menu {
-                        let te = TextEdit::singleline(&mut self.title_buf)
-                            .font(self.look.serif(20.0))
-                            .desired_width(
-                                (ui.available_width() - if compact { 104.0 } else { 272.0 })
-                                    .clamp(48.0, 240.0),
-                            )
-                            .frame(false);
-                        let title = ui.add(te);
+        if self.sheet_tabs_on {
+            // Pages edit owns the canvas: the tray on the paper replaces this header.
+        } else {
+            TopBottomPanel::top("rule")
+                .exact_height(52.0)
+                .show_separator_line(false)
+                .frame(Frame::NONE.fill(self.look.desk))
+                .show(ctx, |ui| {
+                    let bar = ui.max_rect();
+                    ctx.data_mut(|d| d.insert_temp(Id::new("top-rect"), bar));
+                    ui.painter().hline(
+                        bar.x_range(),
+                        bar.max.y - 0.5,
+                        Stroke::new(1.0_f32, self.look.desk_deep),
+                    );
+                    ui.horizontal_centered(|ui| {
+                        ui.add_space(6.0);
+                        let exit = self.shelf_exit_btn(ui);
+                        if Self::activate_navigation_touch(ctx, &exit) {
+                            self.close_desk();
+                            return;
+                        }
                         ctx.data_mut(|d| {
-                            d.insert_temp(Id::new("header-left-end"), title.rect.right())
+                            d.insert_temp(Id::new("header-left-end"), exit.rect.right())
                         });
-                        if title.changed() {
-                            if let Some(n) = &mut self.note {
-                                n.title = self.title_buf.clone();
-                                self.mark_dirty();
-                            }
-                        }
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.add_space(8.0);
-                        let more = self.round_well(ui, chrome, self.look.paper, paint_more);
-                        ctx.data_mut(|d| d.insert_temp(Id::new("notebook-menu-button-rect"), more.rect));
-                        more.widget_info(|| {
-                            WidgetInfo::labeled(
-                                WidgetType::Button,
-                                ui.is_enabled(),
-                                "Notebook menu",
-                            )
-                        });
-                        // On narrow windows, leave room for the PDF search field.
-                        if ctx.screen_rect().width() >= 480.0 {
-                            let full = self.round_well(
-                                ui, chrome, self.look.paper, paint_fullscreen_icon,
-                            );
-                            ctx.data_mut(|d| d.insert_temp(Id::new("fullscreen-button-rect"), full.rect));
-                            full.widget_info(|| {
-                                WidgetInfo::labeled(
-                                    WidgetType::Button,
-                                    ui.is_enabled(),
-                                    "Fit page to window",
+                        let chrome = self.chrome_btn();
+                        if !title_in_menu {
+                            let te = TextEdit::singleline(&mut self.title_buf)
+                                .font(self.look.serif(20.0))
+                                .desired_width(
+                                    (ui.available_width() - if compact { 104.0 } else { 272.0 })
+                                        .clamp(48.0, 240.0),
                                 )
+                                .frame(false);
+                            let title = ui.add(te);
+                            ctx.data_mut(|d| {
+                                d.insert_temp(Id::new("header-left-end"), title.rect.right())
                             });
-                            if full.clicked() {
-                                self.fit_to_screen();
+                            if title.changed() {
+                                if let Some(n) = &mut self.note {
+                                    n.title = self.title_buf.clone();
+                                    self.mark_dirty();
+                                }
                             }
                         }
-                        let pages_fill = mix_col(
-                            self.look.paper,
-                            self.look.accent,
-                            if self.sheet_tabs_on { 1.0 } else { 0.62 },
-                        );
-                        let pages = self.round_well(ui, chrome, pages_fill, paint_pages_icon);
-                        ctx.data_mut(|d| d.insert_temp(Id::new("pages-button-rect"), pages.rect));
-                        pages.widget_info(|| {
-                            WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Pages")
-                        });
-                        if pages.clicked() {
-                            self.toggle_pages_mode();
-                        }
-                        let mut right_cluster_left = pages.rect.left();
-                        if self.sheet_tabs_on {
-                            let paper = self.round_well(
-                                ui, chrome, self.look.paper, paint_paper_style_icon,
-                            );
-                            right_cluster_left = paper.rect.left();
-                            ctx.data_mut(|data| {
-                                data.insert_temp(Id::new("page-paper-button-rect"), paper.rect)
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.add_space(8.0);
+                            let more = self.round_well(ui, chrome, self.look.paper, paint_more);
+                            ctx.data_mut(|d| {
+                                d.insert_temp(Id::new("notebook-menu-button-rect"), more.rect)
                             });
-                            paper.widget_info(|| {
-                                WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Paper style")
-                            });
-                            self.page_paper_picker(&paper);
-                        }
-                        if self.sheet_tabs_on
-                            && self.note.as_ref().is_some_and(|note| note.pages.len() > 1)
-                        {
-                            let layout = self.round_well(
-                                ui,
-                                chrome,
-                                self.look.paper,
-                                paint_page_layout_icon,
-                            );
-                            right_cluster_left = layout.rect.left();
-                            ctx.data_mut(|data| {
-                                data.insert_temp(Id::new("page-layout-button-rect"), layout.rect)
-                            });
-                            layout.widget_info(|| {
+                            more.widget_info(|| {
                                 WidgetInfo::labeled(
                                     WidgetType::Button,
                                     ui.is_enabled(),
-                                    "Arrange pages",
+                                    "Notebook menu",
                                 )
                             });
-                            self.page_layout_picker(&layout);
-                        }
-                        let join = self
-                            .note
-                            .as_ref()
-                            .map(|n| n.sheet_join)
-                            .unwrap_or(SheetJoin::Linked);
-                        let mut act = None;
-                        // The right-hand tool case occupies the same vertical strip as
-                        // the default menu. Keep this sheet entirely beside it.
-                        let right_dock = (self.dock_layout_edge() == DockEdge::Right)
-                            .then(|| ctx.data(|d| d.get_temp::<Rect>(Id::new("dock-rect"))))
-                            .flatten();
-                        let menu_right = right_dock
-                            .map(|dock| dock.left() - 10.0)
-                            .unwrap_or(more.rect.right());
-                        let menu_width = (menu_right - ctx.screen_rect().left() - 32.0)
-                            .min(312.0)
-                            .max(120.0);
-                        let mut popup = Popup::menu(&more)
-                            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
-                            .frame(self.note_popup_frame().fill(self.look.paper));
-                        if right_dock.is_some() {
-                            popup = popup
-                                .at_position(pos2(menu_right, more.rect.bottom()))
-                                .align(egui::RectAlign::BOTTOM_END)
-                                .align_alternatives(&[]);
-                        }
-                        let menu = popup
-                            .show(|ui| {
+                            // On narrow windows, leave room for the PDF search field.
+                            if ctx.screen_rect().width() >= 480.0 {
+                                let full = self.round_well(
+                                    ui,
+                                    chrome,
+                                    self.look.paper,
+                                    paint_fullscreen_icon,
+                                );
+                                ctx.data_mut(|d| {
+                                    d.insert_temp(Id::new("fullscreen-button-rect"), full.rect)
+                                });
+                                full.widget_info(|| {
+                                    WidgetInfo::labeled(
+                                        WidgetType::Button,
+                                        ui.is_enabled(),
+                                        "Fit page to window",
+                                    )
+                                });
+                                if full.clicked() {
+                                    self.fit_to_screen();
+                                }
+                            }
+                            let right_cluster_left = more.rect.left();
+                            let mut act = None;
+                            // The right-hand tool case occupies the same vertical strip as
+                            // the default menu. Keep this sheet entirely beside it.
+                            let right_dock = (self.dock_layout_edge() == DockEdge::Right)
+                                .then(|| ctx.data(|d| d.get_temp::<Rect>(Id::new("dock-rect"))))
+                                .flatten();
+                            let menu_right = right_dock
+                                .map(|dock| dock.left() - 10.0)
+                                .unwrap_or(more.rect.right());
+                            let menu_width = (menu_right - ctx.screen_rect().left() - 32.0)
+                                .min(312.0)
+                                .max(120.0);
+                            let mut popup = Popup::menu(&more)
+                                .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+                                .frame(self.note_popup_frame().fill(self.look.paper));
+                            if right_dock.is_some() {
+                                popup = popup
+                                    .at_position(pos2(menu_right, more.rect.bottom()))
+                                    .align(egui::RectAlign::BOTTOM_END)
+                                    .align_alternatives(&[]);
+                            }
+                            let menu = popup.show(|ui| {
                                 ui.set_width(menu_width);
                                 ui.set_max_height((ctx.screen_rect().height() - 84.0).max(88.0));
                                 ui.spacing_mut().item_spacing = vec2(2.0, 3.0);
@@ -5809,23 +6225,8 @@ impl InkarchyApp {
                                             }
                                         }
                                         self.notebook_menu_head(ui, "Pages");
-                                        if self.menu_row(
-                                            ui,
-                                            "Linked pages",
-                                            "",
-                                            join == SheetJoin::Linked,
-                                            false,
-                                        ) {
-                                            act = Some(MoreAct::Linked);
-                                        }
-                                        if self.menu_row(
-                                            ui,
-                                            "Separate pages",
-                                            "",
-                                            join == SheetJoin::Separate,
-                                            false,
-                                        ) {
-                                            act = Some(MoreAct::Separate);
+                                        if self.menu_pages_row(ui, "Edit pages") {
+                                            act = Some(MoreAct::Pages);
                                         }
                                         self.notebook_menu_head(ui, "Tools");
                                         if self.menu_row(
@@ -5857,58 +6258,68 @@ impl InkarchyApp {
                                         }
                                     });
                             });
-                        if let Some(menu) = menu {
-                            ctx.data_mut(|d| d.insert_temp(Id::new("notebook-menu-rect"), menu.response.rect));
-                        }
-                        match act {
-                            Some(MoreAct::Linked) => self.set_sheet_join(SheetJoin::Linked),
-                            Some(MoreAct::Separate) => self.set_sheet_join(SheetJoin::Separate),
-                            Some(MoreAct::FingerDraw) => {
-                                self.lib.index.finger_draw = !self.lib.index.finger_draw;
-                                let saved = self.lib.save_index();
-                                self.report_save(saved);
-                                self.reset_canvas_gesture();
+                            if let Some(menu) = menu {
+                                ctx.data_mut(|d| {
+                                    d.insert_temp(Id::new("notebook-menu-rect"), menu.response.rect)
+                                });
                             }
-                            Some(MoreAct::EraseStroke) => self.set_eraser_kind(Tool::EraserStroke),
-                            Some(MoreAct::EraseArea) => self.set_eraser_kind(Tool::EraserArea),
-                            None => {}
-                        }
-                        let mut leftmost = right_cluster_left;
-                        if self.note_has_pdf() {
-                            let search =
-                                self.round_well(ui, chrome, self.look.paper, paint_search_icon);
-                            ctx.data_mut(|d| d.insert_temp(Id::new("pdf-search-button-rect"), search.rect));
-                            search.widget_info(|| {
-                                WidgetInfo::labeled(
-                                    WidgetType::Button,
-                                    ui.is_enabled(),
-                                    "Find in PDF",
-                                )
+                            match act {
+                                Some(MoreAct::Pages) => self.toggle_pages_mode(),
+                                Some(MoreAct::FingerDraw) => {
+                                    self.lib.index.finger_draw = !self.lib.index.finger_draw;
+                                    let saved = self.lib.save_index();
+                                    self.report_save(saved);
+                                    self.reset_canvas_gesture();
+                                }
+                                Some(MoreAct::EraseStroke) => {
+                                    self.set_eraser_kind(Tool::EraserStroke)
+                                }
+                                Some(MoreAct::EraseArea) => self.set_eraser_kind(Tool::EraserArea),
+                                None => {}
+                            }
+                            let mut leftmost = right_cluster_left;
+                            if self.note_has_pdf() {
+                                let search =
+                                    self.round_well(ui, chrome, self.look.paper, paint_search_icon);
+                                ctx.data_mut(|d| {
+                                    d.insert_temp(Id::new("pdf-search-button-rect"), search.rect)
+                                });
+                                search.widget_info(|| {
+                                    WidgetInfo::labeled(
+                                        WidgetType::Button,
+                                        ui.is_enabled(),
+                                        "Find in PDF",
+                                    )
+                                });
+                                let field = self.pdf_search_picker(ui, &search);
+                                leftmost = leftmost.min(field.unwrap_or(search.rect).left());
+                            }
+                            ctx.data_mut(|d| {
+                                d.insert_temp(Id::new("header-right-start"), leftmost)
                             });
-                            let field = self.pdf_search_picker(ui, &search);
-                            leftmost = leftmost.min(field.unwrap_or(search.rect).left());
-                        }
-                        ctx.data_mut(|d| d.insert_temp(Id::new("header-right-start"), leftmost));
+                        });
                     });
+                    let left_end = ctx
+                        .data(|d| d.get_temp::<f32>(Id::new("header-left-end")))
+                        .unwrap_or(bar.left());
+                    let right_start = ctx
+                        .data(|d| d.get_temp::<f32>(Id::new("header-right-start")))
+                        .unwrap_or(bar.right());
+                    let center_x = ctx.screen_rect().center().x;
+                    let free_half_width = (center_x - left_end - 8.0)
+                        .min(right_start - center_x - 8.0)
+                        .max(0.0);
+                    let meter_width = (2.0 * free_half_width).clamp(0.0, 320.0);
+                    let meter_rect = Rect::from_center_size(
+                        pos2(center_x, bar.center().y),
+                        vec2(meter_width, 44.0),
+                    );
+                    ctx.data_mut(|d| d.insert_temp(Id::new("coach-meter-rect"), meter_rect));
+                    if self.coach_enabled() && meter_width >= 32.0 {
+                        self.ui_coach_meter(ui, meter_rect);
+                    }
                 });
-                let left_end = ctx
-                    .data(|d| d.get_temp::<f32>(Id::new("header-left-end")))
-                    .unwrap_or(bar.left());
-                let right_start = ctx
-                    .data(|d| d.get_temp::<f32>(Id::new("header-right-start")))
-                    .unwrap_or(bar.right());
-                let center_x = ctx.screen_rect().center().x;
-                let free_half_width = (center_x - left_end - 8.0)
-                    .min(right_start - center_x - 8.0)
-                    .max(0.0);
-                let meter_width = (2.0 * free_half_width).clamp(0.0, 320.0);
-                let meter_rect =
-                    Rect::from_center_size(pos2(center_x, bar.center().y), vec2(meter_width, 44.0));
-                ctx.data_mut(|d| d.insert_temp(Id::new("coach-meter-rect"), meter_rect));
-                if self.coach_enabled() && meter_width >= 32.0 {
-                    self.ui_coach_meter(ui, meter_rect);
-                }
-            });
+        }
 
         CentralPanel::default()
             .frame(Frame::NONE.fill(self.look.desk))
@@ -5917,6 +6328,7 @@ impl InkarchyApp {
             });
 
         self.ui_pdf_page_number(ctx);
+        self.ui_pages_edit_strip(ctx);
 
         if !self.sheet_tabs_on {
             self.ui_floating_dock(ctx);
@@ -7190,8 +7602,7 @@ impl InkarchyApp {
     }
 
     fn handle_camera(&mut self, ui: &Ui, resp: &Response, rect: Rect) {
-        if self.selection_resize.is_some() || self.drag_last.is_some()
-        {
+        if self.selection_resize.is_some() || self.drag_last.is_some() {
             return;
         }
         if self.export_picker_open
@@ -7413,8 +7824,10 @@ impl InkarchyApp {
         }
         if self.take_pages_manage_hold(
             ui,
+            &resp,
             rect,
             &mut screen,
+            pen_ink && pen.pressed,
             primary_down,
             &mut primary_pressed,
             &mut primary_released,
@@ -9760,52 +10173,52 @@ impl InkarchyApp {
         let want_focus = self.text_focus;
         let mut took_focus = false;
         if let Some((pg, id)) = self.editing_text {
-                let cam = self.camera;
-                if let Some(note) = &mut self.note {
-                    let (pw, ph) = note.page_size();
-                    let gap = note.sheet_join.gap();
-                    if let Some(page) = note.pages.get_mut(pg) {
-                        let origin = page_origin(page.col, page.row, pw, ph, gap);
-                        if let Some(tx) = page.texts.iter_mut().find(|t| t.id == id) {
-                            let min = cam.to_screen(tx.min() + origin, rect);
-                            let size = vec2(tx.size[0] * cam.zoom, tx.size[1] * cam.zoom_y());
-                            let size_pt = tx.size_pt;
-                            let col = if tx.sticky {
-                                self.look.ink
-                            } else if note.paper_tone == PaperTone::Black
-                                && tx.color32() == self.look.ink
-                            {
-                                Color32::WHITE
-                            } else {
-                                tx.color32()
-                            };
-                            Area::new(Id::new(("tx", id)))
-                                .fixed_pos(min)
-                                .order(Order::Foreground)
-                                .constrain(false)
-                                .show(ui.ctx(), |ui| {
-                                    ui.set_min_size(size);
-                                    let te = TextEdit::multiline(&mut tx.text)
-                                        .id(Id::new(("tx-edit", id)))
-                                        .font(self.look.serif(size_pt * cam.zoom_y()))
-                                        .text_color(col)
-                                        .desired_width(size.x)
-                                        .desired_rows(2)
-                                        .lock_focus(true)
-                                        .frame(false);
-                                    let r = ui.add(te);
-                                    if r.changed() {
-                                        edited = true;
-                                    }
-                                    if want_focus {
-                                        r.request_focus();
-                                        took_focus = true;
-                                    }
-                                });
-                        }
+            let cam = self.camera;
+            if let Some(note) = &mut self.note {
+                let (pw, ph) = note.page_size();
+                let gap = note.sheet_join.gap();
+                if let Some(page) = note.pages.get_mut(pg) {
+                    let origin = page_origin(page.col, page.row, pw, ph, gap);
+                    if let Some(tx) = page.texts.iter_mut().find(|t| t.id == id) {
+                        let min = cam.to_screen(tx.min() + origin, rect);
+                        let size = vec2(tx.size[0] * cam.zoom, tx.size[1] * cam.zoom_y());
+                        let size_pt = tx.size_pt;
+                        let col = if tx.sticky {
+                            self.look.ink
+                        } else if note.paper_tone == PaperTone::Black
+                            && tx.color32() == self.look.ink
+                        {
+                            Color32::WHITE
+                        } else {
+                            tx.color32()
+                        };
+                        Area::new(Id::new(("tx", id)))
+                            .fixed_pos(min)
+                            .order(Order::Foreground)
+                            .constrain(false)
+                            .show(ui.ctx(), |ui| {
+                                ui.set_min_size(size);
+                                let te = TextEdit::multiline(&mut tx.text)
+                                    .id(Id::new(("tx-edit", id)))
+                                    .font(self.look.serif(size_pt * cam.zoom_y()))
+                                    .text_color(col)
+                                    .desired_width(size.x)
+                                    .desired_rows(2)
+                                    .lock_focus(true)
+                                    .frame(false);
+                                let r = ui.add(te);
+                                if r.changed() {
+                                    edited = true;
+                                }
+                                if want_focus {
+                                    r.request_focus();
+                                    took_focus = true;
+                                }
+                            });
                     }
                 }
             }
+        }
         if took_focus {
             self.text_focus = false;
         }
@@ -9925,6 +10338,9 @@ impl InkarchyApp {
         ctx.data(|d| {
             d.get_temp::<Rect>(Id::new("selection-actions"))
                 .is_some_and(|r| r.contains(pos))
+                || d.get_temp::<Rect>(Id::new("pages-strip-rect"))
+                    .map(|r| r.expand(6.0).contains(pos))
+                    .unwrap_or(false)
                 || d.get_temp::<Rect>(Id::new("dock-rect"))
                     .map(|r| r.expand(8.0).contains(pos))
                     .unwrap_or(false)
@@ -11086,24 +11502,54 @@ fn paint_plus(p: &egui::Painter, c: Pos2, fg: Color32) {
     p.rect_filled(Rect::from_center_size(c, vec2(3.0, 16.0)), 2.0, fg);
 }
 
-/// A page with a plus — manage sheets.
-fn paint_pages_icon(p: &Painter, c: Pos2, fg: Color32) {
-    let page = Rect::from_center_size(c + vec2(0.0, 0.3), vec2(13.0, 16.2));
-    p.rect_stroke(page, 1.6, Stroke::new(1.7, fg), StrokeKind::Inside);
-    let plus = page.center() + vec2(0.0, 0.2);
-    p.rect_filled(Rect::from_center_size(plus, vec2(7.6, 2.0)), 1.0, fg);
-    p.rect_filled(Rect::from_center_size(plus, vec2(2.0, 7.6)), 1.0, fg);
+/// Tiny page-grid glyph used by the pages-edit tray.
+fn paint_grid_icon(p: &Painter, c: Pos2, cols: u8, rows: u8, fg: Color32) {
+    paint_grid_icon_sized(p, c, cols, rows, 5.0, 2.0, fg);
 }
 
-fn paint_page_layout_icon(p: &Painter, c: Pos2, fg: Color32) {
-    for row in 0..2 {
-        for col in 0..2 {
+fn paint_grid_icon_sized(
+    p: &Painter,
+    c: Pos2,
+    cols: u8,
+    rows: u8,
+    cell: f32,
+    gap: f32,
+    fg: Color32,
+) {
+    let w = (cols.max(1) as f32) * cell + (cols.saturating_sub(1) as f32) * gap;
+    let h = (rows.max(1) as f32) * cell + (rows.saturating_sub(1) as f32) * gap;
+    let start = c - vec2(w * 0.5, h * 0.5);
+    for row in 0..rows {
+        for col in 0..cols {
             let page = Rect::from_min_size(
-                c + vec2(-8.5 + col as f32 * 9.5, -8.5 + row as f32 * 9.5),
-                vec2(7.5, 7.5),
+                start + vec2(col as f32 * (cell + gap), row as f32 * (cell + gap)),
+                vec2(cell, cell),
             );
-            p.rect_stroke(page, 1.0, Stroke::new(1.4, fg), StrokeKind::Inside);
+            p.rect_stroke(page, 1.0, Stroke::new(1.1, fg), StrokeKind::Inside);
         }
+    }
+}
+
+/// Fused sheets share an edge.
+fn paint_join_linked(p: &Painter, c: Pos2, fg: Color32, scale: f32) {
+    let sheet = Rect::from_center_size(c, vec2(26.0, 16.0) * scale);
+    p.rect_stroke(sheet, 2.0, Stroke::new(1.3, fg), StrokeKind::Inside);
+    p.vline(
+        sheet.center().x,
+        sheet.y_range().shrink(3.0 * scale),
+        Stroke::new(1.0, fg.gamma_multiply(0.45)),
+    );
+}
+
+/// Sheets with a gutter between them.
+fn paint_join_separate(p: &Painter, c: Pos2, fg: Color32, scale: f32) {
+    for dx in [-11.0 * scale, 11.0 * scale] {
+        p.rect_stroke(
+            Rect::from_center_size(c + vec2(dx, 0.0), vec2(13.0, 16.0) * scale),
+            2.0,
+            Stroke::new(1.3, fg),
+            StrokeKind::Inside,
+        );
     }
 }
 
@@ -11115,14 +11561,6 @@ fn paint_fullscreen_icon(p: &Painter, c: Pos2, fg: Color32) {
             p.line_segment([corner - vec2(sx * 5.0, 0.0), corner], stroke);
             p.line_segment([corner - vec2(0.0, sy * 5.0), corner], stroke);
         }
-    }
-}
-
-fn paint_paper_style_icon(p: &Painter, c: Pos2, fg: Color32) {
-    let page = Rect::from_center_size(c, vec2(15.0, 18.0));
-    p.rect_stroke(page, 1.2, Stroke::new(1.5, fg), StrokeKind::Inside);
-    for y in [-4.0, 0.0, 4.0] {
-        p.line_segment([c + vec2(-4.5, y), c + vec2(4.5, y)], Stroke::new(1.2, fg));
     }
 }
 
@@ -11303,34 +11741,86 @@ fn paint_hand_icon(p: &Painter, c: Pos2, fg: Color32) {
 
 /// Raised graduation cap, drawn as paper-and-ink chrome rather than an emoji.
 fn paint_coach_icon(
-    p: &Painter, c: Pos2, ink: Color32, accent: Color32,
-    paper: Color32, shadow: Color32, enabled: bool,
+    p: &Painter,
+    c: Pos2,
+    ink: Color32,
+    accent: Color32,
+    paper: Color32,
+    shadow: Color32,
+    enabled: bool,
 ) {
-    let top = [c + vec2(-15.0, -4.0), c + vec2(0.0, -12.0),
-        c + vec2(15.0, -4.0), c + vec2(0.0, 4.0)];
+    let top = [
+        c + vec2(-15.0, -4.0),
+        c + vec2(0.0, -12.0),
+        c + vec2(15.0, -4.0),
+        c + vec2(0.0, 4.0),
+    ];
     let shade = mix_col(ink, accent, 0.24);
     let light = mix_col(accent, paper, 0.38);
     let rim = Stroke::new(1.2, ink.gamma_multiply(0.85));
-    p.add(Shape::convex_polygon(top.iter().map(|point| *point + vec2(2.0, 4.0)).collect(),
-        shadow.gamma_multiply(0.55), Stroke::NONE));
-    p.add(Shape::convex_polygon(vec![top[0], top[3],
-        top[3] + vec2(0.0, 3.5), top[0] + vec2(0.0, 3.5)],
-        shade, Stroke::NONE));
-    p.add(Shape::convex_polygon(vec![top[3], top[2],
-        top[2] + vec2(0.0, 3.5), top[3] + vec2(0.0, 3.5)],
-        ink, Stroke::NONE));
+    p.add(Shape::convex_polygon(
+        top.iter().map(|point| *point + vec2(2.0, 4.0)).collect(),
+        shadow.gamma_multiply(0.55),
+        Stroke::NONE,
+    ));
+    p.add(Shape::convex_polygon(
+        vec![
+            top[0],
+            top[3],
+            top[3] + vec2(0.0, 3.5),
+            top[0] + vec2(0.0, 3.5),
+        ],
+        shade,
+        Stroke::NONE,
+    ));
+    p.add(Shape::convex_polygon(
+        vec![
+            top[3],
+            top[2],
+            top[2] + vec2(0.0, 3.5),
+            top[3] + vec2(0.0, 3.5),
+        ],
+        ink,
+        Stroke::NONE,
+    ));
     p.add(Shape::convex_polygon(top.to_vec(), light, rim));
-    p.line_segment([c + vec2(-12.0, -4.0), c + vec2(0.0, -10.0)],
-        Stroke::new(1.1, paper.gamma_multiply(0.8)));
-    p.add(Shape::convex_polygon(vec![c + vec2(-7.0, 3.0), c + vec2(0.0, 6.5),
-        c + vec2(0.0, 11.0), c + vec2(-7.0, 8.0)], shade, rim));
-    p.add(Shape::convex_polygon(vec![c + vec2(0.0, 6.5), c + vec2(7.0, 3.0),
-        c + vec2(7.0, 8.0), c + vec2(0.0, 11.0)], ink, rim));
+    p.line_segment(
+        [c + vec2(-12.0, -4.0), c + vec2(0.0, -10.0)],
+        Stroke::new(1.1, paper.gamma_multiply(0.8)),
+    );
+    p.add(Shape::convex_polygon(
+        vec![
+            c + vec2(-7.0, 3.0),
+            c + vec2(0.0, 6.5),
+            c + vec2(0.0, 11.0),
+            c + vec2(-7.0, 8.0),
+        ],
+        shade,
+        rim,
+    ));
+    p.add(Shape::convex_polygon(
+        vec![
+            c + vec2(0.0, 6.5),
+            c + vec2(7.0, 3.0),
+            c + vec2(7.0, 8.0),
+            c + vec2(0.0, 11.0),
+        ],
+        ink,
+        rim,
+    ));
     let tassel = if enabled { accent } else { ink };
-    p.line_segment([c + vec2(14.0, -4.0), c + vec2(14.0, 7.0)],
-        Stroke::new(1.7, tassel));
-    p.line_segment([c + vec2(12.5, 10.0), c + vec2(14.0, 7.0)], Stroke::new(1.8, tassel));
-    p.line_segment([c + vec2(14.0, 7.0), c + vec2(15.5, 10.0)], Stroke::new(1.8, tassel));
+    p.line_segment(
+        [c + vec2(14.0, -4.0), c + vec2(14.0, 7.0)],
+        Stroke::new(1.7, tassel),
+    );
+    p.line_segment(
+        [c + vec2(12.5, 10.0), c + vec2(14.0, 7.0)],
+        Stroke::new(1.8, tassel),
+    );
+    p.line_segment(
+        [c + vec2(14.0, 7.0), c + vec2(15.5, 10.0)],
+        Stroke::new(1.8, tassel),
+    );
 }
 
 fn paint_tool_icon(p: &Painter, c: Pos2, fg: Color32, tool: Tool) {

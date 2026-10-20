@@ -297,9 +297,8 @@ impl InkarchyApp {
                         // Offset the handle by finger travel: a generous hit area
                         // must not make the image jump when grabbed off-centre.
                         let travel = self.camera.screen_to_paper_delta(screen - gesture.origin);
-                        let next = ((initial + travel).dot(initial)
-                            / initial.length_sq().max(1.0))
-                        .clamp(0.1, 10.0);
+                        let next = ((initial + travel).dot(initial) / initial.length_sq().max(1.0))
+                            .clamp(0.1, 10.0);
                         if (next - scale).abs() > 0.0001 {
                             self.scale_selection(anchor, next / scale);
                             gesture.mode = CanvasGesture::Resize {
