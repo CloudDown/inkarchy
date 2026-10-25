@@ -1,6 +1,9 @@
 use super::*;
 use crate::ai::{self, CredentialAction, CredentialJob, Provider, Session, Verdict, Worker};
 
+/// Hide the writing coach chrome and background analysis until it is ready again.
+pub(crate) const COACH_UI_VISIBLE: bool = false;
+
 #[derive(Default)]
 pub(super) struct CoachUi {
     pub session: Session,
@@ -13,16 +16,25 @@ pub(super) struct CoachUi {
 
 impl InkarchyApp {
     pub(super) fn coach_enabled(&self) -> bool {
-        self.note
-            .as_ref()
-            .is_some_and(|n| self.lib.index.ai.enabled_notebooks.contains(&n.id))
+        COACH_UI_VISIBLE
+            && self
+                .note
+                .as_ref()
+                .is_some_and(|n| self.lib.index.ai.enabled_notebooks.contains(&n.id))
     }
 
     pub(super) fn open_coach(&mut self) {
+        if !COACH_UI_VISIBLE {
+            return;
+        }
         self.coach.open = true;
     }
 
     pub(super) fn tick_coach(&mut self, ctx: &Context) {
+        if !COACH_UI_VISIBLE {
+            self.coach.open = false;
+            return;
+        }
         let note_id = self.note.as_ref().map(|n| n.id);
         if note_id != self.coach.session.note {
             self.coach.session.reset(note_id);
@@ -169,6 +181,9 @@ impl InkarchyApp {
     }
 
     pub(super) fn ui_coach_button(&mut self, ui: &mut Ui) -> Response {
+        if !COACH_UI_VISIBLE {
+            return ui.allocate_response(Vec2::ZERO, Sense::hover());
+        }
         // Only the raised cap is visible; the well matches other dock chrome.
         let slot = self.slot();
         let (rect, button) = ui.allocate_exact_size(vec2(slot, slot), Sense::click());
@@ -198,6 +213,9 @@ impl InkarchyApp {
     }
 
     pub(super) fn ui_coach_meter(&mut self, ui: &mut Ui, rect: Rect) {
+        if !COACH_UI_VISIBLE {
+            return;
+        }
         let label = self.coach_label();
         let response = ui.interact(rect, Id::new("exercise-coach-meter"), Sense::click());
         response.widget_info(|| {
@@ -276,7 +294,7 @@ impl InkarchyApp {
     }
 
     pub(super) fn ui_coach(&mut self, ctx: &Context) {
-        if !self.coach.open || self.note.is_none() {
+        if !COACH_UI_VISIBLE || !self.coach.open || self.note.is_none() {
             return;
         }
         let screen = ctx.screen_rect();

@@ -38,7 +38,16 @@ Add pages around the current sheet. Display them edge to edge in *Linked* mode, 
   <img src="screens/separees.png" alt="Separate pages with a gap" width="49%">
 </p>
 
-Open **Pages** (header well, or a long press on empty paper) to add a sheet on a free edge, tap the centre `−` to tear a page off, or long-press a page and drop it on a neighbour slot to move or swap it.
+Open **Pages** from **⋯ → Edit pages**, or long-press empty paper. The lectern becomes a workbench: pages stay in the middle, a **composition gauge** sits on one side, a **fan of paper stock** on the other.
+
+- **Join:** two miniature sheets on the gauge. One pair touching, one pair with a gutter.
+- **Arrange:** stack or a single row, then drag the column number, scroll over it, or pick from the illustrated grid. One drag or wheel burst is one undo step.
+- **Paper:** hover a leaf in the fan to preview ruling; tap to apply to the **entire notebook**. Tone chips sit on the stock ticket. `Ctrl+Z` undoes it.
+- **Move:** long-press a page, then drag it onto a neighbour to swap or onto a free slot to move. Edges scroll; `Esc` cancels.
+- **Add or remove:** tap a green `+` on a free edge to add a sheet, or the red `−` in the centre to tear one off.
+- **Finish:** **Write**, or `Esc`. On a narrow window, **Arrange** and **Paper** bring one instrument forward.
+
+<img src="screens/pages-management.png" alt="Pages workbench with a composition gauge, paper stock fan, green add tabs and a centre minus" width="100%">
 
 <p align="center">
   <img src="screens/onglets.png" alt="Tabs for adding a page" width="80%">
@@ -202,12 +211,15 @@ Swipe along the toolbar to reach tools on a small screen. Drag one tool onto ano
 
 | | |
 |---|---|
-| Pages | show or hide the green `+` tabs and the red `−` on each page |
+| Pages | open the workbench: composition gauge, paper stock, `+` / `−` marks |
 | Long press empty paper | open Pages manage mode |
 | Tap a `+` | add a unit page on that edge |
 | Tap a `−` | tear that page off. A drag pans instead, and the press that opened Pages does not count |
 | Long press a page, then drag | move it into a neighbour `+` slot, or swap with another page |
-| Escape, or Pages again | hide the marks |
-| ⋯ → Linked / Separate | flush sheet vs gutter between pages |
+| Drag / scroll the column number | choose 1–6 columns; arrow keys adjust it when focused |
+| Hover / tap a paper leaf | preview / apply ruling to the entire notebook |
+| Escape while dragging | cancel the move and keep Pages open |
+| Write, Escape, or Pages again | return to writing |
+| Two miniature sheets on the gauge | flush sheet vs gutter between pages |
 
 First launch: notebooks *Mindset* and *Art direction*.

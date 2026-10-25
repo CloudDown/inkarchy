@@ -1,6 +1,7 @@
 use super::*;
 use eframe::App;
 mod gestures;
+mod pages;
 
 #[test]
 fn pen_hides_cursor_until_real_mouse_motion_after_proximity_ends() {
@@ -56,6 +57,9 @@ fn pen_hides_cursor_until_real_mouse_motion_after_proximity_ends() {
 
 #[test]
 fn coach_settings_remember_notebook_and_do_not_shift_the_canvas() {
+    if !coach::COACH_UI_VISIBLE {
+        return;
+    }
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Exercise coach");
     let app = &mut fixture.app;
@@ -112,6 +116,9 @@ fn coach_settings_remember_notebook_and_do_not_shift_the_canvas() {
 
 #[test]
 fn coach_keeps_completed_step_during_ink_but_discards_it_on_undo() {
+    if !coach::COACH_UI_VISIBLE {
+        return;
+    }
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Exercise");
     let app = &mut fixture.app;
@@ -141,6 +148,9 @@ fn coach_keeps_completed_step_during_ink_but_discards_it_on_undo() {
 
 #[test]
 fn writing_coach_shows_verdict_on_meter_without_cluttering_toggle_panel() {
+    if !coach::COACH_UI_VISIBLE {
+        return;
+    }
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Exercise");
     let app = &mut fixture.app;
@@ -172,6 +182,9 @@ fn writing_coach_shows_verdict_on_meter_without_cluttering_toggle_panel() {
 
 #[test]
 fn coach_panel_only_shows_toggle_and_escape_closes_without_changing_document() {
+    if !coach::COACH_UI_VISIBLE {
+        return;
+    }
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Coach fields");
     let app = &mut fixture.app;
@@ -1583,6 +1596,9 @@ fn early_turn_stays_while_the_hand_keeps_moving_into_the_new_wall() {
 
 #[test]
 fn coach_badge_sits_below_the_toolbar_as_a_separate_accessory() {
+    if !coach::COACH_UI_VISIBLE {
+        return;
+    }
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Coach in tools");
     let app = &mut fixture.app;
@@ -1609,6 +1625,9 @@ fn coach_badge_sits_below_the_toolbar_as_a_separate_accessory() {
 
 #[test]
 fn coach_button_sits_next_to_search_in_the_header() {
+    if !coach::COACH_UI_VISIBLE {
+        return;
+    }
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Coach beside top toolbar");
     let app = &mut fixture.app;
@@ -2309,43 +2328,56 @@ fn pages_edit_replaces_the_header_with_a_canvas_tray() {
         (vec2(700.0, 640.0), "pages-edit-tray-two-rows"),
         (vec2(420.0, 640.0), "pages-edit-tray-compact"),
         (vec2(320.0, 640.0), "pages-edit-tray-narrow"),
+        (vec2(320.0, 280.0), "pages-edit-tray-short"),
     ] {
         frames.size = window;
         frames.settle(app);
-        frames.snapshot(artifact);
-        let tray = frames
-            .ctx
-            .data(|d| d.get_temp::<Rect>(Id::new("pages-strip-rect")))
-            .unwrap();
-        assert!(
-            app.canvas_rect.contains_rect(tray),
-            "tray fits at {window:?}"
-        );
-        let mut controls: Vec<Rect> = Vec::new();
-        let ids = ["Linked", "Separate", "Close"]
-            .map(|name| Id::new(("strip-tray", name)))
-            .into_iter()
-            .chain(
-                ["Stack", "Row", "Less", "Count", "More"].map(|name| Id::new(("strip-flow", name))),
-            )
-            .chain(PaperKind::ALL.map(|kind| Id::new(("strip-paper", kind.label()))))
-            .chain(["White", "Sand", "Black"].map(|name| Id::new(("strip-tone", name))));
-        for id in ids {
-            let target = frames
+        for material in [false, true] {
+            if window.x < 760.0 {
+                let tab = frames.text_center(if material { "Paper" } else { "Arrange" });
+                frames.touch(app, TouchPhase::Start, tab);
+                frames.touch(app, TouchPhase::End, tab);
+                frames.settle(app);
+            }
+            frames.snapshot(artifact);
+            let tray = frames
                 .ctx
-                .data(|d| d.get_temp::<Rect>(id))
-                .expect("visible edit control");
+                .data(|d| d.get_temp::<Rect>(Id::new("pages-strip-rect")))
+                .unwrap();
             assert!(
-                tray.contains_rect(target),
-                "control stays inside tray at {window:?}"
+                app.canvas_rect.contains_rect(tray),
+                "tray fits at {window:?}"
             );
-            assert!(
-                !controls
-                    .iter()
-                    .any(|other| other.intersects(target.shrink(0.1))),
-                "controls cannot overlap at {window:?}"
-            );
-            controls.push(target);
+            let mut controls: Vec<Rect> = Vec::new();
+            let mut ids = vec![Id::new(("strip-tray", "Close"))];
+            if window.x >= 760.0 || !material {
+                ids.extend(["Linked", "Separate"].map(|name| Id::new(("strip-tray", name))));
+                ids.extend(
+                    ["Stack", "Row", "Less", "Count", "More"]
+                        .map(|name| Id::new(("strip-flow", name))),
+                );
+            }
+            if window.x >= 760.0 || material {
+                ids.extend(PaperKind::ALL.map(|kind| Id::new(("strip-paper", kind.label()))));
+                ids.extend(["White", "Sand", "Black"].map(|name| Id::new(("strip-tone", name))));
+            }
+            for id in ids {
+                let target = frames
+                    .ctx
+                    .data(|d| d.get_temp::<Rect>(id))
+                    .expect("visible edit control");
+                assert!(
+                    tray.contains_rect(target),
+                    "control stays inside tray at {window:?}"
+                );
+                assert!(
+                    !controls
+                        .iter()
+                        .any(|other| other.intersects(target.shrink(0.1))),
+                    "controls cannot overlap at {window:?}"
+                );
+                controls.push(target);
+            }
         }
     }
     frames.size = size;
@@ -3753,7 +3785,25 @@ fn pages_mode_tear_badge_removes_a_page_and_leaves_ink() {
         let paper = app.unit_screen_rect(app.canvas_rect, 1, 0);
         let off = paper.left_top() + vec2(paper.width() * 0.08, paper.height() * 0.08);
         assert!(!page_minus_band(paper).contains(off));
-        frames.drag(app, off, off);
+        frames.step(app, vec![Event::PointerMoved(off)]);
+        frames.step(
+            app,
+            vec![Event::PointerButton {
+                pos: off,
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            }],
+        );
+        frames.step(
+            app,
+            vec![Event::PointerButton {
+                pos: off,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            }],
+        );
         assert_eq!(app.note.as_ref().unwrap().pages.len(), 2);
         frames.key(app, Key::Escape);
         assert!(!app.sheet_tabs_on);

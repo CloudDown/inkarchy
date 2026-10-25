@@ -114,14 +114,14 @@ impl InkarchyApp {
         if !touching && !closing {
             self.drop_canvas_touch();
             self.touch_navigation = false;
-            // Mouse release arrives as PointerButton, not Touch End. Leave the
-            // Pages mark for pages_or_pan. Only drop a mark on a quiet frame.
+            // Mouse and native stylus releases belong to pages_or_pan.
+            // Only drop an orphaned mark on a quiet frame.
             let pointer_button = ui.input(|i| {
                 i.events
                     .iter()
                     .any(|event| matches!(event, Event::PointerButton { .. }))
             });
-            if !pointer_down && !pointer_button {
+            if !pointer_down && !pointer_button && !pen.released && !pen.pressed {
                 self.page_press_owned = false;
                 self.page_mark = None;
                 self.page_drag_hold = None;
@@ -141,6 +141,11 @@ impl InkarchyApp {
             return true;
         }
         if multiple || self.touch_navigation {
+            if self.sheet_tabs_on {
+                self.clear_page_drag_state();
+                self.page_mark = None;
+                self.page_press_owned = false;
+            }
             self.canvas_touch = None;
             self.drag_last = None;
             self.selection_resize = None;
