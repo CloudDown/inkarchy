@@ -196,7 +196,9 @@ impl Look {
     pub fn paper_surface(&self, tone: PaperTone) -> Color32 {
         match tone {
             PaperTone::White => Color32::WHITE,
+            PaperTone::Cream => Color32::from_rgb(252, 244, 226),
             PaperTone::Default => self.paper,
+            PaperTone::Grey => Color32::from_rgb(214, 214, 208),
             PaperTone::Black => Color32::BLACK,
         }
     }
@@ -210,22 +212,22 @@ impl Look {
     }
 
     pub fn paper_rule(&self, tone: PaperTone) -> Color32 {
-        if tone == PaperTone::Black {
-            Color32::from_gray(72)
-        } else if tone == PaperTone::White {
-            Color32::from_gray(218)
-        } else {
-            self.paper_rule
+        match tone {
+            PaperTone::Black => Color32::from_gray(72),
+            PaperTone::White => Color32::from_gray(218),
+            PaperTone::Cream => Color32::from_rgb(214, 198, 168),
+            PaperTone::Grey => Color32::from_gray(168),
+            PaperTone::Default => self.paper_rule,
         }
     }
 
     pub fn paper_rule_strong(&self, tone: PaperTone) -> Color32 {
-        if tone == PaperTone::Black {
-            Color32::from_gray(112)
-        } else if tone == PaperTone::White {
-            Color32::from_gray(190)
-        } else {
-            self.paper_rule_strong
+        match tone {
+            PaperTone::Black => Color32::from_gray(112),
+            PaperTone::White => Color32::from_gray(190),
+            PaperTone::Cream => Color32::from_rgb(196, 176, 142),
+            PaperTone::Grey => Color32::from_gray(140),
+            PaperTone::Default => self.paper_rule_strong,
         }
     }
 

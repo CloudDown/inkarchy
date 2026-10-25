@@ -114,9 +114,31 @@ impl PaperKind {
 #[serde(rename_all = "lowercase")]
 pub enum PaperTone {
     White,
+    Cream,
     #[default]
     Default,
+    Grey,
     Black,
+}
+
+impl PaperTone {
+    pub const ALL: [PaperTone; 5] = [
+        PaperTone::White,
+        PaperTone::Cream,
+        PaperTone::Default,
+        PaperTone::Grey,
+        PaperTone::Black,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PaperTone::White => "White",
+            PaperTone::Cream => "Cream",
+            PaperTone::Default => "Sand",
+            PaperTone::Grey => "Grey",
+            PaperTone::Black => "Black",
+        }
+    }
 }
 
 /// Closest ruled y, or `y` if the paper has no rules.

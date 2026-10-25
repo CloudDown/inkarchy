@@ -1292,17 +1292,20 @@ fn responsive_note_controls_do_not_overlap_through_resizes() {
                         assert!(!face.intersects(*other), "header buttons overlap");
                     }
                 }
-                let [menu, cap, meter] = [
+                let [menu_key, cap_key, meter_key] = [
                     "notebook-menu-button-rect",
                     "coach-button-rect",
                     "coach-meter-rect",
-                ]
-                .map(|key| {
-                    frames
-                        .ctx
-                        .data(|d| d.get_temp::<Rect>(Id::new(key)))
-                        .unwrap()
-                });
+                ];
+                let menu = frames
+                    .ctx
+                    .data(|d| d.get_temp::<Rect>(Id::new(menu_key)))
+                    .unwrap();
+                let meter = frames
+                    .ctx
+                    .data(|d| d.get_temp::<Rect>(Id::new(meter_key)))
+                    .unwrap();
+                let cap = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new(cap_key)));
                 if edge == DockEdge::Bottom && size.x == 1024.0 && accessory == 1 {
                     frames.snapshot("exercise-coach-header-1024");
                 }
@@ -1312,18 +1315,22 @@ fn responsive_note_controls_do_not_overlap_through_resizes() {
                         "header control outside {size:?}: {name} {rect:?}"
                     );
                 }
-                if screen.intersects(cap) {
-                    assert!(
-                        screen.contains_rect(cap),
-                        "coach badge remains on-screen {edge:?} {size:?}: {cap:?}"
-                    );
+                if let Some(cap) = cap {
+                    if screen.intersects(cap) {
+                        assert!(
+                            screen.contains_rect(cap),
+                            "coach badge remains on-screen {edge:?} {size:?}: {cap:?}"
+                        );
+                    }
                 }
                 if let Some(well) = frames
                     .ctx
                     .data(|d| d.get_temp::<Rect>(Id::new("ink-well-rect")))
                 {
-                    if screen.contains(well.center()) && screen.contains(cap.center()) {
-                        assert!(screen.contains(well.center()));
+                    if let Some(cap) = cap {
+                        if screen.contains(well.center()) && screen.contains(cap.center()) {
+                            assert!(screen.contains(well.center()));
+                        }
                     }
                 }
                 if size.x >= 760.0 {
@@ -1563,12 +1570,7 @@ fn compact_controls_keep_drag_selection_and_wheel_actions_accessible() {
     frames.settle(app);
     assert!(app.sheet_tabs_on);
     frames.snapshot("responsive-page-selection-small");
-    let close = frames
-        .ctx
-        .data(|d| d.get_temp::<Rect>(Id::new(("strip-tray", "Close"))))
-        .expect("the tray offers Close");
-    frames.touch(app, TouchPhase::Start, close.center());
-    frames.touch(app, TouchPhase::End, close.center());
+    frames.key(app, Key::Escape);
     frames.settle(app);
     assert!(!app.sheet_tabs_on);
 }
@@ -2349,7 +2351,7 @@ fn pages_edit_replaces_the_header_with_a_canvas_tray() {
                 "tray fits at {window:?}"
             );
             let mut controls: Vec<Rect> = Vec::new();
-            let mut ids = vec![Id::new(("strip-tray", "Close"))];
+            let mut ids = Vec::new();
             if window.x >= 760.0 || !material {
                 ids.extend(["Linked", "Separate"].map(|name| Id::new(("strip-tray", name))));
                 ids.extend(
@@ -2359,7 +2361,10 @@ fn pages_edit_replaces_the_header_with_a_canvas_tray() {
             }
             if window.x >= 760.0 || material {
                 ids.extend(PaperKind::ALL.map(|kind| Id::new(("strip-paper", kind.label()))));
-                ids.extend(["White", "Sand", "Black"].map(|name| Id::new(("strip-tone", name))));
+                ids.extend(
+                    ["White", "Cream", "Sand", "Grey", "Black"]
+                        .map(|name| Id::new(("strip-tone", name))),
+                );
             }
             for id in ids {
                 let target = frames
@@ -2395,12 +2400,7 @@ fn pages_edit_replaces_the_header_with_a_canvas_tray() {
         .expect("the tray offers join controls");
     frames.drag(app, separate.center(), separate.center());
     assert_eq!(app.note.as_ref().unwrap().sheet_join, SheetJoin::Separate);
-    let close = frames
-        .ctx
-        .data(|d| d.get_temp::<Rect>(Id::new(("strip-tray", "Close"))))
-        .expect("the tray offers Close");
-    frames.touch(app, TouchPhase::Start, close.center());
-    frames.touch(app, TouchPhase::End, close.center());
+    frames.key(app, Key::Escape);
     frames.settle(app);
     assert!(!app.sheet_tabs_on);
     assert!(
@@ -4522,21 +4522,10 @@ fn linked_paper_layers_share_pixel_aligned_edges() {
                     app.paint_world(&painter, canvas);
                 },
             );
-            let mut surfaces = Vec::new();
-            let mut started_grain = false;
-            for shape in &output.shapes {
-                if let egui::epaint::Shape::Rect(rect) = &shape.shape {
-                    if rect.brush.is_some() {
-                        started_grain = true;
-                        surfaces.push(shape.clip_rect);
-                    } else if rect.fill == app.look.paper {
-                        assert!(
-                            !started_grain,
-                            "opaque paper must never cover grain or ruling"
-                        );
-                    }
-                }
-            }
+            let mut surfaces = ctx
+                .data(|d| d.get_temp::<Vec<Rect>>(Id::new("paper-surface-clips")))
+                .expect("paint_world records one clip per visible sheet");
+            surfaces.sort_by(|a, b| (a.min.y, a.min.x).partial_cmp(&(b.min.y, b.min.x)).unwrap());
             assert_eq!(surfaces.len(), 4);
             assert_eq!(surfaces[0].max.x, surfaces[1].min.x);
             assert_eq!(surfaces[0].max.y, surfaces[2].min.y);

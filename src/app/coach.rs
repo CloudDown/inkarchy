@@ -202,11 +202,7 @@ impl InkarchyApp {
         });
         ui.ctx()
             .data_mut(|d| d.insert_temp(Id::new("coach-button-rect"), button.rect));
-        if button
-            .clone()
-            .on_hover_text(format!("Writing coach · {}", self.coach_label()))
-            .clicked()
-        {
+        if button.clicked() {
             self.open_coach();
         }
         button
@@ -284,11 +280,7 @@ impl InkarchyApp {
                 painter.circle_filled(marker, 2.5, color);
             }
         }
-        if response
-            .on_hover_text(format!("Writing coach · {label}"))
-            .on_hover_cursor(CursorIcon::PointingHand)
-            .clicked()
-        {
+        if response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
             self.open_coach();
         }
     }

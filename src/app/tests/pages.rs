@@ -29,7 +29,7 @@ fn prepare(app: &mut InkarchyApp) -> Frames {
 }
 
 #[test]
-fn column_scrub_wheel_keyboard_and_picker_preserve_content_and_group_undo() {
+fn column_scrub_wheel_keyboard_and_stepper_preserve_content_and_group_undo() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Columns");
     let app = &mut fixture.app;
@@ -81,21 +81,14 @@ fn column_scrub_wheel_keyboard_and_picker_preserve_content_and_group_undo() {
 
     frames.drag(app, count, count);
     frames.settle(app);
-    frames.snapshot("pages-column-picker");
-    let popup = frames
-        .ctx
-        .data(|d| d.get_temp::<Rect>(Id::new("pages-settings-popup-rect")))
-        .unwrap();
-    assert!(InkarchyApp::pen_over_chrome(&frames.ctx, popup.center()));
-    let pick = frames
-        .ctx
-        .data(|d| d.get_temp::<Rect>(Id::new(("pages-column-choice", 5_u8))))
-        .unwrap()
-        .center();
-    frames.touch(app, TouchPhase::Start, pick);
-    frames.touch(app, TouchPhase::End, pick);
-    frames.settle(app);
-    assert_eq!(app.page_arrangement(), Some(PageArrangement::FiveColumns));
+    frames.snapshot("pages-column-stepper");
+    let more = control(&frames, "strip-flow", "More");
+    for _ in 0..2 {
+        frames.touch(app, TouchPhase::Start, more);
+        frames.touch(app, TouchPhase::End, more);
+        frames.settle(app);
+    }
+    assert_eq!(app.page_arrangement(), Some(PageArrangement::ThreeColumns));
     assert!(app.sheet_tabs_on);
     assert!(app
         .note
@@ -109,7 +102,7 @@ fn column_scrub_wheel_keyboard_and_picker_preserve_content_and_group_undo() {
     let count_id = Id::new("pages-edit-strip").with(("strip-flow", "Count"));
     frames.ctx.memory_mut(|m| m.request_focus(count_id));
     frames.key(app, Key::ArrowLeft);
-    assert_eq!(app.page_arrangement(), Some(PageArrangement::FourColumns));
+    assert_eq!(app.page_arrangement(), Some(PageArrangement::TwoColumns));
 }
 
 #[test]

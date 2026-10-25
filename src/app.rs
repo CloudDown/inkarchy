@@ -5030,7 +5030,6 @@ impl InkarchyApp {
         on: bool,
         space: &str,
         label: &str,
-        tip: &str,
         icon: impl Fn(&Painter, Pos2, Color32),
     ) -> bool {
         let resp = ui.interact(rect, ui.id().with((space, label)), Sense::click());
@@ -5043,9 +5042,7 @@ impl InkarchyApp {
         );
         ui.ctx()
             .data_mut(|d| d.insert_temp(Id::new((space, label)), rect));
-        resp.on_hover_cursor(CursorIcon::PointingHand)
-            .on_hover_text(tip)
-            .clicked()
+        resp.on_hover_cursor(CursorIcon::PointingHand).clicked()
     }
 
     /// Orientation keys plus a per-row stepper: pages either wrap downward in
@@ -5095,7 +5092,6 @@ impl InkarchyApp {
             arrangement.is_some() && !horizontal,
             "strip-flow",
             "Stack",
-            "Stack pages vertically",
             |p, c, fg| paint_page_grid(p, c, 1, 3, page_h, glyph_fill, fg),
         );
         if chosen {
@@ -5103,15 +5099,9 @@ impl InkarchyApp {
                 self.arrange_pages(layout);
             }
         }
-        let chosen = self.tray_well(
-            ui,
-            row_well,
-            horizontal,
-            "strip-flow",
-            "Row",
-            "All pages in one row",
-            |p, c, fg| paint_page_grid(p, c, 3, 1, page_h, glyph_fill, fg),
-        );
+        let chosen = self.tray_well(ui, row_well, horizontal, "strip-flow", "Row", |p, c, fg| {
+            paint_page_grid(p, c, 3, 1, page_h, glyph_fill, fg)
+        });
         if chosen && !horizontal {
             self.arrange_pages(PageArrangement::Row);
         }
@@ -5186,7 +5176,6 @@ impl InkarchyApp {
             }
             ui.ctx()
                 .data_mut(|d| d.insert_temp(Id::new(("strip-flow", name)), cell));
-            let resp = resp.on_hover_text(tip.clone());
             let resp = if enabled {
                 resp.on_hover_cursor(CursorIcon::PointingHand)
             } else {
@@ -5239,13 +5228,6 @@ impl InkarchyApp {
         );
         ui.ctx()
             .data_mut(|d| d.insert_temp(Id::new(("strip-flow", "Count")), cell));
-        let response = response.on_hover_text(if horizontal {
-            "All pages in one row — choose Down to set columns"
-        } else if !enabled {
-            "Add another page to arrange columns"
-        } else {
-            "Columns: click to choose · drag or scroll to adjust · arrow keys when focused"
-        });
         if !enabled {
             return;
         }
@@ -5351,63 +5333,6 @@ impl InkarchyApp {
                 });
             }
         }
-        let popup = Popup::menu(&response)
-            .align(egui::RectAlign::TOP)
-            .frame(self.note_popup_frame().fill(self.look.paper))
-            .show(|ui| {
-                ui.label(RichText::new("Columns").color(self.look.ink));
-                for row in 0..2 {
-                    ui.horizontal(|ui| {
-                        for col in 0..3 {
-                            let count = row * 3 + col + 1;
-                            let (rect, pick) =
-                                ui.allocate_exact_size(vec2(72.0, 64.0), Sense::click());
-                            pick.widget_info(|| {
-                                WidgetInfo::selected(
-                                    WidgetType::Button,
-                                    true,
-                                    density == count,
-                                    format!("{count} columns"),
-                                )
-                            });
-                            let face = self.tray_selection(ui, rect, &pick, density == count);
-                            paint_page_grid(
-                                ui.painter(),
-                                face.center() - vec2(0.0, 8.0),
-                                count,
-                                2,
-                                7.0,
-                                mix_col(self.look.paper, self.look.accent, 0.15),
-                                self.look.ink,
-                            );
-                            ui.painter().text(
-                                pos2(face.center().x, face.bottom() - 12.0),
-                                Align2::CENTER_CENTER,
-                                count.to_string(),
-                                self.look.mono(12.0),
-                                self.look.ink,
-                            );
-                            ui.ctx().data_mut(|d| {
-                                d.insert_temp(Id::new(("pages-column-choice", count)), rect)
-                            });
-                            if pick.clicked() {
-                                self.arrange_pages(flow_layout(count));
-                                ui.close();
-                            }
-                        }
-                    });
-                }
-                ui.label(
-                    RichText::new("Drag the number for quick adjustment")
-                        .small()
-                        .color(self.look.ink.gamma_multiply(0.65)),
-                );
-            });
-        if let Some(popup) = popup {
-            ui.ctx().data_mut(|d| {
-                d.insert_temp(Id::new("pages-settings-popup-rect"), popup.response.rect)
-            });
-        }
     }
 
     /// Independent stationery objects leave the centre of the desk usable.
@@ -5415,13 +5340,11 @@ impl InkarchyApp {
         if !self.sheet_tabs_on || !Camera::valid_viewport(self.canvas_rect) {
             self.paper_preview = None;
             ctx.data_mut(|d| {
-                d.remove::<Rect>(Id::new("pages-settings-popup-rect"));
                 d.remove::<Rect>(Id::new("pages-strip-rect"));
                 d.remove::<Vec<Rect>>(Id::new("pages-instrument-rects"));
             });
             return;
         }
-        ctx.data_mut(|d| d.remove::<Rect>(Id::new("pages-settings-popup-rect")));
         let canvas = self.canvas_rect;
         let arrangement = self.page_arrangement();
         let join = self
@@ -5440,18 +5363,26 @@ impl InkarchyApp {
             d.get_temp::<bool>(Id::new("pages-material-open"))
                 .unwrap_or(false)
         });
-        let bottom = canvas.bottom() - if compact { 68.0 } else { 24.0 };
-        let strip = Rect::from_min_size(
-            pos2(
-                if compact {
-                    canvas.center().x - 152.0
-                } else {
-                    canvas.left() + 24.0
-                },
-                bottom - 174.0,
-            ),
-            vec2(304.0, 174.0),
-        );
+        let bottom = canvas.bottom() - if compact { 68.0 } else { 16.0 };
+        let strip = if compact {
+            let width = (canvas.width() - 16.0).min(304.0);
+            Rect::from_min_size(
+                pos2(canvas.center().x - width * 0.5, bottom - 116.0),
+                vec2(width, 116.0),
+            )
+        } else {
+            let size = vec2(368.0, 72.0);
+            let beside = ctx.data(|d| d.get_temp::<Rect>(Id::new("pdf-page-number-rect")));
+            let origin = if let Some(chip) = beside {
+                pos2(
+                    (chip.right() + 10.0).min(canvas.right() - size.x - 8.0),
+                    chip.bottom() - size.y,
+                )
+            } else {
+                pos2(canvas.left() + 16.0, bottom - size.y)
+            };
+            Rect::from_min_size(origin, size)
+        };
         let stock = Rect::from_min_size(
             pos2(
                 if compact {
@@ -5463,14 +5394,24 @@ impl InkarchyApp {
             ),
             vec2(304.0, 188.0),
         );
-        let linked = Rect::from_min_size(strip.min + vec2(180.0, 12.0), vec2(54.0, 60.0));
-        let separate = linked.translate(vec2(56.0, 0.0));
-        let stack = Rect::from_min_size(strip.min + vec2(12.0, 90.0), vec2(54.0, 62.0));
-        let row_well = stack.translate(vec2(56.0, 0.0));
-        let flow = Rect::from_min_size(strip.min + vec2(144.0, 90.0), vec2(144.0, 62.0));
+        let (linked, separate, stack, row_well, flow) = if compact {
+            let linked = Rect::from_min_size(strip.min + vec2(12.0, 8.0), vec2(54.0, 48.0));
+            let separate = linked.translate(vec2(56.0, 0.0));
+            let stack = Rect::from_min_size(strip.min + vec2(12.0, 60.0), vec2(54.0, 48.0));
+            let row_well = stack.translate(vec2(56.0, 0.0));
+            let flow = Rect::from_min_size(row_well.min + vec2(68.0, 0.0), vec2(144.0, 48.0));
+            (linked, separate, stack, row_well, flow)
+        } else {
+            let linked = Rect::from_min_size(strip.min + vec2(8.0, 7.0), vec2(50.0, 58.0));
+            let separate = linked.translate(vec2(52.0, 0.0));
+            let stack = separate.translate(vec2(60.0, 0.0));
+            let row_well = stack.translate(vec2(52.0, 0.0));
+            let flow = Rect::from_min_size(row_well.min + vec2(56.0, 0.0), vec2(140.0, 58.0));
+            (linked, separate, stack, row_well, flow)
+        };
         let sheet_fill = mix_col(self.look.paper, self.look.ink, 0.045);
         let mut preview = None;
-        let mut instruments = self.ui_atelier_exit(ctx, compact, strip);
+        let mut instruments = self.ui_atelier_exit(ctx, compact);
         if !compact || !material {
             instruments.push(strip);
             Area::new(Id::new("pages-edit-strip"))
@@ -5484,7 +5425,6 @@ impl InkarchyApp {
                         join == SheetJoin::Linked,
                         "strip-tray",
                         "Linked",
-                        "Linked pages — one sheet",
                         |p, c, fg| paint_join_linked(p, c, sheet_fill, fg, 1.1),
                     ) {
                         self.set_sheet_join(SheetJoin::Linked);
@@ -5495,7 +5435,6 @@ impl InkarchyApp {
                         join == SheetJoin::Separate,
                         "strip-tray",
                         "Separate",
-                        "Separate pages — a gutter",
                         |p, c, fg| paint_join_separate(p, c, sheet_fill, fg, 1.1),
                     ) {
                         self.set_sheet_join(SheetJoin::Separate);
@@ -5509,7 +5448,6 @@ impl InkarchyApp {
                 .fixed_pos(stock.min)
                 .order(Order::Foreground)
                 .show(ctx, |ui| {
-                    self.paint_stock_caption(ui.painter(), stock);
                     for (index, kind) in PaperKind::ALL.into_iter().enumerate() {
                         let swatch = Rect::from_min_size(
                             stock.min + vec2(20.0 + index as f32 * 44.0, 8.0),
@@ -5539,25 +5477,15 @@ impl InkarchyApp {
                         ui.ctx().data_mut(|d| {
                             d.insert_temp(Id::new(("strip-paper", kind.label())), swatch)
                         });
-                        if resp
-                            .on_hover_cursor(CursorIcon::PointingHand)
-                            .on_hover_text(format!("{} paper", kind.label()))
-                            .clicked()
-                        {
+                        if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
                             self.set_paper(kind);
                         }
                     }
-                    for (index, (name, tone_choice)) in [
-                        ("White", PaperTone::White),
-                        ("Sand", PaperTone::Default),
-                        ("Black", PaperTone::Black),
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    {
-                        let cell = Rect::from_center_size(
-                            stock.min + vec2(190.0 + index as f32 * 44.0, 161.0),
-                            vec2(44.0, 44.0),
+                    for (index, tone_choice) in PaperTone::ALL.into_iter().enumerate() {
+                        let name = tone_choice.label();
+                        let cell = Rect::from_min_size(
+                            stock.min + vec2(14.0 + index as f32 * 58.0, 132.0),
+                            vec2(54.0, 48.0),
                         );
                         let on = tone == tone_choice;
                         let resp =
@@ -5574,15 +5502,7 @@ impl InkarchyApp {
                         );
                         ui.ctx()
                             .data_mut(|d| d.insert_temp(Id::new(("strip-tone", name)), cell));
-                        if resp
-                            .on_hover_cursor(CursorIcon::PointingHand)
-                            .on_hover_text(match tone_choice {
-                                PaperTone::White => "White pages",
-                                PaperTone::Default => "Sand pages",
-                                PaperTone::Black => "Black pages",
-                            })
-                            .clicked()
-                        {
+                        if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
                             self.set_paper_tone(tone_choice);
                         }
                     }
@@ -5649,9 +5569,7 @@ impl InkarchyApp {
                     self.look.mono(13.0),
                     self.look.fg,
                 );
-                response
-                    .on_hover_text("Go to page")
-                    .on_hover_cursor(CursorIcon::PointingHand)
+                response.on_hover_cursor(CursorIcon::PointingHand)
             });
         if number.inner.clicked() {
             self.pdf_page_target = current;
@@ -7042,7 +6960,7 @@ impl InkarchyApp {
                                             "Save color",
                                         )
                                     });
-                                    if save.on_hover_text("Save color").clicked() {
+                                    if save.clicked() {
                                         self.save_ink_swatch();
                                         self.color_mixer_open = false;
                                     }
@@ -7109,7 +7027,7 @@ impl InkarchyApp {
                                                 "Save color",
                                             )
                                         });
-                                        if save.on_hover_text("Save color").clicked() {
+                                        if save.clicked() {
                                             self.save_ink_swatch();
                                             self.color_mixer_open = false;
                                         }
@@ -7226,7 +7144,7 @@ impl InkarchyApp {
                 });
                 ui.ctx()
                     .data_mut(|d| d.insert_temp(Id::new("ink-mixer-back"), response.rect));
-                if response.on_hover_text("Back to colors").clicked() {
+                if response.clicked() {
                     self.color_mixer_open = false;
                 }
             });
@@ -7240,7 +7158,7 @@ impl InkarchyApp {
             });
             ui.ctx()
                 .data_mut(|d| d.insert_temp(Id::new("ink-panel-back"), response.rect));
-            if response.on_hover_text("Back to ink").clicked() {
+            if response.clicked() {
                 self.color_mixer_open = false;
                 self.ink_panel_view = InkPanelView::Colors;
             }
@@ -7273,7 +7191,7 @@ impl InkarchyApp {
         mix.widget_info(|| {
             WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Mix a new color")
         });
-        if mix.on_hover_text("Mix a new color").clicked() {
+        if mix.clicked() {
             self.color_mixer_open = true;
         }
     }
@@ -7287,7 +7205,7 @@ impl InkarchyApp {
         response.widget_info(|| {
             WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Remove saved color")
         });
-        if response.on_hover_text("Remove saved color").clicked() {
+        if response.clicked() {
             if let Some(index) = self.ink_delete.take() {
                 if index < self.lib.index.custom_inks.len() {
                     self.lib.index.custom_inks.remove(index);
@@ -7361,12 +7279,6 @@ impl InkarchyApp {
             response.widget_info(|| {
                 WidgetInfo::selected(WidgetType::Button, true, color == app.ink, &label)
             });
-            let hint = if saved.is_some() {
-                format!("{label} · Hold to remove")
-            } else {
-                label
-            };
-            response.on_hover_text(hint);
         };
         if horizontal {
             let row_width =
@@ -7550,10 +7462,7 @@ impl InkarchyApp {
                             .max_rect(slot),
                     );
                     let response = self.paint_tool_well_sized(&mut child, tool, false, side);
-                    if response
-                        .on_hover_text("Drag to the toolbar, or tap to restore")
-                        .clicked()
-                    {
+                    if response.clicked() {
                         self.clear_parked_tool(tool);
                         self.save_parked_tools();
                     }
@@ -7837,9 +7746,7 @@ impl InkarchyApp {
                 self.pick_free_ink(color);
             }
         }
-        response
-            .on_hover_text(label)
-            .on_hover_cursor(CursorIcon::PointingHand);
+        response.on_hover_cursor(CursorIcon::PointingHand);
     }
 
     fn nib_presets_ui(&mut self, ui: &mut Ui, max_extent: f32, horizontal: bool) {
@@ -7872,7 +7779,8 @@ impl InkarchyApp {
                 nearest = i;
             }
         }
-        let ink = self.look.ink;
+        // The dots preview the nib in the ink actually loaded, not the theme black.
+        let ink = Color32::from_rgb(self.ink.r(), self.ink.g(), self.ink.b());
         for i in 0..n {
             let t = nib_preset_t(i, n);
             let width = width_from_nib_t(t);
@@ -7891,6 +7799,12 @@ impl InkarchyApp {
             let response = ui.interact(slot, ui.id().with(("nib-preset", i)), Sense::click());
             let radius = (2.2 + t * 11.5).min(pitch * 0.38);
             ui.painter().circle_filled(center, radius, ink);
+            // Hairline keeps pale inks legible against the paper.
+            ui.painter().circle_stroke(
+                center,
+                radius,
+                Stroke::new(1.0, self.look.ink.gamma_multiply(0.22)),
+            );
             if i == nearest {
                 ui.painter().circle_stroke(
                     center,
@@ -7905,7 +7819,6 @@ impl InkarchyApp {
             response.widget_info(|| {
                 WidgetInfo::selected(WidgetType::Button, true, i == nearest, &label)
             });
-            response.on_hover_text(label);
         }
     }
 
@@ -8284,7 +8197,7 @@ impl InkarchyApp {
         storage.widget_info(|| {
             WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Tool storage")
         });
-        if storage.on_hover_text("Stored tools").clicked() {
+        if storage.clicked() {
             self.set_ink_panel(true);
             self.ink_panel_view = InkPanelView::Tools;
             self.color_mixer_open = false;
@@ -8318,7 +8231,7 @@ impl InkarchyApp {
         );
         self.dock_item_response(ui, &undo, DockItem::Chrome(DockChrome::Undo), false);
         undo.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Undo"));
-        if undo.on_hover_text("Undo · Ctrl+Z").clicked() {
+        if undo.clicked() {
             let mut ok = false;
             if let Some(n) = &mut self.note {
                 ok = self.undo.undo(n);
@@ -8339,7 +8252,7 @@ impl InkarchyApp {
         );
         self.dock_item_response(ui, &redo, DockItem::Chrome(DockChrome::Redo), false);
         redo.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Redo"));
-        if redo.on_hover_text("Redo · Ctrl+Shift+Z").clicked() {
+        if redo.clicked() {
             let mut ok = false;
             if let Some(n) = &mut self.note {
                 ok = self.undo.redo(n);
@@ -8384,7 +8297,6 @@ impl InkarchyApp {
             CursorIcon::Grab
         };
         resp.on_hover_cursor(cursor)
-            .on_hover_text("Drag to move toolbar")
     }
 
     /// Current ink at the current nib size. The well opens the colour palette.
@@ -8427,7 +8339,6 @@ impl InkarchyApp {
         }
         resp.widget_info(|| WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), open, "Ink"));
         resp.on_hover_cursor(CursorIcon::PointingHand)
-            .on_hover_text("Ink colors")
     }
 
     fn paint_palette_icon(&self, p: &Painter, c: Pos2, fg: Color32) {
@@ -8523,13 +8434,7 @@ impl InkarchyApp {
                 tool.label(),
             )
         });
-        resp.on_hover_text(if tool.is_ink() {
-            format!("{} · Tap again or hold for size", tool.label())
-        } else if tool.is_eraser() {
-            format!("{} · Hold for size", tool.label())
-        } else {
-            tool.label().to_string()
-        })
+        resp
     }
 
     fn dock_item_response(&mut self, ui: &mut Ui, resp: &Response, item: DockItem, stored: bool) {
@@ -10044,11 +9949,6 @@ impl InkarchyApp {
             }
         }
         let surface = self.look.paper_surface(note.paper_tone);
-        let canson = if note.paper_tone == PaperTone::Black {
-            None
-        } else {
-            Some(self.paper_tex(painter.ctx()))
-        };
         let cam = self.camera;
         let map = |p: Pos2| cam.to_screen(p, rect);
         let now = painter.ctx().input(|i| i.time);
@@ -10096,9 +9996,9 @@ impl InkarchyApp {
             })
             .collect();
 
-        // Finish every opaque sheet before drawing grain, ruling or user content.
+        // Finish every opaque sheet before drawing ruling or user content.
         // A later page must never paint over its neighbour's grid or ink.
-        let mut surfaces = Vec::with_capacity(tiles.len());
+        let mut surface_clips = Vec::with_capacity(tiles.len());
         for &(_, page, _, paper, n_left, n_right, n_top, n_bot, _) in &tiles {
             if !paper.expand(bleed).intersects(rect) {
                 continue;
@@ -10130,10 +10030,6 @@ impl InkarchyApp {
                 }
             }
             painter.rect_filled(body, sheet_r, fill);
-            surfaces.push((page.background.is_some(), paper, body, sheet_r));
-        }
-
-        for (has_bg, paper, body, sheet_r) in surfaces {
             // Adjacent cells share exactly the same physical-pixel scissor edge.
             // Extended geometry supplies coverage without blending twice at seams.
             let surface_clip = if fused {
@@ -10141,31 +10037,16 @@ impl InkarchyApp {
             } else {
                 paper
             };
-            let surface_painter = painter.with_clip_rect(surface_clip.intersect(rect));
-            if has_bg {
-                continue;
-            }
-            if let Some(tex) = &canson {
-                // World-space grain stays attached to the paper while panning and zooming.
-                let a = cam.to_paper(body.min, rect);
-                let b = cam.to_paper(body.max, rect);
-                let uv = Rect::from_min_max(
-                    pos2(a.x / PAPER_TILE, a.y / PAPER_TILE),
-                    pos2(b.x / PAPER_TILE, b.y / PAPER_TILE),
-                );
-                surface_painter.add(
-                    egui::epaint::RectShape::filled(
-                        body,
-                        sheet_r,
-                        Color32::WHITE.gamma_multiply(0.20),
-                    )
-                    .with_texture(tex.id(), uv),
-                );
-            }
-            if !fused {
+            surface_clips.push(surface_clip);
+            if page.background.is_none() && !fused {
+                let surface_painter = painter.with_clip_rect(surface_clip.intersect(rect));
                 self.paint_template(&surface_painter, paper, note.paper, cam.scale());
             }
         }
+        painter.ctx().data_mut(|d| {
+            d.insert_temp(Id::new("paper-surface-clips"), surface_clips);
+        });
+
         if fused {
             self.paint_fused_rules(painter, &note, cam, rect);
         }
@@ -11843,8 +11724,6 @@ impl InkarchyApp {
                 .is_some_and(|r| r.contains(pos))
                 || d.get_temp::<Vec<Rect>>(Id::new("pages-instrument-rects"))
                     .is_some_and(|rects| rects.iter().any(|r| r.expand(3.0).contains(pos)))
-                || d.get_temp::<Rect>(Id::new("pages-settings-popup-rect"))
-                    .is_some_and(|r| r.contains(pos))
                 || d.get_temp::<Rect>(Id::new("dock-rect"))
                     .map(|r| r.expand(8.0).contains(pos))
                     .unwrap_or(false)

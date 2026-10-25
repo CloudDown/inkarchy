@@ -41,11 +41,11 @@ Add pages around the current sheet. Display them edge to edge in *Linked* mode, 
 Open **Pages** from **⋯ → Edit pages**, or long-press empty paper. The lectern becomes a workbench: pages stay in the middle, a **composition gauge** sits on one side, a **fan of paper stock** on the other.
 
 - **Join:** two miniature sheets on the gauge. One pair touching, one pair with a gutter.
-- **Arrange:** stack or a single row, then drag the column number, scroll over it, or pick from the illustrated grid. One drag or wheel burst is one undo step.
-- **Paper:** hover a leaf in the fan to preview ruling; tap to apply to the **entire notebook**. Tone chips sit on the stock ticket. `Ctrl+Z` undoes it.
+- **Arrange:** stack or a single row, then drag the column number, scroll over it, or use the `−` / `+` stepper. One drag or wheel burst is one undo step.
+- **Paper:** hover a leaf in the fan to preview ruling; tap to apply to the **entire notebook**. The chips under the fan set a flat page colour (white, cream, sand, grey, black) with no Canson grain. `Ctrl+Z` undoes it.
 - **Move:** long-press a page, then drag it onto a neighbour to swap or onto a free slot to move. Edges scroll; `Esc` cancels.
 - **Add or remove:** tap a green `+` on a free edge to add a sheet, or the red `−` in the centre to tear one off.
-- **Finish:** **Write**, or `Esc`. On a narrow window, **Arrange** and **Paper** bring one instrument forward.
+- **Finish:** `Esc`, double-tap the desk, or Pages again. On a narrow window, **Arrange** and **Paper** bring one instrument forward.
 
 <img src="screens/pages-management.png" alt="Pages workbench with a composition gauge, paper stock fan, green add tabs and a centre minus" width="100%">
 
@@ -55,7 +55,7 @@ Open **Pages** from **⋯ → Edit pages**, or long-press empty paper. The lecte
 
 ### Paper for every idea
 
-Choose lined, Cornell, grid, dotted, graph, or blank paper. The paper panel also lets you choose white, the theme default, or black for every paper style. Canson paper adds a subtle texture to white and default notes. Cycle paper with `M`.
+Choose lined, Cornell, grid, dotted, graph, or blank paper. Page colour is a flat fill: white, cream, sand, grey, or black. Canson grain is only on chrome (emoji atlas and help), not on the writing sheet. Cycle paper with `M`.
 
 <p align="center">
   <img src="screens/millimetre.png" alt="Graph paper and drawing tools" width="80%">
@@ -219,7 +219,7 @@ Swipe along the toolbar to reach tools on a small screen. Drag one tool onto ano
 | Drag / scroll the column number | choose 1–6 columns; arrow keys adjust it when focused |
 | Hover / tap a paper leaf | preview / apply ruling to the entire notebook |
 | Escape while dragging | cancel the move and keep Pages open |
-| Write, Escape, or Pages again | return to writing |
+| Escape, double-tap, or Pages again | return to writing |
 | Two miniature sheets on the gauge | flush sheet vs gutter between pages |
 
 First launch: notebooks *Mindset* and *Art direction*.
