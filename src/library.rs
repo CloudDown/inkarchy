@@ -76,15 +76,38 @@ pub struct Index {
     /// Column count used when `slot` was written. Missing field = the old 5-wide shelf.
     #[serde(default = "default_old_shelf_cols")]
     pub shelf_cols: u32,
-    /// Tools hidden from the note dock and shown in its storage tray.
+    /// Tools hidden in the storage tray. Each entry is a seat; `null` keeps a hole
+    /// so the user can leave empty slots between parked tools.
     #[serde(default)]
-    pub parked_tools: Vec<Tool>,
+    pub parked_tools: Vec<Option<Tool>>,
+    /// Toolbar order, left to right (or top to bottom), including chrome
+    /// actions. Missing entries fall back to their default positions.
+    #[serde(default)]
+    pub tool_order: Vec<DockItem>,
     /// User-mixed opaque RGB inks, appended to the theme palette.
     #[serde(default)]
     pub custom_inks: Vec<[u8; 3]>,
     /// Optional exercise coaching; credentials are stored in the system keyring.
     #[serde(default)]
     pub ai: crate::ai::AiSettings,
+}
+
+/// Saved toolbar slots. The untagged tool variant keeps existing JSON strings
+/// ("Fineliner", etc.) readable when chrome actions gain their own positions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DockItem {
+    Tool(Tool),
+    Chrome(DockChrome),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DockChrome {
+    Undo,
+    Redo,
+    Ink,
+    Storage,
+    Coach,
 }
 
 fn default_true() -> bool {
@@ -107,6 +130,7 @@ impl Default for Index {
             finger_draw: false,
             shelf_cols: SHELF_COLS,
             parked_tools: Vec::new(),
+            tool_order: Vec::new(),
             custom_inks: Vec::new(),
             ai: crate::ai::AiSettings::default(),
         }
@@ -532,11 +556,30 @@ impl Library {
     }
 
     pub fn write_media(&self, note_id: Uuid, bytes: &[u8]) -> Option<String> {
-        let id = Uuid::new_v4();
-        let name = format!("{id}.png");
+        self.write_media_ext(note_id, bytes, "png")
+    }
+
+    /// Store bytes under `<uuid>.<ext>`. Videos keep their original container
+    /// so the external decoder can pick the right demuxer.
+    pub fn write_media_ext(&self, note_id: Uuid, bytes: &[u8], ext: &str) -> Option<String> {
+        let name = format!("{}.{ext}", Uuid::new_v4());
+        self.write_media_named(note_id, &name, bytes)
+            .then_some(name)
+    }
+
+    /// Store bytes under an exact media name (used for video posters).
+    pub fn write_media_named(&self, note_id: Uuid, name: &str, bytes: &[u8]) -> bool {
         let dir = self.note_dir(note_id).join("media");
         let _ = fs::create_dir_all(&dir);
-        fs::write(dir.join(&name), bytes).ok()?;
+        fs::write(dir.join(name), bytes).is_ok()
+    }
+
+    /// Copy a video into the notebook without loading it into memory.
+    pub fn copy_media(&self, note_id: Uuid, src: &Path, ext: &str) -> Option<String> {
+        let name = format!("{}.{ext}", Uuid::new_v4());
+        let dir = self.note_dir(note_id).join("media");
+        let _ = fs::create_dir_all(&dir);
+        fs::copy(src, dir.join(&name)).ok()?;
         Some(name)
     }
 
@@ -703,7 +746,7 @@ mod tests {
         assert!(old.custom_inks.is_empty());
 
         let index = Index {
-            parked_tools: vec![Tool::Text, Tool::EraserStroke],
+            parked_tools: vec![Some(Tool::Text), None, Some(Tool::EraserStroke)],
             custom_inks: vec![[25, 80, 160]],
             ..Index::default()
         };
@@ -711,6 +754,37 @@ mod tests {
         let decoded: Index = serde_json::from_slice(&encoded).expect("decode index");
         assert_eq!(decoded.parked_tools, index.parked_tools);
         assert_eq!(decoded.custom_inks, index.custom_inks);
+
+        // Dense lists written before empty seats existed still load.
+        let dense: Index = serde_json::from_str(
+            r#"{"seeded":false,"notes":[],"parked_tools":["Text","EraserStroke"]}"#,
+        )
+        .expect("old dense parked list");
+        assert_eq!(
+            dense.parked_tools,
+            vec![Some(Tool::Text), Some(Tool::EraserStroke)]
+        );
+    }
+
+    #[test]
+    fn old_tool_order_strings_stay_readable_after_chrome_joins_the_order() {
+        let index: Index = serde_json::from_str(
+            r#"{"seeded":false,"notes":[],"tool_order":["Brush","Fineliner"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            index.tool_order,
+            vec![DockItem::Tool(Tool::Brush), DockItem::Tool(Tool::Fineliner)]
+        );
+        let mixed = Index {
+            tool_order: vec![
+                DockItem::Chrome(DockChrome::Ink),
+                DockItem::Tool(Tool::Brush),
+            ],
+            ..Index::default()
+        };
+        let decoded: Index = serde_json::from_slice(&serde_json::to_vec(&mixed).unwrap()).unwrap();
+        assert_eq!(decoded.tool_order, mixed.tool_order);
     }
 
     #[test]

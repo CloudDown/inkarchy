@@ -36,7 +36,7 @@ inkarchy --help               # all commands and gestures
 |---|---|
 | `p` `b` `c` `h` | felt-tip, fountain pen, pencil, highlighter |
 | `e` / `shift+e` | stroke eraser / area eraser |
-| `l` `t` `i` | lasso, text, image |
+| `l` `t` `i` | lasso, text, media |
 | `[` `]` · `1-9` | thickness · ink color |
 | `m` | cycle paper |
 | `+` `-` · `0` | zoom · fit to screen |

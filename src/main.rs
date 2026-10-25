@@ -16,6 +16,7 @@ mod pressure;
 mod seed;
 mod tablet;
 mod undo;
+mod video;
 
 use app::InkarchyApp;
 
@@ -45,7 +46,7 @@ Examples:
 Gestures (inside a notebook):
   p felt-tip   b fountain   c pencil   h highlighter
   e stroke eraser   shift+e area eraser
-  l lasso   t text   i image
+  l lasso   t text   i media (image or video)
   [ ] thickness   1-9 ink   m paper
   + − zoom   0 / corners = fit to screen
   mouse writes · space pans · right-click = last eraser

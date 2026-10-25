@@ -1,5 +1,58 @@
 use super::*;
+use eframe::App;
 mod gestures;
+
+#[test]
+fn pen_hides_cursor_until_real_mouse_motion_after_proximity_ends() {
+    let mut fixture = Fixture::new();
+    let app = &mut fixture.app;
+    let ctx = Context::default();
+    let frame = |app: &mut InkarchyApp, events: Vec<Event>| {
+        let mut input = RawInput {
+            events,
+            ..Default::default()
+        };
+        app.raw_input_hook(&ctx, &mut input);
+        let output = ctx.run(input, |ctx| app.sync_pen_cursor(ctx));
+        let commands = &output.viewport_output[&ViewportId::ROOT].commands;
+        (
+            commands
+                .iter()
+                .any(|command| matches!(command, ViewportCommand::CursorVisible(false))),
+            commands
+                .iter()
+                .any(|command| matches!(command, ViewportCommand::CursorVisible(true))),
+        )
+    };
+    app.tablet.set_test_pen(Some(PenSnapshot {
+        in_proximity: true,
+        pos: Some(pos2(100.0, 100.0)),
+        ..Default::default()
+    }));
+    assert_eq!(frame(app, vec![]), (true, false));
+    // An injected pen hover is not a real mouse movement.
+    let mut raw = RawInput::default();
+    app.raw_input_hook(&ctx, &mut raw);
+    app.inject_pen_pointer(&ctx, &mut raw);
+    assert!(raw
+        .events
+        .iter()
+        .any(|event| matches!(event, Event::PointerMoved(_))));
+    assert!(!app.mouse_moved);
+    // Even native pointer movement while the pen is active must not reappear later.
+    assert_eq!(
+        frame(app, vec![Event::PointerMoved(pos2(120.0, 100.0))]),
+        (false, false)
+    );
+    app.tablet.set_test_pen(None);
+    assert_eq!(frame(app, vec![]), (false, false));
+    assert!(app.cursor_off);
+    assert_eq!(
+        frame(app, vec![Event::PointerMoved(pos2(150.0, 100.0))]),
+        (false, true)
+    );
+    assert!(!app.cursor_off);
+}
 
 #[test]
 fn coach_settings_remember_notebook_and_do_not_shift_the_canvas() {
@@ -537,6 +590,28 @@ fn pdf_page_chip_steps_once_and_accelerates_when_held() {
         (0, 1),
         "holding the stepper must not move pages"
     );
+}
+
+#[test]
+fn word_search_button_stays_in_the_header_without_a_pdf() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Plain search");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let icon = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("pdf-search-button-rect")))
+        .expect("word search stays in the header for every notebook");
+    assert!(icon.max.y <= 52.0 && icon.min.y >= 0.0);
+    frames.drag(app, icon.center(), icon.center());
+    frames.settle(app);
+    assert!(app.pdf_search_open);
+    assert!(frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("pdf-search-field-rect")))
+        .is_some());
 }
 
 #[test]
@@ -1093,6 +1168,10 @@ fn responsive_note_controls_do_not_overlap_through_resizes() {
         DockEdge::Right,
     ] {
         app.dock_edge = edge;
+        app.dock_drag_edge = None;
+        app.dock_float = None;
+        app.dock_slide = None;
+        app.dock_fold = 0.0;
         for size in [
             vec2(1280.0, 860.0),
             vec2(320.0, 280.0),
@@ -1118,11 +1197,36 @@ fn responsive_note_controls_do_not_overlap_through_resizes() {
                 } else if accessory == 4 {
                     let palette = palette_rect.unwrap();
                     let mixer = panel.unwrap();
-                    assert!((palette.height() - mixer.height()).abs() < 1.0,
-                        "{edge:?} {size:?}: palette {palette:?} and mixer {mixer:?} keep the same height");
+                    if edge.vertical() {
+                        assert!(
+                            (palette.height() - mixer.height()).abs() < 1.0,
+                            "{edge:?} {size:?}: palette {palette:?} and mixer {mixer:?} keep the same height"
+                        );
+                    } else {
+                        assert!(
+                            (palette.height() - mixer.height()).abs() < 1.0,
+                            "{edge:?} {size:?}: horizontal strips share height {palette:?} vs {mixer:?}"
+                        );
+                    }
+                    let dock = frames
+                        .ctx
+                        .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
+                        .unwrap();
+                    let palette_against = match edge {
+                        DockEdge::Bottom => (dock.top() - palette.bottom()).abs() < 11.0,
+                        DockEdge::Top => (palette.top() - dock.bottom()).abs() < 11.0,
+                        DockEdge::Left => (palette.left() - dock.right()).abs() < 11.0,
+                        DockEdge::Right => (dock.left() - palette.right()).abs() < 11.0,
+                    };
+                    let mixer_against = match edge {
+                        DockEdge::Bottom => (dock.top() - mixer.bottom()).abs() < 11.0,
+                        DockEdge::Top => (mixer.top() - dock.bottom()).abs() < 11.0,
+                        DockEdge::Left => (mixer.left() - dock.right()).abs() < 11.0,
+                        DockEdge::Right => (dock.left() - mixer.right()).abs() < 11.0,
+                    };
                     assert!(
-                        palette.min.distance(mixer.min) < 1.0,
-                        "switching between colors and mixer keeps the panel in place"
+                        palette_against && mixer_against,
+                        "{edge:?} {size:?}: colors {palette:?} and mixer {mixer:?} stay against the dock {dock:?}"
                     );
                 }
                 let screen = Rect::from_min_size(Pos2::ZERO, size);
@@ -1141,6 +1245,13 @@ fn responsive_note_controls_do_not_overlap_through_resizes() {
                         "{edge:?} {size:?} {accessory}: {name} {rect:?} outside screen"
                     );
                     for (other, other_rect) in &controls[i + 1..] {
+                        // The transparent header band and a top dock share the same strip on purpose.
+                        if edge == DockEdge::Top
+                            && ((*name == "top-rect" && *other == "dock-rect")
+                                || (*name == "dock-rect" && *other == "top-rect"))
+                        {
+                            continue;
+                        }
                         assert!(!rect.shrink(0.5).intersects(*other_rect), "{edge:?} {size:?} {accessory}: {name} {rect:?} overlaps {other} {other_rect:?}");
                     }
                 }
@@ -1182,17 +1293,26 @@ fn responsive_note_controls_do_not_overlap_through_resizes() {
                 if edge == DockEdge::Bottom && size.x == 1024.0 && accessory == 1 {
                     frames.snapshot("exercise-coach-header-1024");
                 }
-                for rect in [menu, cap, meter] {
+                for (name, rect) in [("menu", menu), ("meter", meter)] {
                     assert!(
                         screen.contains_rect(rect),
-                        "header control outside {size:?}: {rect:?}"
+                        "header control outside {size:?}: {name} {rect:?}"
                     );
                 }
-                assert!(cap.top() > 52.0, "coach badge is beside the dock");
-                assert!(
-                    !cap.intersects(controls[1].1),
-                    "coach badge stays clear of dock"
-                );
+                if screen.intersects(cap) {
+                    assert!(
+                        screen.contains_rect(cap),
+                        "coach badge remains on-screen {edge:?} {size:?}: {cap:?}"
+                    );
+                }
+                if let Some(well) = frames
+                    .ctx
+                    .data(|d| d.get_temp::<Rect>(Id::new("ink-well-rect")))
+                {
+                    if screen.contains(well.center()) && screen.contains(cap.center()) {
+                        assert!(screen.contains(well.center()));
+                    }
+                }
                 if size.x >= 760.0 {
                     assert!(
                         meter
@@ -1295,11 +1415,11 @@ fn pages_mode_arranges_six_pages_without_losing_the_visible_page_or_its_content(
     app.fitted_cell = Some((0, 4));
     app.enter_pages_mode();
     frames.settle(app);
-    let two = frames
+    let more = frames
         .ctx
-        .data(|data| data.get_temp::<Rect>(Id::new(("strip-columns", "2"))))
-        .expect("pages-per-row slider appears in Pages mode");
-    frames.drag(app, two.center(), two.center());
+        .data(|data| data.get_temp::<Rect>(Id::new(("strip-flow", "More"))))
+        .expect("the per-row stepper appears in Pages mode");
+    frames.drag(app, more.center(), more.center());
     frames.settle(app);
     let note = app.note.as_ref().unwrap();
     let cells: Vec<_> = note.pages.iter().map(|page| (page.col, page.row)).collect();
@@ -1430,12 +1550,12 @@ fn compact_controls_keep_drag_selection_and_wheel_actions_accessible() {
     frames.settle(app);
     assert!(app.sheet_tabs_on);
     frames.snapshot("responsive-page-selection-small");
-    let done = frames
+    let close = frames
         .ctx
-        .data(|d| d.get_temp::<Rect>(Id::new(("strip-tray", "Done"))))
-        .expect("the tray offers Done");
-    frames.touch(app, TouchPhase::Start, done.center());
-    frames.touch(app, TouchPhase::End, done.center());
+        .data(|d| d.get_temp::<Rect>(Id::new(("strip-tray", "Close"))))
+        .expect("the tray offers Close");
+    frames.touch(app, TouchPhase::Start, close.center());
+    frames.touch(app, TouchPhase::End, close.center());
     frames.settle(app);
     assert!(!app.sheet_tabs_on);
 }
@@ -1458,6 +1578,149 @@ fn early_turn_stays_while_the_hand_keeps_moving_into_the_new_wall() {
     assert_eq!(
         carrying_edge(pointer, screen, bounds, DockEdge::Bottom, flat, down * 0.5),
         DockEdge::Bottom
+    );
+}
+
+#[test]
+fn coach_badge_sits_below_the_toolbar_as_a_separate_accessory() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Coach in tools");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let dock = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
+        .unwrap();
+    let cap = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("coach-button-rect")))
+        .unwrap();
+    assert!(!dock.intersects(cap), "badge is detached from dock");
+    assert!(
+        cap.center().y < dock.top(),
+        "cap sits under the toolbar toward the page, cap={cap:?} dock={dock:?}"
+    );
+    assert!(!app
+        .tool_order
+        .contains(&DockItem::Chrome(DockChrome::Coach)));
+}
+
+#[test]
+fn coach_button_sits_next_to_search_in_the_header() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Coach beside top toolbar");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let cap = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("coach-button-rect")))
+        .unwrap();
+    let search = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("pdf-search-button-rect")))
+        .unwrap();
+    assert!((cap.center().y - search.center().y).abs() < 1.0);
+    assert!(cap.intersects(search.expand(56.0)));
+}
+
+#[test]
+fn vertical_dock_keeps_a_color_column() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Vertical colors");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    app.dock_edge = DockEdge::Right;
+    app.set_ink_panel(true);
+    app.ink_panel_view = InkPanelView::Colors;
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let dock = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
+        .unwrap();
+    let palette = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("tin-rect")))
+        .unwrap();
+    let first = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("ink-swatch", 0))))
+        .unwrap();
+    let next = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("ink-swatch", 1))))
+        .unwrap();
+    assert!(
+        (palette.size() - dock.size()).length() < 1.0,
+        "vertical color twin matches the toolbar, palette={palette:?} dock={dock:?}"
+    );
+    assert!(
+        (dock.left() - palette.right()).abs() < 11.0,
+        "color twin sits against the right toolbar"
+    );
+    assert!((first.center().x - next.center().x).abs() < 1.0);
+    assert!(next.top() >= first.bottom() - 1.0);
+}
+
+#[test]
+fn horizontal_color_swatches_center_for_top_and_bottom_docks() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Centered colors");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    app.set_ink_panel(true);
+    app.ink_panel_view = InkPanelView::Colors;
+    let mut frames = Frames::new(app);
+    for edge in [DockEdge::Bottom, DockEdge::Top] {
+        app.dock_edge = edge;
+        frames.settle(app);
+        let palette = frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new("tin-rect")))
+            .unwrap();
+        let last = app.ink_colors().len() - 1;
+        let first_swatch = frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new(("ink-swatch", 0))))
+            .unwrap();
+        let last_swatch = frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new(("ink-swatch", last))))
+            .unwrap();
+        let swatches_center = (first_swatch.left() + last_swatch.right()) * 0.5;
+        assert!(
+            (swatches_center - palette.center().x).abs() < 48.0,
+            "{edge:?}: swatch row is centered in the color strip, row={swatches_center} palette={palette:?}"
+        );
+    }
+}
+
+#[test]
+fn top_dock_rests_against_the_window_edge() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Top dock");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    app.dock_edge = DockEdge::Top;
+    let mut frames = Frames::new(app);
+    frames.size = vec2(900.0, 600.0);
+    frames.settle(app);
+    let dock = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
+        .unwrap();
+    assert_eq!(app.dock_edge, DockEdge::Top);
+    assert!(
+        dock.top() <= 8.0,
+        "top dock sits under the transparent header, got {dock:?}"
+    );
+    assert!(
+        dock.width() > dock.height(),
+        "top dock stays a horizontal bar, got {dock:?}"
     );
 }
 
@@ -1535,6 +1798,39 @@ fn dock_folds_to_the_grip_while_held_and_opens_on_release() {
         (open.width() - rest.width()).abs() < 12.0,
         "opened case matches rest width, rest {rest:?} open {open:?}"
     );
+}
+
+#[test]
+fn finger_can_move_toolbar_by_its_grip_after_tools_have_been_reordered() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Move toolbar");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.size = vec2(900.0, 600.0);
+    frames.settle(app);
+    let from = frames.ctx.data(|d| {
+        d.get_temp::<Rect>(Id::new(("tool-well", Tool::Fineliner)))
+            .unwrap()
+            .center()
+    });
+    let to = frames.ctx.data(|d| {
+        d.get_temp::<Rect>(Id::new(("tool-well", Tool::Highlighter)))
+            .unwrap()
+            .center()
+    });
+    frames.drag(app, from, to);
+    frames.settle(app);
+    let dock = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")).unwrap());
+    let grip = dock.min + vec2(30.0, 29.0);
+    frames.touch(app, TouchPhase::Start, grip);
+    frames.touch(app, TouchPhase::Move, pos2(860.0, 280.0));
+    assert!(app.dock_held, "the finger should pick up the grip");
+    frames.touch(app, TouchPhase::End, pos2(860.0, 280.0));
+    frames.settle(app);
+    assert_eq!(app.dock_edge, DockEdge::Right);
 }
 
 #[test]
@@ -1996,17 +2292,14 @@ fn pages_edit_replaces_the_header_with_a_canvas_tray() {
     frames.drag(app, edit, edit);
     frames.settle(app);
     assert!(app.sheet_tabs_on);
-    let header_rule = |frames: &Frames| {
-        frames.output.as_ref().unwrap().shapes.iter().any(|shape| {
-            matches!(
-                &shape.shape,
-                Shape::LineSegment { points: [a, b], stroke: _ }
-                    if (a.y - b.y).abs() < 0.5 && a.y > 40.0 && a.y < 60.0
-            )
-        })
+    let header_visible = |frames: &Frames| {
+        frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new("top-rect")))
+            .is_some()
     };
     assert!(
-        !header_rule(&frames),
+        !header_visible(&frames),
         "the whole header disappears while editing pages"
     );
     frames.snapshot("pages-edit-tray");
@@ -2029,10 +2322,12 @@ fn pages_edit_replaces_the_header_with_a_canvas_tray() {
             "tray fits at {window:?}"
         );
         let mut controls: Vec<Rect> = Vec::new();
-        let ids = ["Linked", "Separate", "Done"]
+        let ids = ["Linked", "Separate", "Close"]
             .map(|name| Id::new(("strip-tray", name)))
             .into_iter()
-            .chain(["1", "2", "3", "4", "all"].map(|name| Id::new(("strip-columns", name))))
+            .chain(
+                ["Stack", "Row", "Less", "Count", "More"].map(|name| Id::new(("strip-flow", name))),
+            )
             .chain(PaperKind::ALL.map(|kind| Id::new(("strip-paper", kind.label()))))
             .chain(["White", "Sand", "Black"].map(|name| Id::new(("strip-tone", name))));
         for id in ids {
@@ -2068,16 +2363,16 @@ fn pages_edit_replaces_the_header_with_a_canvas_tray() {
         .expect("the tray offers join controls");
     frames.drag(app, separate.center(), separate.center());
     assert_eq!(app.note.as_ref().unwrap().sheet_join, SheetJoin::Separate);
-    let done = frames
+    let close = frames
         .ctx
-        .data(|d| d.get_temp::<Rect>(Id::new(("strip-tray", "Done"))))
-        .expect("the tray offers Done");
-    frames.touch(app, TouchPhase::Start, done.center());
-    frames.touch(app, TouchPhase::End, done.center());
+        .data(|d| d.get_temp::<Rect>(Id::new(("strip-tray", "Close"))))
+        .expect("the tray offers Close");
+    frames.touch(app, TouchPhase::Start, close.center());
+    frames.touch(app, TouchPhase::End, close.center());
     frames.settle(app);
     assert!(!app.sheet_tabs_on);
     assert!(
-        header_rule(&frames),
+        header_visible(&frames),
         "the header returns after leaving pages edit"
     );
 }
@@ -2105,49 +2400,66 @@ fn pdf_pages_can_be_arranged_horizontally_or_two_per_row() {
     frames.settle(app);
     app.enter_pages_mode();
     frames.settle(app);
-    for (well, expected) in [
-        (
-            Id::new(("strip-columns", "all")),
-            vec![(0, 0), (1, 0), (2, 0), (3, 0), (4, 0)],
-        ),
-        (
-            Id::new(("strip-columns", "2")),
-            vec![(0, 0), (1, 0), (0, 1), (1, 1), (0, 2)],
-        ),
-        (
-            Id::new(("strip-columns", "3")),
-            vec![(0, 0), (1, 0), (2, 0), (0, 1), (1, 1)],
-        ),
-        (
-            Id::new(("strip-columns", "4")),
-            vec![(0, 0), (1, 0), (2, 0), (3, 0), (0, 1)],
-        ),
-        (
-            Id::new(("strip-columns", "1")),
-            vec![(0, 0), (0, 1), (0, 2), (0, 3), (0, 4)],
-        ),
-    ] {
-        let target = frames
-            .ctx
-            .data(|d| d.get_temp::<Rect>(well))
-            .expect("tray control");
-        frames.drag(app, target.center(), target.center());
-        frames.settle(app);
-        let note = app.note.as_ref().unwrap();
-        assert_eq!(
-            note.pages
-                .iter()
-                .map(|page| (page.col, page.row))
-                .collect::<Vec<_>>(),
-            expected
-        );
-        for (index, page) in note.pages.iter().enumerate() {
+    let cells_now = |app: &InkarchyApp| -> Vec<(i32, i32)> {
+        app.note
+            .as_ref()
+            .unwrap()
+            .pages
+            .iter()
+            .map(|page| (page.col, page.row))
+            .collect()
+    };
+    let keep_pdf_intact = |app: &InkarchyApp| {
+        for (index, page) in app.note.as_ref().unwrap().pages.iter().enumerate() {
             assert_eq!(
                 page.background.as_ref().unwrap().pdf_page,
                 Some(index as u32)
             );
         }
+    };
+    let tap = |frames: &mut Frames, app: &mut InkarchyApp, well: &str| {
+        let target = frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new(("strip-flow", well))))
+            .expect("tray control");
+        frames.drag(app, target.center(), target.center());
+        frames.settle(app);
+    };
+    // One horizontal row holds every page.
+    tap(&mut frames, app, "Row");
+    assert_eq!(cells_now(app), vec![(0, 0), (1, 0), (2, 0), (3, 0), (4, 0)]);
+    keep_pdf_intact(app);
+    // The stepper sleeps while one row holds everything.
+    tap(&mut frames, app, "More");
+    assert_eq!(cells_now(app), vec![(0, 0), (1, 0), (2, 0), (3, 0), (4, 0)]);
+    // Coming back to the stack resumes the remembered wrapping.
+    tap(&mut frames, app, "Stack");
+    assert_eq!(cells_now(app), vec![(0, 0), (0, 1), (0, 2), (0, 3), (0, 4)]);
+    keep_pdf_intact(app);
+    for (well, expected) in [
+        ("More", vec![(0, 0), (1, 0), (0, 1), (1, 1), (0, 2)]),
+        ("More", vec![(0, 0), (1, 0), (2, 0), (0, 1), (1, 1)]),
+        ("More", vec![(0, 0), (1, 0), (2, 0), (3, 0), (0, 1)]),
+        ("More", vec![(0, 0), (1, 0), (2, 0), (3, 0), (4, 0)]),
+        ("More", vec![(0, 0), (1, 0), (2, 0), (3, 0), (4, 0)]),
+    ] {
+        tap(&mut frames, app, well);
+        assert_eq!(cells_now(app), expected);
+        keep_pdf_intact(app);
     }
+    // The chosen density survives a round trip through one row.
+    tap(&mut frames, app, "Row");
+    assert_eq!(cells_now(app), vec![(0, 0), (1, 0), (2, 0), (3, 0), (4, 0)]);
+    tap(&mut frames, app, "Stack");
+    assert_eq!(cells_now(app), vec![(0, 0), (1, 0), (2, 0), (3, 0), (4, 0)]);
+    keep_pdf_intact(app);
+    // And the stepper removes columns again.
+    tap(&mut frames, app, "Less");
+    assert_eq!(cells_now(app), vec![(0, 0), (1, 0), (2, 0), (3, 0), (4, 0)]);
+    keep_pdf_intact(app);
+    tap(&mut frames, app, "Less");
+    assert_eq!(cells_now(app), vec![(0, 0), (1, 0), (2, 0), (3, 0), (0, 1)]);
+    keep_pdf_intact(app);
 }
 
 #[test]
@@ -2200,6 +2512,10 @@ fn ink_tin_keeps_color_picking_and_fits_after_resize() {
         .ctx
         .data(|d| d.get_temp::<Rect>(Id::new("tin-wheel")))
         .is_none());
+    let dock = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
+        .unwrap();
     let palette = frames
         .ctx
         .data(|d| d.get_temp::<Rect>(Id::new("tin-rect")))
@@ -2213,14 +2529,18 @@ fn ink_tin_keeps_color_picking_and_fits_after_resize() {
         .data(|d| d.get_temp::<Rect>(Id::new(("ink-swatch", 1))))
         .unwrap();
     assert!(
-        palette.width() <= 66.0,
-        "colors form a narrow dock extension"
+        (palette.size() - dock.size()).length() < 1.0,
+        "color bar mirrors the toolbar size palette={palette:?} dock={dock:?}"
     );
-    assert!((first.center().x - next.center().x).abs() < 1.0);
-    assert_eq!(first.size(), Vec2::splat(36.0));
     assert!(
-        next.top() >= first.bottom(),
-        "swatches follow one vertical column"
+        (dock.top() - palette.bottom()).abs() < 11.0,
+        "color bar sits against the toolbar"
+    );
+    assert!((first.center().y - next.center().y).abs() < 1.0);
+    assert_eq!(first.size(), Vec2::splat(40.0));
+    assert!(
+        next.left() >= first.right() - 1.0,
+        "swatches follow one horizontal row"
     );
     frames.snapshot("ink-swatches");
     let add = frames
@@ -2235,11 +2555,15 @@ fn ink_tin_keeps_color_picking_and_fits_after_resize() {
         .ctx
         .data(|d| d.get_temp::<Rect>(Id::new("tin-rect")))
         .unwrap();
+    let dock = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
+        .unwrap();
     assert!(
-        mixer.width() <= 66.0,
-        "mixer replaces the same narrow column"
+        (mixer.size() - dock.size()).length() < 1.0,
+        "mixer keeps the toolbar twin size"
     );
-    assert!((mixer.center().x - palette.center().x).abs() < 1.0);
+    assert!((mixer.center().x - palette.center().x).abs() < 4.0);
     assert!(frames
         .ctx
         .data(|d| d.get_temp::<Rect>(Id::new("tin-wheel")))
@@ -2287,13 +2611,9 @@ fn ink_tin_keeps_color_picking_and_fits_after_resize() {
         !tin.shrink(0.5).intersects(dock),
         "colour wheel must not cover the tools"
     );
-    let well = frames
-        .ctx
-        .data(|d| d.get_temp::<Rect>(Id::new("ink-well-rect")))
-        .unwrap();
     assert!(
-        (tin.center().x - well.center().x).abs() < 4.0,
-        "ink case should emerge beside the ink well"
+        (tin.center().x - dock.center().x).abs() < 4.0,
+        "ink case twin stays aligned with the toolbar"
     );
     frames.snapshot("ink-tin");
     frames.size = vec2(900.0, 500.0);
@@ -2309,8 +2629,8 @@ fn ink_tin_keeps_color_picking_and_fits_after_resize() {
         .unwrap();
     assert_eq!(save.size(), Vec2::splat(48.0));
     assert!(
-        tin.contains_rect(save),
-        "save stays visible in a short window"
+        tin.expand(3.0).contains_rect(save),
+        "save stays visible in a short window tin={tin:?} save={save:?}"
     );
     frames.snapshot("ink-tin-short");
     frames.touch(app, TouchPhase::Start, save.center());
@@ -2343,6 +2663,64 @@ fn ink_tin_keeps_color_picking_and_fits_after_resize() {
     frames.key(app, Key::Escape);
     assert!(!app.tin_open);
     assert!(matches!(app.scene, Scene::Desk));
+}
+
+#[test]
+fn dragged_toolbar_icon_leaves_its_seat_and_parks_in_a_chosen_slot() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Drag follows finger");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let source = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", Tool::Fineliner))))
+        .unwrap();
+    frames.step(
+        app,
+        vec![
+            Event::PointerMoved(source.center()),
+            Event::PointerButton {
+                pos: source.center(),
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            },
+        ],
+    );
+    frames.step(
+        app,
+        vec![Event::PointerMoved(source.center() - vec2(0.0, 40.0))],
+    );
+    frames.settle(app);
+    assert_eq!(app.dock_tool_drag, Some(DockItem::Tool(Tool::Fineliner)));
+    // Source well is hollowed out while the ghost rides the pointer.
+    let hollow = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", Tool::Fineliner))))
+        .unwrap_or(Rect::NOTHING);
+    assert!(
+        !hollow.is_positive(),
+        "dragged icon must leave its toolbar seat"
+    );
+    let seat = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("storage-slot", 5))))
+        .expect("storage seats are addressable");
+    frames.step(app, vec![Event::PointerMoved(seat.center())]);
+    frames.step(
+        app,
+        vec![Event::PointerButton {
+            pos: seat.center(),
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    assert!(app.tool_is_parked(Tool::Fineliner));
+    assert_eq!(app.parked_slots[5], Some(Tool::Fineliner));
+    assert!(app.parked_slots[..5].iter().all(Option::is_none));
 }
 
 #[test]
@@ -2399,11 +2777,11 @@ fn tools_can_be_stored_and_restored_by_dragging_between_panel_and_dock() {
                 }],
             );
         }
+        assert!(app.tool_is_parked(tool), "store {tool:?} touch={touch}");
         assert!(
-            app.parked_tools.contains(&tool),
-            "store {tool:?} touch={touch}"
+            app.parked_slots.iter().any(|slot| *slot == Some(tool)),
+            "tool lands in a storage seat"
         );
-        assert_eq!(app.lib.index.parked_tools, vec![tool]);
         assert!(
             app.note.as_ref().unwrap().pages[0].texts.is_empty(),
             "storing a tool must not place a sticky note"
@@ -2439,62 +2817,461 @@ fn tools_can_be_stored_and_restored_by_dragging_between_panel_and_dock() {
         } else {
             frames.drag(app, stored, dock.center());
         }
-        assert!(
-            !app.parked_tools.contains(&tool),
-            "restore {tool:?} touch={touch}"
-        );
+        assert!(!app.tool_is_parked(tool), "restore {tool:?} touch={touch}");
         assert!(app.lib.index.parked_tools.is_empty());
         assert!(app.dock_tool_drag.is_none());
     }
 }
 
 #[test]
-fn storage_expands_only_when_more_than_three_tools_are_parked() {
+fn storage_keeps_nine_slots_and_stays_open_after_restoring() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Compact storage");
     let app = &mut fixture.app;
     app.open_note(id);
-    app.parked_tools.extend(PARKABLE_TOOLS.into_iter().take(4));
-    app.set_ink_panel(true);
-    app.ink_panel_view = InkPanelView::Tools;
     let mut frames = Frames::new(app);
     frames.settle(app);
+    for (i, tool) in PARKABLE_TOOLS.into_iter().take(4).enumerate() {
+        app.park_tool_at(tool, i);
+    }
+    app.set_ink_panel(true);
+    app.ink_panel_view = InkPanelView::Tools;
+    frames.settle(app);
+    let dock = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
+        .unwrap();
+    let twin = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("tin-rect")))
+        .unwrap();
     let storage = frames
         .ctx
         .data(|d| d.get_temp::<Rect>(Id::new("dock-tool-storage-rect")))
         .unwrap();
-    assert!(storage.height() >= 108.0, "fourth tool has a second row");
+    assert!(
+        (twin.size() - dock.size()).length() < 1.0,
+        "storage twin mirrors the toolbar size twin={twin:?} dock={dock:?}"
+    );
+    assert!(
+        twin.contains_rect(storage),
+        "storage seats stay inside the twin bay"
+    );
     let third = PARKABLE_TOOLS[3];
     let well = frames
         .ctx
         .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", third))))
         .unwrap();
     assert!(
-        storage.contains_rect(well),
+        storage.expand(2.0).intersects(well),
         "last stored tool remains visible"
     );
     frames.drag(app, well.center(), well.center());
-    assert!(!app.parked_tools.contains(&third));
+    assert!(!app.tool_is_parked(third));
     frames.settle(app);
-    let storage = frames
+    assert!(
+        app.ink_panel_open() && app.ink_panel_view == InkPanelView::Tools,
+        "restoring a tool leaves the tray open"
+    );
+    let after = frames
         .ctx
         .data(|d| d.get_temp::<Rect>(Id::new("dock-tool-storage-rect")))
         .unwrap();
-    assert!(storage.height() <= 72.0, "three tools fit on one row");
-
-    app.parked_tools.extend(PARKABLE_TOOLS);
-    frames.settle(app);
-    let storage = frames
+    let after_twin = frames
         .ctx
-        .data(|d| d.get_temp::<Rect>(Id::new("dock-tool-storage-rect")))
+        .data(|d| d.get_temp::<Rect>(Id::new("tin-rect")))
         .unwrap();
-    let last = frames
+    let after_dock = frames
         .ctx
-        .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", Tool::Image))))
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
         .unwrap();
     assert!(
-        storage.contains_rect(last),
-        "all eight tools remain accessible"
+        (after_twin.size() - after_dock.size()).length() < 1.0,
+        "tray keeps mirroring the toolbar after a restore"
+    );
+    assert!(after_twin.contains_rect(after));
+
+    for (i, tool) in PARKABLE_TOOLS.into_iter().enumerate() {
+        app.park_tool_at(tool, i);
+    }
+    frames.settle(app);
+    let storage = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-tool-storage-rect")))
+        .unwrap();
+    for tool in PARKABLE_TOOLS {
+        let well = frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", tool))))
+            .unwrap();
+        assert!(
+            storage.expand(2.0).intersects(well),
+            "{tool:?} fits in the nine slots"
+        );
+    }
+}
+
+#[test]
+fn dragging_a_tool_onto_another_inserts_it_at_the_indicated_place() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Swap tools");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let fineliner = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", Tool::Fineliner))))
+        .unwrap();
+    let brush = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", Tool::Brush))))
+        .unwrap();
+    assert!(fineliner.center().x < brush.center().x);
+    frames.drag(app, fineliner.center(), brush.center());
+    frames.settle(app);
+    assert_eq!(
+        app.tool_order[0],
+        DockItem::Tool(Tool::Brush),
+        "brush shifts into the first slot"
+    );
+    assert_eq!(
+        app.tool_order[1],
+        DockItem::Tool(Tool::Fineliner),
+        "fineliner moves to the second"
+    );
+    assert!(!app.tool_is_parked(Tool::Fineliner));
+    let saved: crate::library::Index =
+        serde_json::from_slice(&std::fs::read(app.lib.root.join("library.json")).unwrap()).unwrap();
+    assert_eq!(saved.tool_order, app.tool_order, "order survives a restart");
+}
+
+#[test]
+fn toolbar_drag_previews_and_inserts_across_multiple_wells() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Move tools");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let start = frames.ctx.data(|d| {
+        d.get_temp::<Rect>(Id::new(("tool-well", Tool::Fineliner)))
+            .unwrap()
+            .center()
+    });
+    let end = frames.ctx.data(|d| {
+        d.get_temp::<Rect>(Id::new(("tool-well", Tool::Highlighter)))
+            .unwrap()
+            .center()
+    });
+    let dock = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")).unwrap());
+    frames.step(app, vec![Event::PointerMoved(start)]);
+    frames.step(
+        app,
+        vec![Event::PointerButton {
+            pos: start,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    frames.step(app, vec![Event::PointerMoved(end)]);
+    let (_, mark) = app
+        .dock_insert_target(DockItem::Tool(Tool::Fineliner), end, dock)
+        .expect("the hovered position has an insertion guide");
+    assert!(frames.output.as_ref().unwrap().shapes.iter().any(|shape| {
+        matches!(&shape.shape, Shape::Rect(rect) if rect.rect == mark && rect.fill == app.look.paper)
+    }), "the paper-colored bar is visible before release");
+    frames.step(
+        app,
+        vec![Event::PointerButton {
+            pos: end,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    assert_eq!(
+        &app.tool_order[..4],
+        &[
+            DockItem::Tool(Tool::Brush),
+            DockItem::Tool(Tool::Pencil),
+            DockItem::Tool(Tool::Highlighter),
+            DockItem::Tool(Tool::Fineliner)
+        ],
+        "intermediate icons shift instead of swapping with the destination"
+    );
+    assert!(app.dock_tool_drag.is_none());
+}
+
+#[test]
+fn touch_along_toolbar_reorders_instead_of_scrolling() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Touch reorder");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let well = |tool| {
+        frames.ctx.data(|d| {
+            d.get_temp::<Rect>(Id::new(("tool-well", tool)))
+                .unwrap()
+                .center()
+        })
+    };
+    let from = well(Tool::Fineliner);
+    let to = well(Tool::Highlighter);
+    frames.touch(app, TouchPhase::Start, from);
+    frames.touch(app, TouchPhase::Move, to);
+    assert_eq!(app.dock_tool_drag, Some(DockItem::Tool(Tool::Fineliner)));
+    frames.touch(app, TouchPhase::End, to);
+    assert_eq!(
+        &app.tool_order[..4],
+        &[
+            DockItem::Tool(Tool::Brush),
+            DockItem::Tool(Tool::Pencil),
+            DockItem::Tool(Tool::Highlighter),
+            DockItem::Tool(Tool::Fineliner)
+        ]
+    );
+}
+
+#[test]
+fn undo_redo_ink_and_storage_can_each_be_reordered() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("All dock icons");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    app.park_tool_at(Tool::Hand, 0);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    for item in [
+        DockChrome::Undo,
+        DockChrome::Redo,
+        DockChrome::Ink,
+        DockChrome::Storage,
+    ] {
+        let source = app
+            .dock_tool_wells
+            .iter()
+            .find(|(key, _)| *key == DockItem::Chrome(item))
+            .unwrap()
+            .1
+            .center();
+        let first = app
+            .dock_tool_wells
+            .iter()
+            .find(|(key, _)| *key == DockItem::Tool(Tool::Fineliner))
+            .unwrap()
+            .1
+            .center()
+            - vec2(15.0, 0.0);
+        frames.step(app, vec![Event::PointerMoved(source)]);
+        frames.step(
+            app,
+            vec![Event::PointerButton {
+                pos: source,
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            }],
+        );
+        frames.step(app, vec![Event::PointerMoved(first)]);
+        assert_eq!(
+            app.dock_tool_drag,
+            Some(DockItem::Chrome(item)),
+            "{item:?} starts dragging"
+        );
+        let dock = frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")).unwrap());
+        assert!(
+            app.dock_insert_target(DockItem::Chrome(item), first, dock)
+                .is_some(),
+            "{item:?} can target first well, dock={dock:?}, first={first:?}"
+        );
+        frames.step(
+            app,
+            vec![Event::PointerButton {
+                pos: first,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            }],
+        );
+        frames.settle(app);
+        assert!(
+            app.tool_order
+                .iter()
+                .position(|key| *key == DockItem::Chrome(item))
+                .unwrap()
+                < app
+                    .tool_order
+                    .iter()
+                    .position(|key| *key == DockItem::Tool(Tool::Fineliner))
+                    .unwrap(),
+            "{item:?} moves before the pen"
+        );
+    }
+    assert!(
+        app.tool_is_parked(Tool::Hand),
+        "moving the storage button never parks another icon"
+    );
+    let saved: crate::library::Index =
+        serde_json::from_slice(&std::fs::read(app.lib.root.join("library.json")).unwrap()).unwrap();
+    assert_eq!(saved.tool_order, app.tool_order);
+}
+
+#[test]
+fn vertical_dock_moves_the_ink_well_with_a_horizontal_guide() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Vertical dock order");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    app.dock_edge = DockEdge::Right;
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let from = app
+        .dock_tool_wells
+        .iter()
+        .find(|(item, _)| *item == DockItem::Chrome(DockChrome::Ink))
+        .unwrap()
+        .1
+        .center();
+    let to = app
+        .dock_tool_wells
+        .iter()
+        .find(|(item, _)| *item == DockItem::Tool(Tool::Fineliner))
+        .unwrap()
+        .1
+        .center()
+        - vec2(0.0, 15.0);
+    let dock = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")).unwrap());
+    frames.step(app, vec![Event::PointerMoved(from)]);
+    frames.step(
+        app,
+        vec![Event::PointerButton {
+            pos: from,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    frames.step(app, vec![Event::PointerMoved(to)]);
+    let (_, guide) = app
+        .dock_insert_target(DockItem::Chrome(DockChrome::Ink), to, dock)
+        .unwrap();
+    assert!(guide.width() > guide.height());
+    frames.step(
+        app,
+        vec![Event::PointerButton {
+            pos: to,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    assert_eq!(app.tool_order[0], DockItem::Chrome(DockChrome::Ink));
+}
+
+#[test]
+fn holding_an_icon_in_a_compact_dock_reorders_instead_of_swiping() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Compact reorder");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.size = vec2(360.0, 500.0);
+    frames.settle(app);
+    let from = app
+        .dock_tool_wells
+        .iter()
+        .find(|(key, _)| *key == DockItem::Tool(Tool::Brush))
+        .unwrap()
+        .1
+        .center();
+    let to = app
+        .dock_tool_wells
+        .iter()
+        .find(|(key, _)| *key == DockItem::Tool(Tool::Fineliner))
+        .unwrap()
+        .1
+        .center()
+        - vec2(15.0, 0.0);
+    frames.touch(app, TouchPhase::Start, from);
+    for _ in 0..25 {
+        frames.step(app, vec![]);
+    }
+    frames.touch(app, TouchPhase::Move, to);
+    assert_eq!(app.dock_tool_drag, Some(DockItem::Tool(Tool::Brush)));
+    frames.touch(app, TouchPhase::End, to);
+    assert_eq!(app.tool_order[0], DockItem::Tool(Tool::Brush));
+}
+
+#[test]
+fn dragging_to_compact_dock_edge_reaches_offscreen_icons() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Reach all tools");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.size = vec2(360.0, 500.0);
+    frames.settle(app);
+    let from = app
+        .dock_tool_wells
+        .iter()
+        .find(|(key, _)| *key == DockItem::Tool(Tool::Fineliner))
+        .unwrap()
+        .1
+        .center();
+    let dock = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")).unwrap());
+    let edge = pos2(dock.right() - 10.0, from.y);
+    frames.step(app, vec![Event::PointerMoved(from)]);
+    frames.step(
+        app,
+        vec![Event::PointerButton {
+            pos: from,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    frames.step(app, vec![Event::PointerMoved(edge)]);
+    assert_eq!(app.dock_tool_drag, Some(DockItem::Tool(Tool::Fineliner)));
+    for _ in 0..70 {
+        frames.step(app, vec![]);
+    }
+    assert!(
+        app.dock_tool_wells
+            .iter()
+            .any(|(item, _)| *item == DockItem::Chrome(DockChrome::Ink)),
+        "holding near the edge scrolls through all the dock icons"
+    );
+    frames.step(
+        app,
+        vec![Event::PointerButton {
+            pos: edge,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    assert!(
+        app.tool_order
+            .iter()
+            .position(|item| *item == DockItem::Tool(Tool::Fineliner))
+            .unwrap()
+            > app
+                .tool_order
+                .iter()
+                .position(|item| *item == DockItem::Chrome(DockChrome::Redo))
+                .unwrap()
     );
 }
 
@@ -2595,9 +3372,13 @@ fn nib_options_remain_available_outside_the_color_palette() {
     let mut frames = Frames::new(app);
     frames.settle(app);
     frames.snapshot("ink-palette");
-    let track = frames
+    let dock = frames
         .ctx
-        .data(|d| d.get_temp::<Rect>(Id::new("nib-track")))
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
+        .unwrap();
+    let tin = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("tin-rect")))
         .unwrap();
     assert!(
         frames
@@ -2607,41 +3388,31 @@ fn nib_options_remain_available_outside_the_color_palette() {
         "storage stays out of the ink palette"
     );
     assert!(
-        track.width() > track.height(),
-        "nib slip is a horizontal ribbon"
-    );
-    let heavy = pos2(track.right() - 2.0, track.center().y);
-    frames.drag(app, heavy, heavy);
-    assert!(
-        (app.width - 18.0).abs() < 1.2,
-        "the heavy end of the ribbon sets a broad nib, got {}",
-        app.width
-    );
-    let hair = pos2(track.left() + 2.0, track.center().y);
-    frames.drag(app, hair, hair);
-    assert!(
-        app.width < 2.0,
-        "the thin end stays a hairline, got {}",
-        app.width
+        (dock.size() - tin.size()).length() < 1.0,
+        "size bar matches the toolbar, dock {dock:?} tin {tin:?}"
     );
     let preset = frames
         .ctx
-        .data(|d| d.get_temp::<Rect>(Id::new(("nib-preset", 2_usize))))
-        .unwrap()
-        .center();
-    frames.touch(app, TouchPhase::Start, preset);
-    frames.touch(app, TouchPhase::End, preset);
-    assert_eq!(app.width, 6.0);
-    assert_eq!(app.last_ink_width, 6.0);
+        .data(|d| d.get_temp::<Rect>(Id::new(("nib-preset", 0_usize))))
+        .expect("size dots fill the bar");
+    frames.touch(app, TouchPhase::Start, preset.center());
+    frames.touch(app, TouchPhase::End, preset.center());
+    assert!(
+        app.width > 10.0,
+        "the first dot is a broad nib, got {}",
+        app.width
+    );
+    assert_eq!(app.last_ink_width, app.width);
     assert!(frames
         .ctx
         .data(|d| d.get_temp::<Rect>(Id::new("ink-add-color")))
         .is_none());
-    let back = frames
+    let ink = frames
         .ctx
-        .data(|d| d.get_temp::<Rect>(Id::new("ink-panel-back")))
+        .data(|d| d.get_temp::<Rect>(Id::new("ink-well-rect")))
         .unwrap();
-    frames.drag(app, back.center(), back.center());
+    frames.touch(app, TouchPhase::Start, ink.center());
+    frames.touch(app, TouchPhase::End, ink.center());
     frames.settle(app);
     assert!(frames
         .ctx
@@ -2837,17 +3608,22 @@ fn colored_note_tools_preserve_ink_and_support_mouse_and_touch() {
             .ctx
             .data(|d| d.get_temp::<Rect>(Id::new("ink-well-rect")))
             .unwrap();
+        assert!(
+            (tin.size() - dock.size()).length() < 1.0,
+            "{edge:?}: color twin matches toolbar tin={tin:?} dock={dock:?}"
+        );
         if edge.vertical() {
             assert!(
-                tin.top() <= well.center().y && tin.bottom() >= well.center().y,
-                "colour column follows the dock down to the ink well"
+                (tin.center().y - dock.center().y).abs() < 4.0,
+                "colour twin follows the vertical toolbar"
             );
         } else {
             assert!(
-                (tin.center().x - well.center().x).abs() < 12.0,
-                "colour column emerges from the ink well"
+                (tin.center().x - dock.center().x).abs() < 4.0,
+                "colour twin follows the horizontal toolbar"
             );
         }
+        let _ = well;
         frames.snapshot(if touch {
             "note-colors-vertical"
         } else {
@@ -3800,7 +4576,7 @@ fn dock_expands_around_its_destination_without_a_second_slide() {
         app.dock_float = Some(dock_rest_min(
             edge,
             app.dock_pill_size(edge.vertical()),
-            note_controls_bounds(&frames.ctx),
+            dock_bounds(&frames.ctx, edge),
         ));
         app.dock_slide = Some(DockSlide {
             vel: Vec2::ZERO,
@@ -3813,7 +4589,7 @@ fn dock_expands_around_its_destination_without_a_second_slide() {
                 .ctx
                 .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
                 .unwrap();
-            let expected = dock_rest_min(edge, rect.size(), note_controls_bounds(&frames.ctx));
+            let expected = dock_rest_min(edge, rect.size(), dock_bounds(&frames.ctx, edge));
             assert!(
                 rect.min.distance(expected) < 1.5,
                 "{edge:?}: expansion lost its anchor: {rect:?}, expected {expected:?}, fold {}",
@@ -3847,12 +4623,12 @@ fn tool_storage_handles_small_screens_cancel_and_tap_to_restore() {
         .data(|d| d.get_temp::<Rect>(Id::new("dock-tool-storage-rect")))
         .unwrap();
     assert!(
-        storage.height() >= 48.0,
+        storage.width() >= 48.0 && storage.height() >= 22.0,
         "tray scrolls into view while carrying a tool: {storage:?}"
     );
     frames.touch(app, TouchPhase::Move, storage.center());
     frames.touch(app, TouchPhase::Cancel, storage.center());
-    assert!(app.parked_tools.is_empty(), "cancel never parks a tool");
+    assert_eq!(app.parked_count(), 0, "cancel never parks a tool");
     assert!(app.dock_tool_drag.is_none());
     frames.settle(app);
     let source = frames
@@ -3864,7 +4640,7 @@ fn tool_storage_handles_small_screens_cancel_and_tap_to_restore() {
     frames.touch(app, TouchPhase::Move, storage.center());
     frames.touch(app, TouchPhase::End, storage.center());
     frames.settle(app);
-    assert!(app.parked_tools.contains(&Tool::Fineliner));
+    assert!(app.tool_is_parked(Tool::Fineliner));
     let stored = frames
         .ctx
         .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", Tool::Fineliner))))
@@ -3872,5 +4648,5 @@ fn tool_storage_handles_small_screens_cancel_and_tap_to_restore() {
         .center();
     frames.touch(app, TouchPhase::Start, stored);
     frames.touch(app, TouchPhase::End, stored);
-    assert!(app.parked_tools.is_empty(), "tap restores the stored tool");
+    assert_eq!(app.parked_count(), 0, "tap restores the stored tool");
 }

@@ -273,19 +273,180 @@ fn image_replacement_is_undoable_and_stale_imports_cannot_change_another_note() 
     app.close_desk();
     app.open_note(other);
     let (send, result) = mpsc::channel();
-    app.image_import = Some(ImageImport {
+    app.media_import = Some(MediaImport {
         note: id,
         cell: (0, 0),
         local: Pos2::ZERO,
         replace: None,
         result,
     });
-    send.send(ImageImportResult::Ready(png(20, 20)))
+    send.send(MediaImportResult::Image(png(20, 20)))
         .ok()
         .unwrap();
-    app.poll_image_import(&Context::default());
+    app.poll_media_import(&Context::default());
     assert!(app.note.as_ref().unwrap().pages[0].images.is_empty());
-    assert!(app.image_import.is_none());
+    assert!(app.media_import.is_none());
+}
+
+#[test]
+fn video_lands_as_a_media_object_with_a_poster_and_scales_like_an_image() {
+    if std::process::Command::new("ffprobe")
+        .arg("-version")
+        .output()
+        .is_err()
+        || std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .is_err()
+    {
+        return;
+    }
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Media");
+    let clip = fixture.root.join("clip.mp4");
+    assert!(std::process::Command::new("ffmpeg")
+        .args([
+            "-nostdin",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=160x120:rate=10",
+            "-t",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+            "-y",
+        ])
+        .arg(&clip)
+        .status()
+        .unwrap()
+        .success());
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let meta = crate::video::probe(&clip).unwrap();
+    app.insert_video_path(&clip, "mp4", meta, 0, pos2(250.0, 150.0), None)
+        .unwrap();
+    let image = app.note.as_ref().unwrap().pages[0].images[0].clone();
+    assert!(crate::video::is_video_file(&image.file));
+    assert_eq!(app.tool, Tool::Hand);
+    assert_eq!(app.sel.len(), 1);
+    assert_eq!(image.size, [160.0, 120.0]);
+    let poster = app
+        .lib
+        .media_path(id, &crate::video::poster_name(&image.file));
+    assert!(poster.is_file(), "a still poster is stored beside the clip");
+
+    app.sync_videos(&Context::default());
+    assert!(app.videos.contains_key(&image.id));
+    app.scale_selection(pos2(0.0, 0.0), 2.0);
+    assert_eq!(
+        app.note.as_ref().unwrap().pages[0].images[0].size,
+        [320.0, 240.0]
+    );
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let button = app
+        .video_button_rect(
+            app.canvas_rect,
+            0,
+            &app.note.as_ref().unwrap().pages[0].images[0],
+        )
+        .unwrap();
+    // The button's hit target stays present even if its player cannot load.
+    assert_eq!(
+        app.video_button_at(button.center(), app.canvas_rect)
+            .unwrap()
+            .1,
+        image.id
+    );
+
+    let player = app.videos.remove(&image.id).unwrap();
+    frames.step(app, vec![Event::PointerMoved(button.center())]);
+    frames.step(
+        app,
+        vec![Event::PointerButton {
+            pos: button.center(),
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    assert_eq!(app.video_press, Some(image.id));
+    frames.step(
+        app,
+        vec![Event::PointerButton {
+            pos: button.center(),
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    app.videos.insert(image.id, player);
+
+    // Pointer events are also emitted alongside touch by egui backends. They
+    // must not steal the touch's ownership or swallow the following mouse click.
+    frames.touch(app, TouchPhase::Start, button.center());
+    frames.touch(app, TouchPhase::End, button.center());
+    assert!(
+        app.videos[&image.id].is_playing(),
+        "the on-video button starts playback"
+    );
+    frames.touch(app, TouchPhase::Start, button.center());
+    frames.touch(app, TouchPhase::End, button.center());
+    assert!(
+        !app.videos[&image.id].is_playing(),
+        "the same button pauses playback"
+    );
+
+    frames.step(app, vec![Event::PointerMoved(button.center())]);
+    frames.step(
+        app,
+        vec![Event::PointerButton {
+            pos: button.center(),
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    frames.step(
+        app,
+        vec![Event::PointerButton {
+            pos: button.center(),
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    assert!(
+        app.videos[&image.id].is_playing(),
+        "a mouse click on the button starts playback"
+    );
+    frames.snapshot("video-playing");
+    frames.step(
+        app,
+        vec![Event::PointerButton {
+            pos: button.center(),
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    frames.step(
+        app,
+        vec![Event::PointerButton {
+            pos: button.center(),
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    assert!(
+        !app.videos[&image.id].is_playing(),
+        "a second mouse click pauses playback"
+    );
+    frames.snapshot("video-player");
 }
 
 #[test]
@@ -382,6 +543,68 @@ fn held_tool_opens_settings_and_all_swatches_have_finger_sized_targets() {
 }
 
 #[test]
+fn saved_color_hold_arms_a_bin_and_removal_is_remembered() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Saved inks");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    app.set_ink_panel(true);
+    app.ink_panel_view = InkPanelView::Colors;
+    app.pick_free_ink(Color32::from_rgb(12, 34, 56));
+    app.save_ink_swatch();
+    assert_eq!(app.lib.index.custom_inks.len(), 1);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let index = app.look.inks.len();
+    let swatch = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("ink-swatch", index))))
+        .unwrap();
+    let theme = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("ink-swatch", 0_usize))))
+        .unwrap();
+    frames.touch(app, TouchPhase::Start, theme.center());
+    frames.time += 0.7;
+    frames.step(app, vec![]);
+    frames.touch(app, TouchPhase::End, theme.center());
+    assert_eq!(app.ink_delete, None, "theme pigments are never removable");
+    frames.settle(app);
+    frames.touch(app, TouchPhase::Start, swatch.center());
+    frames.time += 0.7;
+    frames.step(app, vec![]);
+    frames.touch(app, TouchPhase::End, swatch.center());
+    frames.settle(app);
+    assert_eq!(app.ink_delete, Some(0), "a hold arms removal");
+    assert_eq!(app.lib.index.custom_inks.len(), 1, "a hold never deletes");
+    assert!(frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("ink-add-color")))
+        .is_none());
+    let bin = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("ink-delete-color")))
+        .unwrap();
+    assert_eq!(bin.size(), Vec2::splat(48.0));
+    frames.touch(app, TouchPhase::Start, bin.center());
+    frames.touch(app, TouchPhase::End, bin.center());
+    frames.settle(app);
+    assert!(app.lib.index.custom_inks.is_empty());
+    assert_eq!(app.ink_delete, None);
+    assert!(frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("ink-delete-color")))
+        .is_none());
+    assert!(frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("ink-add-color")))
+        .is_some());
+    let persisted: crate::library::Index =
+        serde_json::from_slice(&std::fs::read(app.lib.root.join("library.json")).unwrap()).unwrap();
+    assert!(persisted.custom_inks.is_empty(), "removal is saved");
+}
+
+#[test]
 fn toolbar_touch_swipes_scroll_without_storing_or_drawing() {
     for (edge, size, delta) in [
         (DockEdge::Bottom, vec2(360.0, 500.0), vec2(-80.0, 0.0)),
@@ -419,7 +642,7 @@ fn toolbar_touch_swipes_scroll_without_storing_or_drawing() {
         };
         assert!(moved > 40.0, "{edge:?}: swipe scrolls tools, moved {moved}");
         assert!(!app.ink_panel_open());
-        assert!(app.dock_tool_drag.is_none() && app.parked_tools.is_empty());
+        assert!(app.dock_tool_drag.is_none() && app.parked_count() == 0);
         assert_eq!(app.tool, tool, "swiping never selects a tool");
         assert_eq!(
             serde_json::to_value(&app.note.as_ref().unwrap().pages).unwrap(),
@@ -456,28 +679,54 @@ fn active_pen_tap_opens_spaced_touch_size_presets() {
         frames.settle(app);
         assert_eq!(app.ink_panel_view, InkPanelView::Nib);
         assert!(app.ink_panel_open() && !app.color_mixer_open);
-        let hit = frames
+        let dock = frames
             .ctx
-            .data(|d| d.get_temp::<Rect>(Id::new("nib-hit")))
+            .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
             .unwrap();
-        assert!(hit.height() >= 48.0);
-        let mut previous: Option<Rect> = None;
-        for (i, width) in [1.0, 2.5, 6.0, 12.0].into_iter().enumerate() {
-            let preset = frames
+        let tin = frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new("tin-rect")))
+            .unwrap();
+        assert!(
+            (dock.size() - tin.size()).length() < 1.0,
+            "size bar matches the toolbar"
+        );
+        let mut presets = Vec::new();
+        for i in 0..32 {
+            match frames
                 .ctx
                 .data(|d| d.get_temp::<Rect>(Id::new(("nib-preset", i))))
-                .unwrap();
-            assert_eq!(preset.size(), Vec2::splat(48.0));
-            assert!(!hit.intersects(preset));
-            if let Some(previous) = previous {
-                assert!(preset.left() - previous.right() >= 4.0);
+            {
+                Some(preset) => presets.push(preset),
+                None => break,
             }
+        }
+        assert!(
+            presets.len() >= 4,
+            "size options follow the bar, got {}",
+            presets.len()
+        );
+        let first = *presets.first().unwrap();
+        let last = *presets.last().unwrap();
+        assert!(
+            first.left() - tin.left() < 28.0 && tin.right() - last.right() < 28.0,
+            "dots fill the bar, tin {tin:?} first {first:?} last {last:?}"
+        );
+        let mut previous_width = f32::MAX;
+        for (i, preset) in presets.iter().enumerate() {
             frames.touch(app, TouchPhase::Start, preset.center());
             frames.touch(app, TouchPhase::End, preset.center());
-            assert_eq!(app.width, width);
-            assert_eq!(app.last_ink_width, width);
-            previous = Some(preset);
+            if i > 0 {
+                assert!(
+                    app.width <= previous_width,
+                    "dots go from thick to thin, {previous_width} then {}",
+                    app.width
+                );
+            }
+            previous_width = app.width;
+            assert_eq!(app.last_ink_width, app.width);
         }
+        assert!(app.width < 4.0, "the last dot is a hairline");
         frames.touch(app, TouchPhase::Start, pen.center());
         frames.touch(app, TouchPhase::End, pen.center());
         assert!(!app.ink_panel_open(), "tap again closes size settings");

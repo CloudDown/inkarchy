@@ -12,21 +12,6 @@ pub(super) struct CoachUi {
 }
 
 impl InkarchyApp {
-    pub(super) fn ui_coach_badge(&mut self, ctx: &Context) {
-        let bounds = note_controls_bounds(ctx);
-        let dock = ctx
-            .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
-            .unwrap_or(Rect::from_center_size(bounds.center(), vec2(48.0, 48.0)));
-        let badge = sticky_pad_place(dock, self.dock_layout_edge(), bounds);
-        Area::new(Id::new("inkarchy-coach-badge"))
-            .order(Order::Foreground)
-            .fixed_pos(badge.min)
-            .constrain_to(bounds)
-            .show(ctx, |ui| {
-                self.ui_coach_button(ui);
-            });
-    }
-
     pub(super) fn coach_enabled(&self) -> bool {
         self.note
             .as_ref()
@@ -184,8 +169,9 @@ impl InkarchyApp {
     }
 
     pub(super) fn ui_coach_button(&mut self, ui: &mut Ui) -> Response {
-        // Only the raised cap is visible; the 44px hit target has no button plate.
-        let (rect, button) = ui.allocate_exact_size(vec2(44.0, 44.0), Sense::click());
+        // Only the raised cap is visible; the well matches other dock chrome.
+        let slot = self.slot();
+        let (rect, button) = ui.allocate_exact_size(vec2(slot, slot), Sense::click());
         let center = rect.center() - vec2(0.0, if button.hovered() { 1.0 } else { 0.0 });
         paint_coach_icon(
             ui.painter(),

@@ -389,7 +389,16 @@ fn render(note: &Note, job: &Request) -> Result<tiny_skia::Pixmap, String> {
     };
     // Do not silently evaluate a page whose exercise image failed to load.
     for image in &note.pages[0].images {
-        if image::open(media.root.join(&image.file)).is_err() {
+        let readable = if crate::video::is_video_file(&image.file) {
+            media
+                .root
+                .join(crate::video::poster_name(&image.file))
+                .is_file()
+                || crate::video::probe(&media.root.join(&image.file)).is_some()
+        } else {
+            image::open(media.root.join(&image.file)).is_ok()
+        };
+        if !readable {
             return Err("An image on this page could not be read.".into());
         }
     }

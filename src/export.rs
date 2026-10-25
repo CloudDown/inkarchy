@@ -204,7 +204,18 @@ pub struct MediaLoader {
 
 impl MediaLoader {
     fn rgba(&self, file: &str) -> Option<(u32, u32, Vec<u8>)> {
-        let img = image::open(self.root.join(file)).ok()?.into_rgba8();
+        let path = self.root.join(file);
+        let image = if crate::video::is_video_file(file) {
+            let poster = path.with_file_name(crate::video::poster_name(file));
+            image::open(poster).ok().or_else(|| {
+                let meta = crate::video::probe(&path)?;
+                let png = crate::video::poster_png(&path, &meta)?;
+                image::load_from_memory(&png).ok()
+            })?
+        } else {
+            image::open(path).ok()?
+        };
+        let img = image.into_rgba8();
         let (w, h) = img.dimensions();
         Some((w, h, img.into_raw()))
     }

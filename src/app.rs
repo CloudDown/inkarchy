@@ -23,7 +23,8 @@ use crate::ink::{
     Nib, Tool,
 };
 use crate::library::{
-    ensure_png, image_size, DockEdge, Library, SaveError, SHELF_COLS, SHELF_SLOTS, TRASH_SLOTS,
+    ensure_png, image_size, DockChrome, DockEdge, DockItem, Library, SaveError, SHELF_COLS,
+    SHELF_SLOTS, TRASH_SLOTS,
 };
 use crate::look::Look;
 use crate::pressure::Pressure;
@@ -77,6 +78,9 @@ const PARKABLE_TOOLS: [Tool; 8] = [
     Tool::Image,
 ];
 
+/// Fixed tray footprint: nine seats, empty holes kept on purpose.
+const STORAGE_SLOTS: usize = 9;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InkPanelView {
     Colors,
@@ -90,6 +94,58 @@ fn dock_tool_key(tool: Tool) -> Tool {
     } else {
         tool
     }
+}
+
+fn load_parked_slots(saved: &[Option<Tool>]) -> [Option<Tool>; STORAGE_SLOTS] {
+    let mut slots = [None; STORAGE_SLOTS];
+    for (i, tool) in saved.iter().copied().enumerate().take(STORAGE_SLOTS) {
+        slots[i] = tool.map(dock_tool_key);
+    }
+    slots
+}
+
+/// Preserve saved positions and add each missing tool or chrome action once.
+fn normalize_tool_order(saved: &[DockItem]) -> Vec<DockItem> {
+    let mut order = Vec::with_capacity(PARKABLE_TOOLS.len() + 4);
+    for item in saved.iter().copied() {
+        let item = match item {
+            DockItem::Tool(tool) => DockItem::Tool(dock_tool_key(tool)),
+            chrome => chrome,
+        };
+        if (matches!(item, DockItem::Chrome(_))
+            || matches!(item, DockItem::Tool(tool) if PARKABLE_TOOLS.contains(&tool)))
+            && !order.contains(&item)
+        {
+            order.push(item);
+        }
+    }
+    for tool in PARKABLE_TOOLS {
+        let item = DockItem::Tool(tool);
+        if !order.contains(&item) {
+            order.push(item);
+        }
+    }
+    let correction = order
+        .iter()
+        .position(|item| *item == DockItem::Tool(Tool::EraserStroke))
+        .unwrap()
+        + 1;
+    for (offset, chrome) in [DockChrome::Undo, DockChrome::Redo].into_iter().enumerate() {
+        let item = DockItem::Chrome(chrome);
+        if !order.contains(&item) {
+            order.insert(correction + offset, item);
+        }
+    }
+    for chrome in [DockChrome::Storage, DockChrome::Ink] {
+        let item = DockItem::Chrome(chrome);
+        if !order.contains(&item) {
+            order.push(item);
+        }
+    }
+    // Legacy saved Coach entries are omitted: the badge is a separate
+    // accessory, not a reorderable toolbar well.
+    order.retain(|item| *item != DockItem::Chrome(DockChrome::Coach));
+    order
 }
 
 #[derive(Clone)]
@@ -149,15 +205,19 @@ enum PageArrangement {
     TwoColumns,
     ThreeColumns,
     FourColumns,
+    FiveColumns,
+    SixColumns,
 }
 
 impl PageArrangement {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 7] = [
         Self::Column,
         Self::Row,
         Self::TwoColumns,
         Self::ThreeColumns,
         Self::FourColumns,
+        Self::FiveColumns,
+        Self::SixColumns,
     ];
 
     fn cell(self, index: usize) -> (i32, i32) {
@@ -168,6 +228,8 @@ impl PageArrangement {
             Self::TwoColumns => (index % 2, index / 2),
             Self::ThreeColumns => (index % 3, index / 3),
             Self::FourColumns => (index % 4, index / 4),
+            Self::FiveColumns => (index % 5, index / 5),
+            Self::SixColumns => (index % 6, index / 6),
         }
     }
 }
@@ -193,18 +255,23 @@ struct Toast {
 }
 
 /// A file-picker/import job which must never block egui's event loop.
-struct ImageImport {
+struct MediaImport {
     note: Uuid,
     cell: (i32, i32),
     local: Pos2,
     replace: Option<Uuid>,
-    result: Receiver<ImageImportResult>,
+    result: Receiver<MediaImportResult>,
 }
 
-enum ImageImportResult {
-    Ready(Vec<u8>),
+enum MediaImportResult {
+    Image(Vec<u8>),
+    Video {
+        path: PathBuf,
+        ext: String,
+        meta: crate::video::Meta,
+    },
     Cancelled,
-    Failed,
+    Failed(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -280,6 +347,8 @@ pub struct InkarchyApp {
     /// Watercolor saucer is open.
     tin_open: bool,
     color_mixer_open: bool,
+    /// Saved color armed for removal (index into custom inks).
+    ink_delete: Option<usize>,
     ink_panel_view: InkPanelView,
     /// One-slot nib ribbon is open.
     nib_open: bool,
@@ -346,8 +415,10 @@ pub struct InkarchyApp {
     page_press_owned: bool,
     tablet: TabletBridge,
     live_from_pen: bool,
-    /// Mouse cursor hidden (stylus in proximity).
+    /// Mouse cursor hidden since the last stylus use, until mouse motion.
     cursor_off: bool,
+    /// Real pointer motion observed before stylus events are injected this frame.
+    mouse_moved: bool,
     /// Stylus was in proximity on the previous frame (for PointerGone).
     pen_was_prox: bool,
     /// Emoji picker open for this note.
@@ -382,8 +453,17 @@ pub struct InkarchyApp {
     pdf_view_scale: [f32; 3],
     pdf_detail_after: f64,
     startup_toast: Option<String>,
-    /// Image picker and decoding run away from the drawing/event loop.
-    image_import: Option<ImageImport>,
+    /// Media picker and decoding run away from the drawing/event loop.
+    media_import: Option<MediaImport>,
+    /// Decoded video players, keyed by placed object id.
+    videos: HashMap<Uuid, crate::video::Player>,
+    /// Latest decoded frame uploaded for each playing video.
+    video_textures: HashMap<Uuid, TextureHandle>,
+    /// A press that started on a video play button owns the pointer until lift.
+    video_press: Option<Uuid>,
+    /// Videos whose player could not be loaded. They stay still until the note
+    /// is reopened instead of retrying ffprobe on every frame.
+    video_failed: HashSet<Uuid>,
     /// File format chooser shown after saving a note for download.
     export_picker_open: bool,
     /// Explorer-style selection on the shelf.
@@ -439,12 +519,19 @@ pub struct InkarchyApp {
 
     /// Page `+` and center `−` marks, shown while the Pages button is on.
     sheet_tabs_on: bool,
+    /// Last wrapping the tray picked, so a full first row stays decidable.
+    arrangement_chosen: Option<PageArrangement>,
     /// The page outlined in Pages mode.
     pages_jiggle_cell: Option<(i32, i32)>,
     /// Tools temporarily parked from the dock in the ink panel.
-    parked_tools: HashSet<Tool>,
+    /// Tools hidden in the storage tray; index is the seat the user chose.
+    parked_slots: [Option<Tool>; STORAGE_SLOTS],
+    /// User order for the tools in the dock; always holds every parkable tool.
+    tool_order: Vec<DockItem>,
     /// Tool currently being dragged to or from the parking area.
-    dock_tool_drag: Option<Tool>,
+    dock_tool_drag: Option<DockItem>,
+    /// Visible toolbar wells this frame (not the storage tray).
+    dock_tool_wells: Vec<(DockItem, Rect)>,
     /// Marks ignore the pointer until it has lifted after Pages mode opened.
     pages_marks_ready: bool,
     /// Press on a `+` or `−` that commits only if the finger lifts in place.
@@ -533,13 +620,8 @@ impl InkarchyApp {
     fn with_library(look: Look, lib: Library) -> Self {
         let width = default_width(Nib::Fineliner);
         let dock_edge = lib.index.dock;
-        let parked_tools = lib
-            .index
-            .parked_tools
-            .iter()
-            .copied()
-            .map(dock_tool_key)
-            .collect();
+        let parked_slots = load_parked_slots(&lib.index.parked_tools);
+        let tool_order = normalize_tool_order(&lib.index.tool_order);
         let ink0 = look.inks.first().copied().unwrap_or(look.ink);
         Self {
             coach: coach::CoachUi::default(),
@@ -555,6 +637,7 @@ impl InkarchyApp {
             color_custom: false,
             tin_open: false,
             color_mixer_open: false,
+            ink_delete: None,
             ink_panel_view: InkPanelView::Colors,
             nib_open: false,
             tin_hue: 0.0,
@@ -608,6 +691,7 @@ impl InkarchyApp {
             tablet: TabletBridge::new(),
             live_from_pen: false,
             cursor_off: false,
+            mouse_moved: false,
             pen_was_prox: false,
             emoji_pick: None,
             emoji_group: crate::emoji::EmojiGroup::SmileysPeople,
@@ -630,7 +714,11 @@ impl InkarchyApp {
             pdf_view_scale: [0.0; 3],
             pdf_detail_after: 0.0,
             startup_toast: None,
-            image_import: None,
+            media_import: None,
+            videos: HashMap::new(),
+            video_textures: HashMap::new(),
+            video_press: None,
+            video_failed: HashSet::new(),
             export_picker_open: false,
             shelf_sel: Vec::new(),
             shelf_anchor: None,
@@ -672,9 +760,12 @@ impl InkarchyApp {
             pdf_search_last_count: 0,
 
             sheet_tabs_on: false,
+            arrangement_chosen: None,
             pages_jiggle_cell: None,
-            parked_tools,
+            parked_slots,
+            tool_order,
             dock_tool_drag: None,
+            dock_tool_wells: Vec::new(),
             pages_marks_ready: false,
             page_mark: None,
             pages_manage_hold: None,
@@ -905,8 +996,12 @@ impl InkarchyApp {
 
     fn open_note(&mut self, id: Uuid) {
         self.reset_canvas_gesture();
-        self.image_import = None;
+        self.media_import = None;
         self.pending_image = None;
+        self.videos.clear();
+        self.video_textures.clear();
+        self.video_press = None;
+        self.video_failed.clear();
         self.sheet_tabs_on = false;
         self.pages_jiggle_cell = None;
         self.pages_marks_ready = false;
@@ -953,8 +1048,12 @@ impl InkarchyApp {
         self.coach.open = false;
         self.finish_text_edit();
         self.reset_canvas_gesture();
-        self.image_import = None;
+        self.media_import = None;
         self.pending_image = None;
+        self.videos.clear();
+        self.video_textures.clear();
+        self.video_press = None;
+        self.video_failed.clear();
         self.sheet_tabs_on = false;
         self.pages_jiggle_cell = None;
         self.pages_marks_ready = false;
@@ -1066,12 +1165,22 @@ impl InkarchyApp {
 
     fn page_arrangement(&self) -> Option<PageArrangement> {
         let note = self.note.as_ref()?;
-        PageArrangement::ALL.into_iter().find(|layout| {
+        let cells_match = |layout: PageArrangement| {
             note.pages
                 .iter()
                 .enumerate()
                 .all(|(index, page)| (page.col, page.row) == layout.cell(index))
-        })
+        };
+        // Once every page fits on the first row, the wrap and the one-row flow
+        // hold the very same cells; the tray's last choice arbitrates.
+        if let Some(chosen) = self.arrangement_chosen {
+            if cells_match(chosen) {
+                return Some(chosen);
+            }
+        }
+        PageArrangement::ALL
+            .into_iter()
+            .find(|&layout| cells_match(layout))
     }
 
     fn arrange_pages(&mut self, layout: PageArrangement) {
@@ -1080,6 +1189,7 @@ impl InkarchyApp {
         {
             return;
         }
+        self.arrangement_chosen = Some(layout);
         self.finish_live();
         self.finish_text_edit();
         self.clear_shape_hold();
@@ -1132,20 +1242,30 @@ impl InkarchyApp {
         self.bg_hot.clear();
     }
 
-    /// Import files. Images land on the open page; everything else becomes a notebook.
+    /// Import files. Images and videos land on the open page; everything else
+    /// becomes a notebook.
     fn open_paths(&mut self, paths: &[PathBuf]) -> Option<String> {
         let place_on_page = matches!(self.scene, Scene::Desk) && self.note.is_some();
         let mut notebooks = Vec::new();
-        let mut placed = 0usize;
+        let mut placed_images = 0usize;
+        let mut placed_videos = 0usize;
         let mut messages = Vec::new();
         for (i, path) in paths.iter().enumerate() {
-            if place_on_page && crate::import::is_placeable_image(path) {
-                match crate::import::load_placed_image(path) {
-                    Ok(png) => {
+            if place_on_page && crate::import::is_placeable_media(path) {
+                match crate::import::load_placed_media(path) {
+                    Ok(crate::import::PlacedMedia::Image(png)) => {
                         let (page, local) = self.drop_spot();
                         let local = local + vec2(i as f32 * 28.0, i as f32 * 28.0);
-                        self.insert_image_bytes(&png, page, local);
-                        placed += 1;
+                        self.insert_png(&png, page, local, None);
+                        placed_images += 1;
+                    }
+                    Ok(crate::import::PlacedMedia::Video { ext, meta }) => {
+                        let (page, local) = self.drop_spot();
+                        let local = local + vec2(i as f32 * 28.0, i as f32 * 28.0);
+                        match self.insert_video_path(path, &ext, meta, page, local, None) {
+                            Ok(()) => placed_videos += 1,
+                            Err(msg) => messages.push(msg),
+                        }
                     }
                     Err(err) => messages.push(err.to_string()),
                 }
@@ -1159,16 +1279,19 @@ impl InkarchyApp {
         if let Some((id, _)) = notebooks.first() {
             self.open_note(*id);
         }
+        let placed = placed_images + placed_videos;
         let mut parts = Vec::new();
         match notebooks.as_slice() {
             [] => {}
             [(_, title)] if placed == 0 => parts.push(format!("Opened {title}")),
             many => parts.push(format!("Opened {} files", many.len())),
         }
-        if placed == 1 {
+        if placed == 1 && placed_videos == 1 {
+            parts.push("Placed a video".into());
+        } else if placed == 1 {
             parts.push("Placed an image".into());
         } else if placed > 1 {
-            parts.push(format!("Placed {placed} images"));
+            parts.push(format!("Placed {placed} items"));
         }
         if let Some(msg) = messages.first() {
             parts.push(msg.clone());
@@ -1359,6 +1482,11 @@ impl InkarchyApp {
 
 impl eframe::App for InkarchyApp {
     fn raw_input_hook(&mut self, ctx: &Context, raw_input: &mut egui::RawInput) {
+        // Inspect native events before inject_pen_pointer adds synthetic PointerMoved.
+        self.mouse_moved = raw_input
+            .events
+            .iter()
+            .any(|event| matches!(event, Event::PointerMoved(_)));
         if self.tablet.ready() {
             self.tablet.pump_events();
             self.inject_pen_pointer(ctx, raw_input);
@@ -1411,6 +1539,7 @@ impl eframe::App for InkarchyApp {
         self.shortcuts(ctx);
         self.ingest_touch_pressure(ctx);
         self.ingest_pdf_rasters(ctx);
+        self.sync_videos(ctx);
 
         let on_shelf = matches!(self.scene, Scene::Shelf { .. });
         if on_shelf {
@@ -1453,6 +1582,7 @@ impl eframe::App for InkarchyApp {
             || self.dock_held
             || self.dock_fold > 0.001
             || self.dock_fold_vel.abs() > 0.01
+            || self.videos.values().any(|player| player.is_playing())
             || wants_pen
             || self.toast.is_some()
             || pen.in_proximity
@@ -1569,7 +1699,7 @@ impl InkarchyApp {
             if c && i.key_pressed(Key::O) {
                 open_file = true;
             }
-            if c && i.key_pressed(Key::F) && self.note_has_pdf() {
+            if c && i.key_pressed(Key::F) {
                 find_pdf = true;
             }
             if c && i.key_pressed(Key::Z) && !sh {
@@ -2157,6 +2287,7 @@ impl InkarchyApp {
                 ScrollArea::vertical()
                     .id_salt("shelf-grid")
                     .max_height(shelf_height)
+                    .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
                     .scroll_source(ScrollSource {
                         drag: false,
                         scroll_bar: true,
@@ -2383,6 +2514,7 @@ impl InkarchyApp {
                     ui.set_width(560.0_f32.min(ctx.screen_rect().width() - 32.0));
                     ScrollArea::vertical()
                         .max_height((ctx.screen_rect().height() - 32.0).max(44.0))
+                        .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
                         .show(ui, |ui| self.fiche_pupitre(ui));
                 });
             if response.should_close() {
@@ -3819,6 +3951,7 @@ impl InkarchyApp {
                     ScrollArea::new([true, compact])
                         .id_salt("trash-grid")
                         .max_height(grid_rect.height())
+                        .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
                         .scroll_source(ScrollSource {
                             drag: false,
                             scroll_bar: true,
@@ -4874,11 +5007,12 @@ impl InkarchyApp {
         ui: &mut Ui,
         rect: Rect,
         on: bool,
+        space: &str,
         label: &str,
         tip: &str,
         icon: impl Fn(&Painter, Pos2, Color32),
     ) -> bool {
-        let resp = ui.interact(rect, ui.id().with(("strip-tray", label)), Sense::click());
+        let resp = ui.interact(rect, ui.id().with((space, label)), Sense::click());
         resp.widget_info(|| WidgetInfo::selected(WidgetType::Button, true, on, label));
         let face = self.tray_selection(ui, rect, &resp, on);
         icon(
@@ -4887,114 +5021,169 @@ impl InkarchyApp {
             self.look.ink.gamma_multiply(0.85),
         );
         ui.ctx()
-            .data_mut(|d| d.insert_temp(Id::new(("strip-tray", label)), rect));
+            .data_mut(|d| d.insert_temp(Id::new((space, label)), rect));
         resp.on_hover_cursor(CursorIcon::PointingHand)
             .on_hover_text(tip)
             .clicked()
     }
 
-    /// Primary exit of Pages edit: an accent key with a bold check.
-    fn tray_done(&mut self, ui: &mut Ui, rect: Rect) -> bool {
-        let resp = ui.interact(rect, ui.id().with(("strip-tray", "Done")), Sense::click());
-        resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "Done"));
-        let fill = mix_col(
-            self.look.accent,
-            self.look.paper,
-            if resp.hovered() { 0.18 } else { 0.0 },
-        );
-        let radius = rect.height().min(rect.width()) * 0.5 - 4.0;
-        let c = rect.center()
-            + vec2(
-                0.0,
-                if resp.is_pointer_button_down_on() {
-                    1.0
-                } else {
-                    0.0
-                },
-            );
-        let fg = well_glyph(fill, self.look.paper, self.look.ink);
-        ui.painter().circle_filled(
-            c + vec2(0.0, 2.0),
-            radius,
-            self.look.shadow.gamma_multiply(0.2),
-        );
-        ui.painter().circle_filled(c, radius, fill);
-        if resp.has_focus() {
-            ui.painter()
-                .circle_stroke(c, radius + 3.0, Stroke::new(1.5, self.look.accent));
+    /// Orientation keys plus a per-row stepper: pages either wrap downward in
+    /// rows of n, or stretch into one horizontal line. The stepper sleeps
+    /// while one row holds every page, and the chosen density survives the
+    /// round trip.
+    fn tray_flow_choices(
+        &mut self,
+        ui: &mut Ui,
+        stack: Rect,
+        row_well: Rect,
+        pill: Rect,
+        arrangement: Option<PageArrangement>,
+    ) {
+        let horizontal = arrangement == Some(PageArrangement::Row);
+        let remembered = ui
+            .ctx()
+            .data(|d| d.get_temp::<u8>(Id::new("pages-flow")).unwrap_or(2))
+            .clamp(1, 6);
+        let density = match arrangement {
+            Some(PageArrangement::Column) => 1,
+            Some(PageArrangement::TwoColumns) => 2,
+            Some(PageArrangement::ThreeColumns) => 3,
+            Some(PageArrangement::FourColumns) => 4,
+            Some(PageArrangement::FiveColumns) => 5,
+            Some(PageArrangement::SixColumns) => 6,
+            _ => remembered,
+        };
+        if !horizontal {
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(Id::new("pages-flow"), density));
         }
-        ui.painter().add(Shape::line(
-            vec![
-                c + vec2(-8.0, 0.0),
-                c + vec2(-2.0, 5.8),
-                c + vec2(8.5, -6.5),
-            ],
-            Stroke::new(2.6, fg),
-        ));
-        ui.ctx()
-            .data_mut(|d| d.insert_temp(Id::new(("strip-tray", "Done")), rect));
-        resp.on_hover_cursor(CursorIcon::PointingHand)
-            .on_hover_text("Done arranging pages")
-            .clicked()
-    }
-
-    /// Five direct layout choices, each with its own hit target and focus.
-    fn tray_flow_slider(&mut self, ui: &mut Ui, rect: Rect, arrangement: Option<PageArrangement>) {
+        // Coming back from one row, or taming a hand-arranged spread, restores
+        // the last chosen wrapping.
+        let stack_target = if horizontal || arrangement.is_none() {
+            Some(flow_layout(density))
+        } else {
+            None
+        };
+        let page_h = ((stack.height() - 14.0) / 3.6)
+            .min((stack.width() - 14.0) / 2.82)
+            .clamp(4.5, 10.5);
+        let glyph_fill = mix_col(self.look.paper, self.look.ink, 0.08);
+        let chosen = self.tray_well(
+            ui,
+            stack,
+            arrangement.is_some() && !horizontal,
+            "strip-flow",
+            "Stack",
+            "Stack pages vertically",
+            |p, c, fg| paint_page_grid(p, c, 1, 3, page_h, glyph_fill, fg),
+        );
+        if chosen {
+            if let Some(layout) = stack_target {
+                self.arrange_pages(layout);
+            }
+        }
+        let chosen = self.tray_well(
+            ui,
+            row_well,
+            horizontal,
+            "strip-flow",
+            "Row",
+            "All pages in one row",
+            |p, c, fg| paint_page_grid(p, c, 3, 1, page_h, glyph_fill, fg),
+        );
+        if chosen && !horizontal {
+            self.arrange_pages(PageArrangement::Row);
+        }
+        // The stepper: fewer or more pages per row, the glyph showing n.
         let p = ui.painter().clone();
-        p.rect_filled(rect, 12.0, mix_col(self.look.paper, self.look.ink, 0.035));
-        let width = rect.width() / 5.0;
-        for (index, (name, layout, cols, rows, tip)) in [
-            ("1", PageArrangement::Column, 1, 2, "Stack pages vertically"),
-            ("2", PageArrangement::TwoColumns, 2, 2, "Two pages per row"),
+        p.rect_filled(pill, 12.0, mix_col(self.look.paper, self.look.ink, 0.035));
+        let cell_w = pill.width() / 3.0;
+        // The glyph keeps every column inside its cell, whatever the density.
+        let density_cols = density as f32;
+        let step_page =
+            ((cell_w - 12.0) / (density_cols * 0.74 + (density_cols - 1.0) * 0.3)).clamp(3.5, 11.0);
+        for (index, (name, tip, kind)) in [
             (
-                "3",
-                PageArrangement::ThreeColumns,
-                3,
-                2,
-                "Three pages per row",
+                "Less",
+                if horizontal {
+                    "All pages in one row".to_owned()
+                } else {
+                    "Fewer pages per row".to_owned()
+                },
+                Choice::Less,
             ),
             (
-                "4",
-                PageArrangement::FourColumns,
-                4,
-                2,
-                "Four pages per row",
+                "Count",
+                if horizontal {
+                    "All pages in one row".to_owned()
+                } else {
+                    format!("{} pages per row", density)
+                },
+                Choice::Count,
             ),
-            ("all", PageArrangement::Row, 3, 1, "All pages in one row"),
+            (
+                "More",
+                if horizontal {
+                    "All pages in one row".to_owned()
+                } else {
+                    "More pages per row".to_owned()
+                },
+                Choice::More,
+            ),
         ]
         .into_iter()
         .enumerate()
         {
             let cell = Rect::from_min_size(
-                pos2(rect.left() + index as f32 * width, rect.top()),
-                vec2(width, rect.height()),
+                pos2(pill.left() + index as f32 * cell_w, pill.top()),
+                vec2(cell_w, pill.height()),
             );
-            let resp = ui.interact(
-                cell,
-                ui.id().with("strip-columns").with(name),
-                Sense::click(),
-            );
-            let on = arrangement == Some(layout);
-            resp.widget_info(|| WidgetInfo::selected(WidgetType::Button, true, on, tip));
-            let face = self.tray_selection(ui, cell, &resp, on);
-            let page_h = ((width - 12.0) / 3.86).clamp(4.0, 12.5);
-            paint_page_grid(
-                &p,
-                face.center(),
-                cols,
-                rows,
-                page_h,
-                mix_col(self.look.paper, self.look.ink, 0.08),
-                self.look.ink.gamma_multiply(0.8),
-            );
+            let enabled = !horizontal
+                && match kind {
+                    Choice::Less => density > 1,
+                    Choice::More => density < 6,
+                    Choice::Count => false,
+                };
+            let sense = if enabled {
+                Sense::click()
+            } else {
+                Sense::hover()
+            };
+            let resp = ui.interact(cell, ui.id().with(("strip-flow", name)), sense);
+            resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, tip.as_str()));
+            let face = self.tray_selection(ui, cell, &resp, false);
+            let fg = if enabled || kind == Choice::Count {
+                self.look.ink.gamma_multiply(0.8)
+            } else {
+                self.look.ink.gamma_multiply(0.3)
+            };
+            match kind {
+                Choice::Count => paint_page_grid(
+                    &p,
+                    face.center(),
+                    density,
+                    2,
+                    step_page,
+                    mix_col(self.look.paper, self.look.ink, 0.08),
+                    fg,
+                ),
+                Choice::Less => paint_minus_icon(&p, face.center(), fg),
+                Choice::More => paint_plus_icon(&p, face.center(), fg),
+            }
             ui.ctx()
-                .data_mut(|d| d.insert_temp(Id::new(("strip-columns", name)), cell));
-            if resp
-                .on_hover_cursor(CursorIcon::PointingHand)
-                .on_hover_text(tip)
-                .clicked()
-            {
-                self.arrange_pages(layout);
+                .data_mut(|d| d.insert_temp(Id::new(("strip-flow", name)), cell));
+            let resp = resp.on_hover_text(tip.clone());
+            let resp = if enabled {
+                resp.on_hover_cursor(CursorIcon::PointingHand)
+            } else {
+                resp
+            };
+            if resp.clicked() {
+                match kind {
+                    Choice::Less if density > 1 => self.arrange_pages(flow_layout(density - 1)),
+                    Choice::More if density < 6 => self.arrange_pages(flow_layout(density + 1)),
+                    _ => {}
+                }
             }
         }
     }
@@ -5031,7 +5220,6 @@ impl InkarchyApp {
         let well_h = if compact { 44.0 } else { 52.0 };
         let gap = 2.0;
         let sep = if compact { 12.0 } else { 18.0 };
-        let done_w = well_h;
         let row_gap = 8.0;
         let rows_h = if wide {
             well_h
@@ -5060,9 +5248,9 @@ impl InkarchyApp {
 
         let linked = Rect::from_min_size(pos2(strip.left() + pad, row_a), vec2(well_w, well_h));
         let separate = linked.translate(vec2(well_w + gap, 0.0));
-        let done = Rect::from_min_size(
-            pos2(strip.right() - pad - done_w, row_a),
-            vec2(done_w, well_h),
+        let close = Rect::from_min_size(
+            pos2(strip.right() - pad - well_w, row_a),
+            vec2(well_w, well_h),
         );
         let swatch_w = if compact {
             ((width - pad * 2.0 - 30.0) / 6.0).min(48.0)
@@ -5072,16 +5260,16 @@ impl InkarchyApp {
         let swatch_gap = 5.0;
         let paper_w = swatch_w * PaperKind::ALL.len() as f32
             + swatch_gap * PaperKind::ALL.len().saturating_sub(1) as f32;
-        // Wide: the appearance cluster hangs right of the flow control, before
-        // the done key. Narrow: papers start on the left, tones on the right.
+        // Wide: the surface cluster hangs right of the flow group, before the
+        // close key. Narrow: papers take their own row, tones the other end.
         let (tone_step, tone_right, paper_x) = if wide {
             let step = 34.0;
-            let right = done.left() - sep - step * 0.5;
+            let right = close.left() - sep - step * 0.5;
             let left = right - 2.0 * step - (step - 2.0) * 0.5;
             (step, right, left - sep - paper_w)
         } else if compact {
-            let step = ((done.left() - sep - separate.right() - sep) / 3.0).min(36.0);
-            let right = (separate.right() + done.left()) * 0.5 + step;
+            let step = ((close.left() - sep - separate.right() - sep) / 3.0).min(36.0);
+            let right = (separate.right() + close.left()) * 0.5 + step;
             (step, right, strip.center().x - paper_w * 0.5)
         } else {
             let x = strip.left() + pad;
@@ -5092,22 +5280,22 @@ impl InkarchyApp {
         let paper_end = paper_x + paper_w;
         let tone_left = tone_right - 2.0 * tone_step - (tone_step - 2.0) * 0.5;
         let dot_r = (tone_step * 0.32).clamp(8.0, 12.0);
-        let flow_x = if compact {
-            strip.left() + pad
-        } else {
+        // Orientation keys and the per-row stepper form one group. Wide trays
+        // keep it on the tight left rhythm; narrower rows center it between
+        // the joins and the close key so no side looks pinned to nothing.
+        let flow_y = if compact { row_b } else { row_a };
+        let pill_w = well_w * 3.0;
+        let group_w = well_w * 2.0 + gap + sep + pill_w;
+        let stack_x = if wide {
             separate.right() + sep
-        };
-        let flow_right = if wide {
-            paper_x - sep
         } else if compact {
-            strip.right() - pad
+            strip.center().x - group_w * 0.5
         } else {
-            done.left() - sep
+            (separate.right() + close.left() - group_w) * 0.5
         };
-        let flow = Rect::from_min_size(
-            pos2(flow_x, if compact { row_b } else { row_a }),
-            vec2((flow_right - flow_x).max(44.0), well_h),
-        );
+        let stack = Rect::from_min_size(pos2(stack_x, flow_y), vec2(well_w, well_h));
+        let row_well = stack.translate(vec2(well_w + gap, 0.0));
+        let flow = Rect::from_min_size(pos2(row_well.right() + sep, flow_y), vec2(pill_w, well_h));
         let icon_scale = (well_w / 42.0).clamp(0.85, 1.2);
         let sheet_fill = mix_col(self.look.paper, self.look.ink, 0.045);
         let paper_tex = self.paper_tex(ctx);
@@ -5145,7 +5333,8 @@ impl InkarchyApp {
                 // surface row on their own.
                 let mut dividers = Vec::new();
                 if !compact {
-                    dividers.push(((separate.right() + flow.left()) * 0.5, row_a));
+                    dividers.push(((separate.right() + stack.left()) * 0.5, flow_y));
+                    dividers.push(((flow.right() + close.left()) * 0.5, row_a));
                 }
                 if wide {
                     dividers.push(((flow.right() + paper_x) * 0.5, row_a));
@@ -5162,6 +5351,7 @@ impl InkarchyApp {
                     ui,
                     linked,
                     join == SheetJoin::Linked,
+                    "strip-tray",
                     "Linked",
                     "Linked pages — one sheet",
                     |p, c, fg| paint_join_linked(p, c, sheet_fill, fg, icon_scale),
@@ -5172,14 +5362,23 @@ impl InkarchyApp {
                     ui,
                     separate,
                     join == SheetJoin::Separate,
+                    "strip-tray",
                     "Separate",
                     "Separate pages — a gutter",
                     |p, c, fg| paint_join_separate(p, c, sheet_fill, fg, icon_scale),
                 ) {
                     self.set_sheet_join(SheetJoin::Separate);
                 }
-                self.tray_flow_slider(ui, flow, arrangement);
-                if self.tray_done(ui, done) {
+                self.tray_flow_choices(ui, stack, row_well, flow, arrangement);
+                if self.tray_well(
+                    ui,
+                    close,
+                    false,
+                    "strip-tray",
+                    "Close",
+                    "Close pages panel",
+                    |p, c, fg| paint_close_icon(p, c, fg),
+                ) {
                     self.leave_pages_mode();
                 }
                 for (index, kind) in PaperKind::ALL.into_iter().enumerate() {
@@ -5514,15 +5713,21 @@ impl InkarchyApp {
                     .iter()
                     .enumerate()
                     .filter_map(|(index, page)| {
-                        let bg = page.background.as_ref()?;
-                        let pdf_page = bg.pdf_page?;
-                        let key = format!("{}:{}:{pdf_page}", note.id, bg.file);
-                        let text = self.pdf_text.get(&key)?;
-                        let count = if query.is_empty() {
-                            0
-                        } else {
-                            text.matches(&query).count()
-                        };
+                        let mut count = 0;
+                        if !query.is_empty() {
+                            if let Some(bg) = page.background.as_ref() {
+                                if let Some(pdf_page) = bg.pdf_page {
+                                    let key = format!("{}:{}:{pdf_page}", note.id, bg.file);
+                                    if let Some(text) = self.pdf_text.get(&key) {
+                                        count += text.to_lowercase().matches(&query).count();
+                                    }
+                                }
+                            }
+                            // Typed text and stickies on the page.
+                            for text in &page.texts {
+                                count += text.text.to_lowercase().matches(&query).count();
+                            }
+                        }
                         (count > 0).then_some((index, count))
                     })
                     .collect()
@@ -6050,33 +6255,21 @@ impl InkarchyApp {
         resp.on_hover_cursor(CursorIcon::PointingHand)
     }
 
-    fn ui_desk(&mut self, ctx: &Context) {
-        let note_id = self.note.as_ref().map(|n| n.id);
-        if note_id != self.coach.session.note {
-            self.coach.session.reset(note_id);
-        }
-        let compact = ctx.screen_rect().width() < 880.0;
-        let title_in_menu = ctx.screen_rect().width() < 600.0;
-        if !self.sheet_tabs_on {
-            self.poll_image_import(ctx);
-            self.handle_drops_and_paste(ctx);
-        }
-
-        if self.sheet_tabs_on {
-            // Pages edit owns the canvas: the tray on the paper replaces this header.
-        } else {
-            TopBottomPanel::top("rule")
-                .exact_height(52.0)
-                .show_separator_line(false)
-                .frame(Frame::NONE.fill(self.look.desk))
-                .show(ctx, |ui| {
-                    let bar = ui.max_rect();
-                    ctx.data_mut(|d| d.insert_temp(Id::new("top-rect"), bar));
-                    ui.painter().hline(
-                        bar.x_range(),
-                        bar.max.y - 0.5,
-                        Stroke::new(1.0_f32, self.look.desk_deep),
-                    );
+    /// Floating chrome over the page — no panel fill, only the controls themselves.
+    fn ui_desk_header(&mut self, ctx: &Context, compact: bool, title_in_menu: bool) {
+        let screen = ctx.screen_rect();
+        let bar = Rect::from_min_size(screen.left_top(), vec2(screen.width(), 52.0));
+        let inner = Area::new(Id::new("desk-header"))
+            .order(Order::Foreground)
+            .fixed_pos(bar.min)
+            .default_size(bar.size())
+            .constrain(false)
+            .fade_in(false)
+            // Empty space must pass clicks to the page; only the wells grab input.
+            .interactable(false)
+            .show(ctx, |ui| {
+                let (header, _) = ui.allocate_exact_size(bar.size(), Sense::hover());
+                ui.scope_builder(UiBuilder::new().max_rect(header), |ui| {
                     ui.horizontal_centered(|ui| {
                         ui.add_space(6.0);
                         let exit = self.shelf_exit_btn(ui);
@@ -6171,6 +6364,7 @@ impl InkarchyApp {
                                 ScrollArea::vertical()
                                     .max_height((ctx.screen_rect().height() - 84.0).max(88.0))
                                     .auto_shrink([false, true])
+                                    .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
                                     .show(ui, |ui| {
                                         if title_in_menu {
                                             self.notebook_menu_head(ui, "Notebook title");
@@ -6187,11 +6381,9 @@ impl InkarchyApp {
                                                 }
                                             }
                                         }
-                                        self.notebook_menu_head(ui, "Pages");
                                         if self.menu_pages_row(ui, "Edit pages") {
                                             act = Some(MoreAct::Pages);
                                         }
-                                        self.notebook_menu_head(ui, "Tools");
                                         if self.menu_row(
                                             ui,
                                             "Draw with finger",
@@ -6241,47 +6433,74 @@ impl InkarchyApp {
                                 None => {}
                             }
                             let mut leftmost = right_cluster_left;
-                            if self.note_has_pdf() {
-                                let search =
-                                    self.round_well(ui, chrome, self.look.paper, paint_search_icon);
-                                ctx.data_mut(|d| {
-                                    d.insert_temp(Id::new("pdf-search-button-rect"), search.rect)
-                                });
-                                search.widget_info(|| {
-                                    WidgetInfo::labeled(
-                                        WidgetType::Button,
-                                        ui.is_enabled(),
-                                        "Find in PDF",
-                                    )
-                                });
-                                let field = self.pdf_search_picker(ui, &search);
-                                leftmost = leftmost.min(field.unwrap_or(search.rect).left());
-                            }
+                            // Word search stays in the header for every notebook.
+                            let search =
+                                self.round_well(ui, chrome, self.look.paper, paint_search_icon);
+                            ctx.data_mut(|d| {
+                                d.insert_temp(Id::new("pdf-search-button-rect"), search.rect)
+                            });
+                            search.widget_info(|| {
+                                WidgetInfo::labeled(
+                                    WidgetType::Button,
+                                    ui.is_enabled(),
+                                    if self.note_has_pdf() {
+                                        "Find in PDF"
+                                    } else {
+                                        "Find in note"
+                                    },
+                                )
+                            });
+                            let field = self.pdf_search_picker(ui, &search);
+                            leftmost = leftmost.min(field.unwrap_or(search.rect).left());
+                            let coach = self.ui_coach_button(ui);
+                            leftmost = leftmost.min(coach.rect.left());
                             ctx.data_mut(|d| {
                                 d.insert_temp(Id::new("header-right-start"), leftmost)
                             });
                         });
                     });
-                    let left_end = ctx
-                        .data(|d| d.get_temp::<f32>(Id::new("header-left-end")))
-                        .unwrap_or(bar.left());
-                    let right_start = ctx
-                        .data(|d| d.get_temp::<f32>(Id::new("header-right-start")))
-                        .unwrap_or(bar.right());
-                    let center_x = ctx.screen_rect().center().x;
-                    let free_half_width = (center_x - left_end - 8.0)
-                        .min(right_start - center_x - 8.0)
-                        .max(0.0);
-                    let meter_width = (2.0 * free_half_width).clamp(0.0, 320.0);
-                    let meter_rect = Rect::from_center_size(
-                        pos2(center_x, bar.center().y),
-                        vec2(meter_width, 44.0),
-                    );
-                    ctx.data_mut(|d| d.insert_temp(Id::new("coach-meter-rect"), meter_rect));
-                    if self.coach_enabled() && meter_width >= 32.0 {
-                        self.ui_coach_meter(ui, meter_rect);
-                    }
                 });
+                let left_end = ctx
+                    .data(|d| d.get_temp::<f32>(Id::new("header-left-end")))
+                    .unwrap_or(bar.left());
+                let right_start = ctx
+                    .data(|d| d.get_temp::<f32>(Id::new("header-right-start")))
+                    .unwrap_or(bar.right());
+                let center_x = ctx.screen_rect().center().x;
+                let free_half_width = (center_x - left_end - 8.0)
+                    .min(right_start - center_x - 8.0)
+                    .max(0.0);
+                let meter_width = (2.0 * free_half_width).clamp(0.0, 320.0);
+                let meter_rect =
+                    Rect::from_center_size(pos2(center_x, bar.center().y), vec2(meter_width, 44.0));
+                ctx.data_mut(|d| d.insert_temp(Id::new("coach-meter-rect"), meter_rect));
+                if self.coach_enabled() && meter_width >= 32.0 {
+                    self.ui_coach_meter(ui, meter_rect);
+                }
+            });
+        ctx.data_mut(|d| d.insert_temp(Id::new("top-rect"), bar));
+        let _ = inner.response;
+    }
+
+    fn ui_desk(&mut self, ctx: &Context) {
+        let note_id = self.note.as_ref().map(|n| n.id);
+        if note_id != self.coach.session.note {
+            self.coach.session.reset(note_id);
+        }
+        let compact = ctx.screen_rect().width() < 880.0;
+        let title_in_menu = ctx.screen_rect().width() < 600.0;
+        if !self.sheet_tabs_on {
+            self.poll_media_import(ctx);
+            self.handle_drops_and_paste(ctx);
+        }
+
+        if self.sheet_tabs_on {
+            // Pages edit owns the canvas: the tray on the paper replaces this header.
+            ctx.data_mut(|d| d.remove::<Rect>(Id::new("top-rect")));
+        } else {
+            // Buttons only: no opaque strip, so the page shows through.
+            // Drawn before the canvas so Tab reaches the return arrow first.
+            self.ui_desk_header(ctx, compact, title_in_menu);
         }
 
         CentralPanel::default()
@@ -6295,13 +6514,12 @@ impl InkarchyApp {
 
         if !self.sheet_tabs_on {
             self.ui_floating_dock(ctx);
-            self.ui_coach_badge(ctx);
             self.ui_ink_panel(ctx);
         }
         self.ui_selection_actions(ctx);
         if let Some((page, local)) = self.pending_image.take() {
-            if self.image_import.is_none() {
-                self.pick_image(ctx, page, local, None);
+            if self.media_import.is_none() {
+                self.pick_media(ctx, page, local, None);
             }
         }
         self.ui_export_format_picker(ctx);
@@ -6372,7 +6590,17 @@ impl InkarchyApp {
     }
 
     fn ui_floating_dock(&mut self, ctx: &Context) {
-        let bounds = note_controls_bounds(ctx);
+        self.dock_tool_wells.clear();
+        // Drop stale hit targets so a carried well is not still "in" its old seat.
+        if let Some(DockItem::Tool(tool)) = self.dock_tool_drag {
+            ctx.data_mut(|d| {
+                d.insert_temp(
+                    Id::new(("tool-well", dock_tool_key(tool))),
+                    Rect::from_min_size(pos2(-10_000.0, -10_000.0), Vec2::ZERO),
+                );
+            });
+        }
+        let bounds = dock_bounds(ctx, self.dock_layout_edge());
         self.steer_carried_dock(ctx);
         if self.dock_slide.is_some() {
             self.step_dock_slide(ctx, bounds);
@@ -6454,17 +6682,13 @@ impl InkarchyApp {
                                     .id_salt("dock-tools-vertical")
                                     .min_scrolled_height(0.0)
                                     .scroll_source(ScrollSource {
-                                        drag: true,
+                                        drag: false,
                                         ..Default::default()
                                     })
                                     .max_height(tools_limit.max(1.0))
                                     .max_width(self.slot())
                                     .auto_shrink([true, true])
-                                    .scroll_bar_visibility(if self.dock_fold > 0.04 {
-                                        ScrollBarVisibility::AlwaysHidden
-                                    } else {
-                                        ScrollBarVisibility::VisibleWhenNeeded
-                                    })
+                                    .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
                                     .show(ui, |ui| {
                                         // The scroll child otherwise inherits the whole window width,
                                         // which shifts the centered tool wells away from their case.
@@ -6472,6 +6696,7 @@ impl InkarchyApp {
                                         ui.add_enabled_ui(!self.dock_held, |ui| {
                                             ui.with_layout(Layout::top_down(Align::Center), |ui| {
                                                 self.dock_inner(ui, true);
+                                                self.scroll_dock_during_tool_drag(ui, true);
                                             });
                                         });
                                     });
@@ -6487,17 +6712,13 @@ impl InkarchyApp {
                                     .id_salt("dock-tools-horizontal")
                                     .min_scrolled_width(0.0)
                                     .scroll_source(ScrollSource {
-                                        drag: true,
+                                        drag: false,
                                         ..Default::default()
                                     })
                                     .max_width(tools_limit.max(1.0))
                                     .max_height(self.slot())
                                     .auto_shrink([true, true])
-                                    .scroll_bar_visibility(if self.dock_fold > 0.04 {
-                                        ScrollBarVisibility::AlwaysHidden
-                                    } else {
-                                        ScrollBarVisibility::VisibleWhenNeeded
-                                    })
+                                    .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
                                     .show(ui, |ui| {
                                         // Keep the horizontal scroller's cross-axis the size of one
                                         // well. Its unconstrained child Ui would otherwise vertically
@@ -6508,6 +6729,7 @@ impl InkarchyApp {
                                                 Layout::left_to_right(Align::Center),
                                                 |ui| {
                                                     self.dock_inner(ui, false);
+                                                    self.scroll_dock_during_tool_drag(ui, false);
                                                 },
                                             );
                                         });
@@ -6540,6 +6762,7 @@ impl InkarchyApp {
         self.nib_open = open;
         if !open {
             self.color_mixer_open = false;
+            self.ink_delete = None;
             self.dock_tool_drag = None;
         }
     }
@@ -6551,6 +6774,7 @@ impl InkarchyApp {
             d.remove::<Rect>(Id::new("nib-rect"));
             d.remove::<Rect>(Id::new("nib-track"));
             d.remove::<Rect>(Id::new("dock-tool-storage-rect"));
+            d.remove::<Rect>(Id::new("ink-delete-color"));
         });
     }
 
@@ -6574,87 +6798,64 @@ impl InkarchyApp {
             if !self.color_mixer_open {
                 d.remove::<Rect>(Id::new("tin-wheel"));
             }
+            if self.ink_panel_view != InkPanelView::Colors || self.color_mixer_open {
+                d.remove::<Rect>(Id::new("ink-delete-color"));
+                d.remove::<Rect>(Id::new("ink-add-color"));
+            } else if self.ink_delete.is_some() {
+                d.remove::<Rect>(Id::new("ink-add-color"));
+            } else {
+                d.remove::<Rect>(Id::new("ink-delete-color"));
+            }
         });
+        if self.ink_panel_view != InkPanelView::Colors || self.color_mixer_open {
+            self.ink_delete = None;
+        }
         let bounds = note_controls_bounds(ctx);
+        let edge = self.dock_layout_edge();
+        let along_dock = !edge.vertical();
         let dock = ctx
             .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
             .unwrap_or(Rect::from_center_size(bounds.center(), vec2(48.0, 48.0)));
-        let storage_rows = self.parked_tools.len().max(3).div_ceil(3) as f32;
         let target = self.slot();
-        let storage_height = 24.0 + storage_rows * target + (storage_rows - 1.0) * 4.0;
-        let colors = self.ink_colors().len().max(1) as f32;
-        let grid_height = colors * 36.0 + (colors - 1.0) * 4.0;
+        let storage_side = 3.0 * target + 2.0 * 8.0;
         let mixer_open = self.color_mixer_open;
         let panel_view = self.ink_panel_view;
-        let width = if mixer_open || panel_view == InkPanelView::Colors {
-            target + 16.0
-        } else if panel_view == InkPanelView::Nib {
-            4.0 * target + 12.0 + 16.0
-        } else {
-            3.0 * target + 16.0 + 16.0
-        };
-        let content_width = width - 16.0;
-        let body = if mixer_open || panel_view == InkPanelView::Colors {
-            target + 4.0 + grid_height
-        } else {
-            match panel_view {
-                InkPanelView::Colors => target + 4.0 + grid_height,
-                InkPanelView::Nib => target + 4.0 + 122.0,
-                InkPanelView::Tools => target + 4.0 + storage_height,
-            }
-        };
-        let length = if (mixer_open || panel_view == InkPanelView::Colors)
-            && self.dock_layout_edge().vertical()
+        // Colors, mixer and nib size mirror the toolbar: same size, seated beside it.
+        let (wanted, content) = if mixer_open
+            || panel_view == InkPanelView::Colors
+            || panel_view == InkPanelView::Nib
         {
-            (body + 20.0).min(dock.height())
+            let size = dock.size();
+            let pad = 16.0;
+            (
+                size,
+                vec2(
+                    (size.x - pad).max(target),
+                    (size.y - pad).max(target * 0.75),
+                ),
+            )
+        } else if panel_view == InkPanelView::Tools {
+            let size = dock.size();
+            let pad = 16.0;
+            (
+                size,
+                vec2((size.x - pad).max(target), (size.y - pad).max(target)),
+            )
         } else {
-            body + 20.0
+            let inner = vec2(storage_side, storage_side);
+            (inner + vec2(16.0, 16.0), inner)
         };
-        let wanted = vec2(width, length);
-        let mut place = accessory_rect(
-            bounds,
-            &[dock],
-            wanted,
-            vec2(width, 44.0),
-            self.dock_layout_edge(),
-        );
-        let ink_well = ctx.data(|d| d.get_temp::<Rect>(Id::new("ink-well-rect")));
-        if let Some(well) = ink_well {
-            if place.bottom() <= dock.top() || place.top() >= dock.bottom() {
-                let x = (well.center().x - place.width() * 0.5).clamp(
-                    bounds.left(),
-                    (bounds.right() - place.width()).max(bounds.left()),
-                );
-                place = place.translate(vec2(x - place.left(), 0.0));
-            } else if place.right() <= dock.left() || place.left() >= dock.right() {
-                let anchor_y = if mixer_open || panel_view == InkPanelView::Colors {
-                    dock.bottom() - place.height()
-                } else {
-                    well.center().y - place.height() * 0.5
-                };
-                let y = anchor_y.clamp(
-                    bounds.top(),
-                    (bounds.bottom() - place.height()).max(bounds.top()),
-                );
-                place = place.translate(vec2(0.0, y - place.top()));
-            }
-        }
-        // Let the palette meet the case edge instead of hovering eight pixels away.
-        if place.bottom() < dock.top() {
-            place = place.translate(vec2(0.0, dock.top() - 4.0 - place.bottom()));
-        } else if place.top() > dock.bottom() {
-            place = place.translate(vec2(0.0, dock.bottom() + 4.0 - place.top()));
-        } else if place.right() < dock.left() {
-            place = place.translate(vec2(dock.left() - 4.0 - place.right(), 0.0));
-        } else if place.left() > dock.right() {
-            place = place.translate(vec2(dock.right() + 4.0 - place.left(), 0.0));
-        }
+        let place = dock_twin_place(dock, wanted, edge, bounds);
+        let content_width = content.x.min(place.width() - 16.0).max(target * 0.8);
+        let content_height = content.y.min(place.height() - 16.0).max(target * 0.8);
         let inner = Area::new(Id::new("inkarchy-tin"))
             .order(Order::Foreground)
             .fixed_pos(place.min)
+            .default_size(place.size())
             .fade_in(false)
-            .constrain_to(bounds)
+            .constrain(false)
             .show(ctx, |ui| {
+                ui.set_max_size(place.size());
                 Frame::NONE
                     .fill(self.note_case_color())
                     .stroke(Stroke::new(
@@ -6671,39 +6872,29 @@ impl InkarchyApp {
                     .inner_margin(8)
                     .show(ui, |ui| {
                         ui.set_width(content_width);
+                        ui.set_max_width(content_width);
                         ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-                        // The Area clamps its child to last frame's size, so reserve
-                        // the real body height instead of inheriting a stale clip.
-                        let room = (place.height() - 16.0).max(44.0);
-                        ui.set_min_height(if mixer_open || panel_view == InkPanelView::Colors {
-                            room
+                        let room_h = content_height;
+                        let room_w = content_width;
+                        ui.set_min_height(if along_dock {
+                            target
                         } else {
-                            body.min(room)
+                            content_height.min(room_h)
                         });
-                        ScrollArea::vertical()
-                            .id_salt("ink-case-scroll")
-                            .max_height(room)
-                            .auto_shrink([false, true])
-                            .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
-                            .scroll_source(ScrollSource {
-                                drag: true,
-                                ..Default::default()
-                            })
-                            .show(ui, |ui| {
+                        ui.set_max_height(room_h);
+                        if along_dock
+                            && (mixer_open
+                                || panel_view == InkPanelView::Colors
+                                || panel_view == InkPanelView::Nib)
+                        {
+                            ui.horizontal_centered(|ui| {
                                 if mixer_open {
-                                    // Fit both sliders and the save action on short screens.
-                                    // Tiny windows keep full touch targets and scroll instead.
-                                    let slider_room = room - 2.0 * target - 12.0;
-                                    let hue_height = (slider_room * 0.6)
-                                        .clamp(target, (slider_room - target).max(target));
-                                    let tone_height = (slider_room - hue_height).max(target);
-                                    self.ink_panel_header_ui(ui, "Mix ink", true);
-                                    self.ink_slider_ui(ui, 0, hue_height);
-                                    self.ink_slider_ui(ui, 1, tone_height);
-                                    let (rect, save) = ui.allocate_exact_size(
-                                        vec2(content_width, target),
-                                        Sense::click(),
-                                    );
+                                    self.ink_panel_header_ui(ui, "Mix", true);
+                                    let slide = (room_h - 8.0).max(target);
+                                    self.ink_slider_ui(ui, 0, slide);
+                                    self.ink_slider_ui(ui, 1, slide);
+                                    let (rect, save) = ui
+                                        .allocate_exact_size(vec2(target, target), Sense::click());
                                     let (face, fg) = self.paint_note_surface(
                                         ui,
                                         rect,
@@ -6734,36 +6925,142 @@ impl InkarchyApp {
                                         self.color_mixer_open = false;
                                     }
                                 } else if panel_view == InkPanelView::Colors {
-                                    self.ink_swatches_ui(ui, (room - target - 4.0).max(target));
-                                    self.ink_add_color_ui(ui);
-                                } else if panel_view == InkPanelView::Nib {
-                                    self.ink_panel_header_ui(ui, "Size", false);
-                                    self.nib_slip_ui(ui, vec2(content_width, 122.0));
-                                } else {
-                                    self.ink_panel_header_ui(ui, "Tools", false);
-                                    self.dock_tool_storage_ui(
+                                    self.ink_swatches_ui(
                                         ui,
-                                        vec2(content_width, storage_height),
+                                        (room_w - target - 8.0).max(36.0),
+                                        true,
                                     );
+                                    if self.ink_delete.is_some() {
+                                        self.ink_delete_color_ui(ui);
+                                    } else {
+                                        self.ink_add_color_ui(ui);
+                                    }
+                                } else {
+                                    self.nib_presets_ui(ui, room_w.max(36.0), true);
                                 }
                             });
+                        } else {
+                            ScrollArea::vertical()
+                                .id_salt("ink-case-scroll")
+                                .max_height(room_h)
+                                .auto_shrink([false, true])
+                                .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
+                                .scroll_source(ScrollSource {
+                                    drag: true,
+                                    ..Default::default()
+                                })
+                                .show(ui, |ui| {
+                                    if mixer_open {
+                                        let slider_room = room_h - 2.0 * target - 12.0;
+                                        let hue_height = (slider_room * 0.6)
+                                            .clamp(target, (slider_room - target).max(target));
+                                        let tone_height = (slider_room - hue_height).max(target);
+                                        self.ink_panel_header_ui(ui, "Mix ink", true);
+                                        self.ink_slider_ui(ui, 0, hue_height);
+                                        self.ink_slider_ui(ui, 1, tone_height);
+                                        let (rect, save) = ui.allocate_exact_size(
+                                            vec2(content_width, target),
+                                            Sense::click(),
+                                        );
+                                        let (face, fg) = self.paint_note_surface(
+                                            ui,
+                                            rect,
+                                            &save,
+                                            self.look.paper,
+                                            16,
+                                        );
+                                        ui.painter().add(Shape::line(
+                                            vec![
+                                                face.center() + vec2(-6.0, 0.0),
+                                                face.center() + vec2(-1.0, 4.0),
+                                                face.center() + vec2(7.0, -5.0),
+                                            ],
+                                            Stroke::new(2.2, fg),
+                                        ));
+                                        ui.ctx().data_mut(|d| {
+                                            d.insert_temp(Id::new("ink-save-color"), save.rect)
+                                        });
+                                        save.widget_info(|| {
+                                            WidgetInfo::labeled(
+                                                WidgetType::Button,
+                                                ui.is_enabled(),
+                                                "Save color",
+                                            )
+                                        });
+                                        if save.on_hover_text("Save color").clicked() {
+                                            self.save_ink_swatch();
+                                            self.color_mixer_open = false;
+                                        }
+                                    } else if panel_view == InkPanelView::Colors {
+                                        self.ink_swatches_ui(
+                                            ui,
+                                            (room_h - target - 4.0).max(target),
+                                            false,
+                                        );
+                                        if self.ink_delete.is_some() {
+                                            self.ink_delete_color_ui(ui);
+                                        } else {
+                                            self.ink_add_color_ui(ui);
+                                        }
+                                    } else if panel_view == InkPanelView::Nib {
+                                        self.nib_presets_ui(ui, room_h.max(target), false);
+                                    } else {
+                                        self.dock_tool_storage_ui(
+                                            ui,
+                                            vec2(content_width, content_height),
+                                        );
+                                    }
+                                });
+                        }
                     });
             });
-        ctx.data_mut(|d| d.insert_temp(Id::new("tin-rect"), inner.response.rect));
+        ctx.data_mut(|d| {
+            d.insert_temp(Id::new("tin-rect"), place);
+            if panel_view == InkPanelView::Nib && !mixer_open {
+                d.insert_temp(Id::new("nib-rect"), place);
+                d.insert_temp(Id::new("nib-hit"), place);
+                // Presets replaced the free slip; keep a track id for layout tests.
+                d.insert_temp(Id::new("nib-track"), place);
+            }
+        });
         paint_case_sheen(
             &ctx.layer_painter(inner.response.layer_id),
-            inner.response.rect,
+            place,
             self.look.paper,
             self.look.shadow,
         );
-        if let (Some(tool), Some(pointer)) = (self.dock_tool_drag, ctx.pointer_latest_pos()) {
+        if let (Some(item), Some(pointer)) = (self.dock_tool_drag, ctx.pointer_latest_pos()) {
             let painter =
                 ctx.layer_painter(LayerId::new(Order::Tooltip, Id::new("stored-tool-drag")));
-            let center = pointer + vec2(0.0, -28.0);
-            painter.circle_filled(center, 21.0, self.tool_well_fill(tool, true));
+            // Ride the finger/stylus — the source well is already hollowed out.
+            let center = pointer;
+            let fill = match item {
+                DockItem::Tool(tool) => self.tool_well_fill(tool, true),
+                DockItem::Chrome(_) => self.look.paper,
+            };
+            painter.circle_filled(center, 21.0, fill);
             painter.circle_stroke(center, 22.0, Stroke::new(2.0, self.look.paper));
-            paint_tool_icon(&painter, center, self.look.ink, tool);
-            if self.parked_tools.contains(&tool) {
+            match item {
+                DockItem::Tool(tool) => paint_tool_icon(&painter, center, self.look.ink, tool),
+                DockItem::Chrome(DockChrome::Undo) => paint_undo(&painter, center, self.look.ink),
+                DockItem::Chrome(DockChrome::Redo) => paint_redo(&painter, center, self.look.ink),
+                DockItem::Chrome(DockChrome::Ink) => {
+                    painter.circle_filled(center, 9.0, self.ink_color());
+                }
+                DockItem::Chrome(DockChrome::Storage) => {
+                    painter.circle_filled(center, 5.0, self.look.ink);
+                }
+                DockItem::Chrome(DockChrome::Coach) => paint_coach_icon(
+                    &painter,
+                    center,
+                    self.look.ink,
+                    self.look.accent,
+                    self.look.paper,
+                    self.look.shadow,
+                    self.coach_enabled(),
+                ),
+            }
+            if matches!(item, DockItem::Tool(tool) if self.tool_is_parked(tool)) {
                 painter.rect_stroke(
                     dock.expand(2.0),
                     30.0,
@@ -6771,12 +7068,27 @@ impl InkarchyApp {
                     StrokeKind::Outside,
                 );
             }
+            if let Some(slot) = self.storage_slot_under(ctx, pointer) {
+                if let Some(seat) =
+                    ctx.data(|d| d.get_temp::<Rect>(Id::new(("storage-slot", slot))))
+                {
+                    painter.circle_stroke(
+                        seat.center(),
+                        (seat.width() * 0.42).max(12.0),
+                        Stroke::new(2.0, self.look.paper),
+                    );
+                }
+            } else if let Some((_, mark)) = self.dock_insert_target(item, pointer, dock) {
+                let bar =
+                    ctx.layer_painter(LayerId::new(Order::Foreground, Id::new("dock-insert")));
+                bar.rect_filled(mark, 2.0, self.look.paper);
+            }
             ctx.set_cursor_icon(CursorIcon::Grabbing);
         }
         self.resolve_dock_tool_drop(ctx, dock);
         if ctx.input(|i| i.pointer.primary_pressed()) {
             if let Some(p) = ctx.pointer_latest_pos() {
-                if !inner.response.rect.expand(4.0).contains(p) && !dock.expand(6.0).contains(p) {
+                if !place.expand(4.0).contains(p) && !dock.expand(6.0).contains(p) {
                     self.set_ink_panel(false);
                 }
             }
@@ -6844,6 +7156,26 @@ impl InkarchyApp {
         }
     }
 
+    /// Armed removal: the footer turns into a bin, so a hold never deletes by
+    /// itself. Tapping a swatch or closing the column disarms it.
+    fn ink_delete_color_ui(&mut self, ui: &mut Ui) {
+        let response = self.round_well(ui, self.slot(), self.look.rust(), paint_trash_icon);
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(Id::new("ink-delete-color"), response.rect));
+        response.widget_info(|| {
+            WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Remove saved color")
+        });
+        if response.on_hover_text("Remove saved color").clicked() {
+            if let Some(index) = self.ink_delete.take() {
+                if index < self.lib.index.custom_inks.len() {
+                    self.lib.index.custom_inks.remove(index);
+                    let saved = self.lib.save_index();
+                    self.report_save(saved);
+                }
+            }
+        }
+    }
+
     fn ink_colors(&self) -> Vec<Color32> {
         let mut colors = self.look.inks.clone();
         for rgb in &self.lib.index.custom_inks {
@@ -6855,39 +7187,97 @@ impl InkarchyApp {
         colors
     }
 
-    fn ink_swatches_ui(&mut self, ui: &mut Ui, max_height: f32) {
+    fn ink_swatches_ui(&mut self, ui: &mut Ui, max_extent: f32, horizontal: bool) {
         let colors = self.ink_colors();
-        ScrollArea::vertical()
-            .id_salt("ink-swatches-scroll")
-            .max_height(max_height)
-            .auto_shrink([false, true])
-            .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
-            .show(ui, |ui| {
-                for (i, &color) in colors.iter().enumerate() {
-                    let response = ui
-                        .horizontal(|ui| {
-                            ui.add_space((self.slot() - 36.0) * 0.5);
-                            self.round_well(ui, 36.0, color, |_, _, _| {})
-                        })
-                        .inner;
-                    ui.ctx()
-                        .data_mut(|d| d.insert_temp(Id::new(("ink-swatch", i)), response.rect));
-                    if color == self.ink {
-                        ui.painter().circle_stroke(
-                            response.rect.center(),
-                            17.0,
-                            Stroke::new(2.0, self.look.paper),
-                        );
-                    }
-                    let label = format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b());
-                    response.widget_info(|| {
-                        WidgetInfo::selected(WidgetType::Button, true, color == self.ink, &label)
-                    });
-                    if response.on_hover_text(label).clicked() {
-                        self.pick_free_ink(color);
-                    }
-                }
+        let theme = self.look.inks.len();
+        if self
+            .ink_delete
+            .is_some_and(|i| i >= self.lib.index.custom_inks.len())
+        {
+            self.ink_delete = None;
+        }
+        let paint_one = |app: &mut Self, ui: &mut Ui, i: usize, color: Color32| {
+            let response = if horizontal {
+                app.round_well(ui, 40.0, color, |_, _, _| {})
+            } else {
+                ui.horizontal(|ui| {
+                    ui.add_space((app.slot() - 40.0) * 0.5);
+                    app.round_well(ui, 40.0, color, |_, _, _| {})
+                })
+                .inner
+            };
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(Id::new(("ink-swatch", i)), response.rect));
+            if color == app.ink {
+                ui.painter().circle_stroke(
+                    response.rect.center(),
+                    17.0,
+                    Stroke::new(2.0, app.look.paper),
+                );
+            }
+            // Theme pigments cannot be removed; only saved colors can.
+            let saved = i.checked_sub(theme);
+            let (click, remove) = match saved {
+                Some(_) => Self::tool_button_action(&response),
+                None => (response.clicked(), false),
+            };
+            if remove {
+                app.ink_delete = saved;
+            }
+            if click {
+                app.pick_free_ink(color);
+                app.ink_delete = None;
+            }
+            if saved.is_some() && app.ink_delete == saved {
+                ui.painter().circle_stroke(
+                    response.rect.center(),
+                    17.5,
+                    Stroke::new(2.2, app.look.rust()),
+                );
+            }
+            let label = format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b());
+            response.widget_info(|| {
+                WidgetInfo::selected(WidgetType::Button, true, color == app.ink, &label)
             });
+            let hint = if saved.is_some() {
+                format!("{label} · Hold to remove")
+            } else {
+                label
+            };
+            response.on_hover_text(hint);
+        };
+        if horizontal {
+            let row_width =
+                colors.len() as f32 * 40.0 + colors.len().saturating_sub(1) as f32 * 4.0;
+            let leading = ((max_extent - row_width) * 0.5).max(0.0);
+            let row_height = ui.available_height();
+            ScrollArea::horizontal()
+                .id_salt("ink-swatches-scroll")
+                .max_width(max_extent)
+                .auto_shrink([false, false])
+                .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
+                .show(ui, |ui| {
+                    ui.set_min_height(row_height);
+                    ui.add_space(leading);
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        for (i, &color) in colors.iter().enumerate() {
+                            paint_one(self, ui, i, color);
+                        }
+                    });
+                });
+        } else {
+            ScrollArea::vertical()
+                .id_salt("ink-swatches-scroll")
+                .max_height(max_extent)
+                .auto_shrink([false, true])
+                .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
+                .show(ui, |ui| {
+                    for (i, &color) in colors.iter().enumerate() {
+                        paint_one(self, ui, i, color);
+                    }
+                });
+        }
     }
 
     fn save_ink_swatch(&mut self) {
@@ -6899,14 +7289,64 @@ impl InkarchyApp {
         }
     }
 
+    fn tool_is_parked(&self, tool: Tool) -> bool {
+        let key = dock_tool_key(tool);
+        self.parked_slots.iter().any(|slot| *slot == Some(key))
+    }
+
+    fn parked_count(&self) -> usize {
+        self.parked_slots
+            .iter()
+            .filter(|slot| slot.is_some())
+            .count()
+    }
+
+    fn clear_parked_tool(&mut self, tool: Tool) {
+        let key = dock_tool_key(tool);
+        for slot in &mut self.parked_slots {
+            if *slot == Some(key) {
+                *slot = None;
+            }
+        }
+    }
+
+    /// Park `tool` in `slot`, swapping with whoever already sits there.
+    fn park_tool_at(&mut self, tool: Tool, slot: usize) {
+        let key = dock_tool_key(tool);
+        let slot = slot.min(STORAGE_SLOTS - 1);
+        let from = self.parked_slots.iter().position(|s| *s == Some(key));
+        let displaced = self.parked_slots[slot].take().filter(|t| *t != key);
+        if let Some(from) = from {
+            self.parked_slots[from] = None;
+        }
+        self.parked_slots[slot] = Some(key);
+        if let Some(other) = displaced {
+            if let Some(from) = from {
+                self.parked_slots[from] = Some(other);
+            } else if let Some(empty) = self.parked_slots.iter().position(|s| s.is_none()) {
+                self.parked_slots[empty] = Some(other);
+            }
+        }
+    }
+
+    fn first_empty_storage_slot(&self) -> Option<usize> {
+        self.parked_slots.iter().position(|slot| slot.is_none())
+    }
+
+    fn storage_slot_under(&self, ctx: &Context, pointer: Pos2) -> Option<usize> {
+        for i in 0..STORAGE_SLOTS {
+            if ctx
+                .data(|d| d.get_temp::<Rect>(Id::new(("storage-slot", i))))
+                .is_some_and(|rect| rect.contains(pointer))
+            {
+                return Some(i);
+            }
+        }
+        None
+    }
+
     fn dock_tool_storage_ui(&mut self, ui: &mut Ui, size: Vec2) {
         let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-        if self
-            .dock_tool_drag
-            .is_some_and(|tool| !self.parked_tools.contains(&tool))
-        {
-            ui.scroll_to_rect(rect, Some(Align::Max));
-        }
         let visible = rect.intersect(ui.clip_rect());
         ui.ctx()
             .data_mut(|d| d.insert_temp(Id::new("dock-tool-storage-rect"), visible));
@@ -6923,74 +7363,212 @@ impl InkarchyApp {
                 StrokeKind::Inside,
             );
         }
-        ui.painter().text(
-            pos2(rect.left() + 9.0, rect.top() + 10.0),
-            Align2::LEFT_CENTER,
-            if over {
-                "RELEASE HERE"
-            } else if self.parked_tools.is_empty() {
-                "DRAG TO STORE"
-            } else {
-                ""
-            },
-            self.look.mono(8.5),
-            self.look.paper.gamma_multiply(0.62),
-        );
-        let side = self.slot();
-        let gap = 8.0;
-        let cols = 3;
-        let x0 = rect.center().x - (cols as f32 * side + (cols as f32 - 1.0) * gap) * 0.5;
-        let y0 = rect.top() + 24.0;
-        let parked: Vec<_> = PARKABLE_TOOLS
-            .into_iter()
-            .filter(|tool| self.parked_tools.contains(tool))
-            .collect();
-        for i in 0..parked.len().max(3) {
+        // One line of nine seats, same orientation as the toolbar twin.
+        let vertical = self.dock_layout_edge().vertical();
+        let n = STORAGE_SLOTS as f32;
+        let gap = 6.0_f32;
+        let along = if vertical {
+            rect.height()
+        } else {
+            rect.width()
+        };
+        let across = if vertical {
+            rect.width()
+        } else {
+            rect.height()
+        };
+        let side = self
+            .slot()
+            .min((along - gap * (n - 1.0)) / n)
+            .min(across)
+            .max(18.0);
+        let spacing = if n <= 1.0 {
+            0.0
+        } else {
+            ((along - n * side) / (n - 1.0)).clamp(0.0, gap)
+        };
+        let line = n * side + (n - 1.0) * spacing;
+        let x0 = if vertical {
+            rect.center().x - side * 0.5
+        } else {
+            rect.center().x - line * 0.5
+        };
+        let y0 = if vertical {
+            rect.center().y - line * 0.5
+        } else {
+            rect.center().y - side * 0.5
+        };
+        let dragging = self.dock_tool_drag.and_then(|item| match item {
+            DockItem::Tool(tool) => Some(dock_tool_key(tool)),
+            _ => None,
+        });
+        for i in 0..STORAGE_SLOTS {
             let slot = Rect::from_min_size(
                 pos2(
-                    x0 + (i % cols) as f32 * (side + gap),
-                    y0 + (i / cols) as f32 * (side + 4.0),
+                    if vertical {
+                        x0
+                    } else {
+                        x0 + i as f32 * (side + spacing)
+                    },
+                    if vertical {
+                        y0 + i as f32 * (side + spacing)
+                    } else {
+                        y0
+                    },
                 ),
                 vec2(side, side),
             );
-            if let Some(&tool) = parked.get(i) {
-                let mut child = ui.new_child(
-                    UiBuilder::new()
-                        .id_salt(("stored-tool", tool))
-                        .max_rect(slot),
-                );
-                let response = self.paint_tool_well_sized(&mut child, tool, false, side);
-                if response
-                    .on_hover_text("Drag to the toolbar, or tap to restore")
-                    .clicked()
-                {
-                    self.parked_tools.remove(&tool);
-                    self.save_parked_tools();
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(Id::new(("storage-slot", i)), slot));
+            match self.parked_slots[i] {
+                Some(tool) if dragging != Some(tool) => {
+                    let mut child = ui.new_child(
+                        UiBuilder::new()
+                            .id_salt(("stored-tool", tool, i))
+                            .max_rect(slot),
+                    );
+                    let response = self.paint_tool_well_sized(&mut child, tool, false, side);
+                    if response
+                        .on_hover_text("Drag to the toolbar, or tap to restore")
+                        .clicked()
+                    {
+                        self.clear_parked_tool(tool);
+                        self.save_parked_tools();
+                    }
                 }
-            } else {
-                ui.painter().circle_stroke(
-                    slot.center(),
-                    15.5,
-                    Stroke::new(1.0, self.look.paper.gamma_multiply(0.17)),
-                );
+                _ => {
+                    ui.painter().circle_stroke(
+                        slot.center(),
+                        (side * 0.32).max(10.0),
+                        Stroke::new(1.0, self.look.paper.gamma_multiply(0.17)),
+                    );
+                }
             }
         }
     }
 
     fn save_parked_tools(&mut self) {
-        self.lib.index.parked_tools = PARKABLE_TOOLS
-            .into_iter()
-            .filter(|tool| self.parked_tools.contains(tool))
-            .collect();
+        let mut slots: Vec<Option<Tool>> = self.parked_slots.to_vec();
+        while slots.last().is_some_and(Option::is_none) {
+            slots.pop();
+        }
+        self.lib.index.parked_tools = slots;
+        self.lib.index.tool_order = self.tool_order.clone();
         let saved = self.lib.save_index();
         self.report_save(saved);
+    }
+
+    /// Insertion point in the visible toolbar, and its small paper-colored guide.
+    fn dock_insert_target(
+        &self,
+        dragged: DockItem,
+        pointer: Pos2,
+        dock: Rect,
+    ) -> Option<(usize, Rect)> {
+        if !dock.contains(pointer) {
+            return None;
+        }
+        let vertical = self.dock_layout_edge().vertical();
+        let axis = |p: Pos2| if vertical { p.y } else { p.x };
+        let mut wells: Vec<_> = self
+            .dock_tool_wells
+            .iter()
+            .filter(|(tool, rect)| *tool != dragged && rect.is_positive())
+            .collect();
+        wells.sort_by(|a, b| axis(a.1.center()).total_cmp(&axis(b.1.center())));
+        // The handle and the margins are not insertion targets.
+        let strip = self
+            .dock_tool_wells
+            .iter()
+            .map(|(_, r)| *r)
+            .reduce(|a, b| a.union(b))?;
+        if !strip.expand(5.0).contains(pointer) {
+            return None;
+        }
+        let (tool, rect, before) = wells
+            .iter()
+            .find(|(_, rect)| axis(pointer) < axis(rect.center()))
+            .map(|&&(tool, rect)| (tool, rect, true))
+            .or_else(|| wells.last().map(|&&(tool, rect)| (tool, rect, false)))?;
+        let index = self.tool_order.iter().position(|key| *key == tool)? + usize::from(!before);
+        let edge = if vertical {
+            if before {
+                rect.top() - 2.0
+            } else {
+                rect.bottom() + 2.0
+            }
+        } else if before {
+            rect.left() - 2.0
+        } else {
+            rect.right() + 2.0
+        };
+        let mark = if vertical {
+            Rect::from_center_size(pos2(rect.center().x, edge), vec2(24.0, 3.0))
+        } else {
+            Rect::from_center_size(pos2(edge, rect.center().y), vec2(3.0, 24.0))
+        };
+        Some((index, mark))
+    }
+
+    /// Keep off-screen wells reachable without dropping the carried tool.
+    fn scroll_dock_during_tool_drag(&self, ui: &mut Ui, vertical: bool) {
+        if self.dock_tool_drag.is_none() || !ui.input(|i| i.pointer.any_down()) {
+            return;
+        }
+        let clip = ui.clip_rect();
+        let Some(pointer) = ui.input(|i| i.pointer.latest_pos()) else {
+            return;
+        };
+        if !clip.expand(8.0).contains(pointer) {
+            return;
+        }
+        let (start, end, at) = if vertical {
+            (clip.top(), clip.bottom(), pointer.y)
+        } else {
+            (clip.left(), clip.right(), pointer.x)
+        };
+        let margin = 22.0;
+        let delta = if at < start + margin {
+            (start + margin - at).min(margin) * 0.7
+        } else if at > end - margin {
+            -(at - (end - margin)).min(margin) * 0.7
+        } else {
+            0.0
+        };
+        if delta != 0.0 {
+            ui.scroll_with_delta_animation(
+                if vertical {
+                    vec2(0.0, delta)
+                } else {
+                    vec2(delta, 0.0)
+                },
+                ScrollAnimation::none(),
+            );
+            ui.ctx().request_repaint();
+        }
+    }
+
+    fn move_tool_order(&mut self, dragged: DockItem, index: usize) -> bool {
+        let Some(old) = self.tool_order.iter().position(|tool| *tool == dragged) else {
+            return false;
+        };
+        let new = index.saturating_sub(usize::from(old < index));
+        if old == new && !matches!(dragged, DockItem::Tool(tool) if self.tool_is_parked(tool)) {
+            return false;
+        }
+        self.tool_order.remove(old);
+        self.tool_order.insert(new, dragged);
+        if let DockItem::Tool(tool) = dragged {
+            self.clear_parked_tool(tool);
+        }
+        true
     }
 
     fn resolve_dock_tool_drop(&mut self, ctx: &Context, dock: Rect) {
         if !ctx.input(|i| i.pointer.any_released()) {
             return;
         }
-        let Some(tool) = self.dock_tool_drag.take() else {
+        let Some(item) = self.dock_tool_drag.take() else {
             return;
         };
         if ctx.input(|i| {
@@ -7029,10 +7607,30 @@ impl InkarchyApp {
         let in_storage = ctx
             .data(|d| d.get_temp::<Rect>(Id::new("dock-tool-storage-rect")))
             .is_some_and(|rect| rect.contains(pointer));
+        if !in_storage {
+            if let Some((index, _)) = self.dock_insert_target(item, pointer, dock) {
+                if self.move_tool_order(item, index) {
+                    self.save_parked_tools();
+                }
+                return;
+            }
+        }
+        let DockItem::Tool(tool) = item else { return };
+        let was_parked = self.tool_is_parked(tool);
         let changed = if in_storage {
-            self.parked_tools.insert(tool)
+            let seat = self
+                .storage_slot_under(ctx, pointer)
+                .or_else(|| self.first_empty_storage_slot())
+                .unwrap_or(0);
+            self.park_tool_at(tool, seat);
+            true
         } else if dock.contains(pointer) {
-            self.parked_tools.remove(&tool)
+            if was_parked {
+                self.clear_parked_tool(tool);
+                true
+            } else {
+                false
+            }
         } else {
             false
         };
@@ -7122,106 +7720,70 @@ impl InkarchyApp {
             .on_hover_cursor(CursorIcon::PointingHand);
     }
 
-    fn nib_slip_ui(&mut self, ui: &mut Ui, size: Vec2) {
-        let (slip, _) = ui.allocate_exact_size(size, Sense::hover());
-        ui.ctx()
-            .data_mut(|d| d.insert_temp(Id::new("nib-rect"), slip));
-        let p = ui.painter();
-        p.text(
-            slip.min + vec2(8.0, 10.0),
-            Align2::LEFT_CENTER,
-            "SIZE",
-            self.look.mono(9.0),
-            self.look.paper.gamma_multiply(0.65),
-        );
-        p.text(
-            pos2(slip.right() - 8.0, slip.top() + 10.0),
-            Align2::RIGHT_CENTER,
-            format!("{:.1} px", self.width),
-            self.look.mono(11.0),
-            self.look.paper,
-        );
-        let hit = Rect::from_min_max(
-            slip.min + vec2(0.0, 22.0),
-            slip.min + vec2(slip.width(), 70.0),
-        );
-        let track = Rect::from_center_size(
-            pos2(slip.center().x, hit.center().y),
-            vec2(slip.width() - 16.0, 4.0),
-        );
-        ui.ctx()
-            .data_mut(|d| d.insert_temp(Id::new("nib-track"), track));
-        let response = ui.interact(hit, ui.id().with("nib-adjust"), Sense::click_and_drag());
-        ui.ctx()
-            .data_mut(|d| d.insert_temp(Id::new("nib-hit"), hit));
-        response.widget_info(|| {
-            WidgetInfo::labeled(WidgetType::Slider, ui.is_enabled(), "Stroke width")
-        });
-        if let Some(pointer) = response.interact_pointer_pos() {
-            if response.dragged() || response.clicked() {
-                let width = width_from_nib_t(nib_track_t(track, pointer));
-                self.set_nib_width((width * 10.0).round() / 10.0);
+    fn nib_presets_ui(&mut self, ui: &mut Ui, max_extent: f32, horizontal: bool) {
+        let cross = if horizontal {
+            ui.available_height()
+        } else {
+            ui.available_width()
+        }
+        .max(self.slot() * 0.75);
+        let size = if horizontal {
+            vec2(max_extent, cross)
+        } else {
+            vec2(cross, max_extent)
+        };
+        let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+        let along = if horizontal {
+            rect.width()
+        } else {
+            rect.height()
+        };
+        let n = (along / self.slot()).floor().max(1.0) as usize;
+        let pitch = along / n as f32;
+        let mut nearest = 0usize;
+        let mut nearest_d = f32::MAX;
+        for i in 0..n {
+            let t = nib_preset_t(i, n);
+            let d = (self.width - width_from_nib_t(t)).abs();
+            if d < nearest_d {
+                nearest_d = d;
+                nearest = i;
             }
         }
-        if response.has_focus() {
-            let delta = ui.input(|i| {
-                f32::from(i.key_pressed(Key::ArrowRight)) - f32::from(i.key_pressed(Key::ArrowLeft))
-            });
-            if delta != 0.0 {
-                self.set_nib_width((self.width + delta * 0.1).clamp(NIB_MIN, NIB_MAX));
-            }
-        }
-        let handle = nib_handle_pos(track, nib_t(self.width));
-        p.line_segment(
-            [track.left_center(), track.right_center()],
-            Stroke::new(3.0, self.look.paper.gamma_multiply(0.18)),
-        );
-        p.line_segment(
-            [track.left_center(), handle],
-            Stroke::new(3.0, self.look.accent),
-        );
-        p.circle_filled(handle, 8.0, self.look.paper);
-        p.circle_filled(handle, 3.0, self.look.accent);
-        for (i, width) in [1.0, 2.5, 6.0, 12.0].into_iter().enumerate() {
-            let slot = Rect::from_min_size(
-                slip.min + vec2(i as f32 * (self.slot() + 4.0), 74.0),
-                Vec2::splat(self.slot()),
-            );
+        let ink = self.look.ink;
+        for i in 0..n {
+            let t = nib_preset_t(i, n);
+            let width = width_from_nib_t(t);
+            let center = if horizontal {
+                pos2(rect.left() + (i as f32 + 0.5) * pitch, rect.center().y)
+            } else {
+                pos2(rect.center().x, rect.top() + (i as f32 + 0.5) * pitch)
+            };
+            let slot = if horizontal {
+                Rect::from_center_size(center, vec2(pitch, rect.height()))
+            } else {
+                Rect::from_center_size(center, vec2(rect.width(), pitch))
+            };
             ui.ctx()
                 .data_mut(|d| d.insert_temp(Id::new(("nib-preset", i)), slot));
             let response = ui.interact(slot, ui.id().with(("nib-preset", i)), Sense::click());
-            let selected = (self.width - width).abs() < 0.05;
-            p.rect_filled(
-                slot.shrink(1.0),
-                11.0,
-                if selected {
-                    self.look.paper
-                } else {
-                    mix_col(self.note_case_color(), self.look.paper, 0.18)
-                },
-            );
-            p.text(
-                slot.center(),
-                Align2::CENTER_CENTER,
-                width.to_string(),
-                self.look.mono(10.0),
-                if selected {
-                    self.look.ink
-                } else {
-                    self.look.paper
-                },
-            );
-            response.widget_info(|| {
-                WidgetInfo::selected(
-                    WidgetType::Button,
-                    ui.is_enabled(),
-                    selected,
-                    format!("Stroke width {width:.1} px"),
-                )
-            });
-            if response.on_hover_text(format!("{width:.1} px")).clicked() {
+            let radius = (2.2 + t * 11.5).min(pitch * 0.38);
+            ui.painter().circle_filled(center, radius, ink);
+            if i == nearest {
+                ui.painter().circle_stroke(
+                    center,
+                    radius + 3.0,
+                    Stroke::new(1.6, self.look.accent),
+                );
+            }
+            if response.clicked() {
                 self.set_nib_width(width);
             }
+            let label = format!("Stroke width {width:.1} px");
+            response.widget_info(|| {
+                WidgetInfo::selected(WidgetType::Button, true, i == nearest, &label)
+            });
+            response.on_hover_text(label);
         }
     }
 
@@ -7384,7 +7946,20 @@ impl InkarchyApp {
             return;
         }
         let down = ctx.input(|i| i.pointer.any_down());
-        let pos = ctx.input(|i| i.pointer.latest_pos());
+        // Touch End includes PointerGone, so latest_pos can vanish on release.
+        // Use the actual lift position rather than snapping from screen center.
+        let pos = ctx.input(|i| {
+            i.pointer.latest_pos().or_else(|| {
+                i.events.iter().find_map(|event| match event {
+                    Event::Touch {
+                        phase: TouchPhase::End,
+                        pos,
+                        ..
+                    } => Some(*pos),
+                    _ => None,
+                })
+            })
+        });
         if down {
             if let Some(p) = pos {
                 self.place_carried_dock(ctx, p);
@@ -7404,14 +7979,15 @@ impl InkarchyApp {
             self.dock_vel *= 0.5;
         }
         let screen = ctx.screen_rect();
-        let bounds = note_controls_bounds(ctx);
         let layout = self.dock_layout_edge();
         let mut size = self.dock_size.unwrap_or(vec2(48.0, 48.0));
         let hand = p - self.dock_grab;
         // Unclamped pose. The turn looks at this, not the rect already shoved
         // into the frame by the screen clamp.
         let body = Rect::from_min_size(hand, size);
-        let edge = carrying_edge(p, screen, bounds, layout, body, self.dock_vel);
+        let guide = note_controls_bounds(ctx);
+        let edge = carrying_edge(p, screen, guide, layout, body, self.dock_vel);
+        let bounds = dock_bounds(ctx, edge);
         if edge.vertical() != layout.vertical() {
             size = vec2(size.y, size.x).min(bounds.size());
             self.dock_size = Some(size);
@@ -7459,57 +8035,166 @@ impl InkarchyApp {
 
     fn dock_inner(&mut self, ui: &mut Ui, _vertical: bool) {
         let slot = self.slot();
-        for t in [
-            Tool::Fineliner,
-            Tool::Brush,
-            Tool::Pencil,
-            Tool::Highlighter,
-        ] {
-            if self.parked_tools.contains(&t) {
+        let pen = self.tablet.snapshot();
+        let kind = self.last_eraser;
+        // Every well follows the same saved order, including chrome actions.
+        for item in self.tool_order.clone() {
+            let DockItem::Tool(key) = item else {
+                if self.dock_tool_drag == Some(item) {
+                    self.paint_drag_hole(ui);
+                    continue;
+                }
+                match item {
+                    DockItem::Chrome(DockChrome::Undo) => self.undo_ui(ui, slot),
+                    DockItem::Chrome(DockChrome::Redo) => self.redo_ui(ui, slot),
+                    DockItem::Chrome(DockChrome::Storage) => {
+                        if self.parked_count() > 0 {
+                            self.dock_storage_button_ui(ui);
+                        }
+                    }
+                    DockItem::Chrome(DockChrome::Ink) => self.dock_ink_ui(ui),
+                    DockItem::Chrome(DockChrome::Coach) => {}
+                    DockItem::Tool(_) => unreachable!(),
+                }
+                continue;
+            };
+            if key == Tool::EraserStroke {
+                if !self.tool_is_parked(key) {
+                    if self.dock_tool_drag == Some(DockItem::Tool(key)) {
+                        self.paint_drag_hole(ui);
+                    } else {
+                        let on = self.tool == kind || pen.eraser;
+                        let response = self.paint_tool_well(ui, kind, on);
+                        let (click, options) = Self::tool_button_action(&response);
+                        if options {
+                            self.finish_text_edit();
+                            self.sel.clear();
+                            if !self.tool.is_eraser() {
+                                self.pick_eraser(kind);
+                            }
+                            self.set_ink_panel(true);
+                            self.ink_panel_view = InkPanelView::Nib;
+                            self.color_mixer_open = false;
+                        }
+                        if click {
+                            self.finish_text_edit();
+                            self.sel.clear();
+                            self.pick_eraser(kind);
+                        }
+                    }
+                }
                 continue;
             }
-            if self.tool_glyph(ui, t) {
-                self.finish_text_edit();
-                if self.tool == t {
-                    let open = !(self.ink_panel_open() && self.ink_panel_view == InkPanelView::Nib);
-                    self.set_ink_panel(open);
-                    self.ink_panel_view = InkPanelView::Nib;
-                    self.color_mixer_open = false;
-                } else {
-                    self.sel.clear();
-                    self.tool = t;
-                    self.last_ink = t;
-                    if let Some(nib) = t.nib() {
-                        self.width = default_width(nib);
-                        self.last_ink_width = self.width;
+            if self.tool_is_parked(key) {
+                continue;
+            }
+            if self.dock_tool_drag == Some(DockItem::Tool(key)) {
+                self.paint_drag_hole(ui);
+                continue;
+            }
+            match key {
+                Tool::Hand => {
+                    let hand = self.paint_tool_well(ui, Tool::Hand, self.tool == Tool::Hand);
+                    if hand.clicked() {
+                        self.finish_text_edit();
+                        self.tool = Tool::Hand;
+                    }
+                }
+                Tool::Image => {
+                    let image_resp =
+                        self.paint_tool_well(ui, Tool::Image, self.tool == Tool::Image);
+                    if image_resp.clicked() {
+                        self.finish_text_edit();
+                        self.tool = Tool::Image;
+                        self.pending_image = Some(self.drop_spot());
+                    }
+                }
+                Tool::Text => {
+                    if self.tool_glyph(ui, Tool::Text) {
+                        self.sel.clear();
+                        self.tool = Tool::Text;
+                    }
+                }
+                _ => {
+                    if self.tool_glyph(ui, key) {
+                        self.finish_text_edit();
+                        if self.tool == key {
+                            let open = !(self.ink_panel_open()
+                                && self.ink_panel_view == InkPanelView::Nib);
+                            self.set_ink_panel(open);
+                            self.ink_panel_view = InkPanelView::Nib;
+                            self.color_mixer_open = false;
+                        } else {
+                            self.sel.clear();
+                            self.tool = key;
+                            self.last_ink = key;
+                            if let Some(nib) = key.nib() {
+                                self.width = default_width(nib);
+                                self.last_ink_width = self.width;
+                            }
+                        }
                     }
                 }
             }
         }
-        let pen = self.tablet.snapshot();
-        let kind = self.last_eraser;
-        let on = self.tool == kind || pen.eraser;
-        if !self.parked_tools.contains(&Tool::EraserStroke) {
-            let response = self.paint_tool_well(ui, kind, on);
-            let (click, options) = Self::tool_button_action(&response);
-            if options {
-                self.finish_text_edit();
-                self.sel.clear();
-                if !self.tool.is_eraser() {
-                    self.pick_eraser(kind);
-                }
+    }
+
+    fn dock_storage_button_ui(&mut self, ui: &mut Ui) {
+        let storage = self.round_well_with_sense(
+            ui,
+            self.slot(),
+            self.look.paper,
+            Sense::click_and_drag(),
+            |p, c, fg| {
+                p.rect_stroke(
+                    Rect::from_center_size(c, vec2(20.0, 14.0)),
+                    4.0,
+                    Stroke::new(1.6, fg),
+                    StrokeKind::Inside,
+                );
+                p.circle_filled(c + vec2(-5.0, 0.0), 2.0, fg);
+                p.circle_filled(c + vec2(5.0, 0.0), 2.0, fg);
+            },
+        );
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(Id::new("dock-storage-button"), storage.rect));
+        self.dock_item_response(ui, &storage, DockItem::Chrome(DockChrome::Storage), false);
+        storage.widget_info(|| {
+            WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Tool storage")
+        });
+        if storage.on_hover_text("Stored tools").clicked() {
+            self.set_ink_panel(true);
+            self.ink_panel_view = InkPanelView::Tools;
+            self.color_mixer_open = false;
+        }
+    }
+
+    fn dock_ink_ui(&mut self, ui: &mut Ui) {
+        let ink = self.ink_well(
+            ui,
+            self.ink_panel_open() && self.ink_panel_view == InkPanelView::Colors,
+        );
+        self.dock_item_response(ui, &ink, DockItem::Chrome(DockChrome::Ink), false);
+        if ink.clicked() {
+            if self.ink_panel_open() && self.ink_panel_view == InkPanelView::Colors {
+                self.set_ink_panel(false);
+            } else {
                 self.set_ink_panel(true);
-                self.ink_panel_view = InkPanelView::Nib;
+                self.ink_panel_view = InkPanelView::Colors;
                 self.color_mixer_open = false;
             }
-            if click {
-                self.finish_text_edit();
-                self.sel.clear();
-                self.pick_eraser(kind);
-            }
         }
-        // Undo / redo sit beside the ink tools: the correction follows the stroke.
-        let undo = self.round_well(ui, slot, self.look.paper, paint_undo);
+    }
+
+    fn undo_ui(&mut self, ui: &mut Ui, slot: f32) {
+        let undo = self.round_well_with_sense(
+            ui,
+            slot,
+            self.look.paper,
+            Sense::click_and_drag(),
+            paint_undo,
+        );
+        self.dock_item_response(ui, &undo, DockItem::Chrome(DockChrome::Undo), false);
         undo.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Undo"));
         if undo.on_hover_text("Undo · Ctrl+Z").clicked() {
             let mut ok = false;
@@ -7520,7 +8205,17 @@ impl InkarchyApp {
                 self.mark_dirty();
             }
         }
-        let redo = self.round_well(ui, slot, self.look.paper, paint_redo);
+    }
+
+    fn redo_ui(&mut self, ui: &mut Ui, slot: f32) {
+        let redo = self.round_well_with_sense(
+            ui,
+            slot,
+            self.look.paper,
+            Sense::click_and_drag(),
+            paint_redo,
+        );
+        self.dock_item_response(ui, &redo, DockItem::Chrome(DockChrome::Redo), false);
         redo.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Redo"));
         if redo.on_hover_text("Redo · Ctrl+Shift+Z").clicked() {
             let mut ok = false;
@@ -7529,62 +8224,6 @@ impl InkarchyApp {
             }
             if ok {
                 self.mark_dirty();
-            }
-        }
-        if !self.parked_tools.contains(&Tool::Hand) {
-            let hand = self.paint_tool_well(ui, Tool::Hand, self.tool == Tool::Hand);
-            if hand.clicked() {
-                self.finish_text_edit();
-                self.tool = Tool::Hand;
-            }
-        }
-        if !self.parked_tools.contains(&Tool::Text) && self.tool_glyph(ui, Tool::Text) {
-            self.sel.clear();
-            self.tool = Tool::Text;
-        }
-        if !self.parked_tools.contains(&Tool::Image) {
-            let image_resp = self.paint_tool_well(ui, Tool::Image, self.tool == Tool::Image);
-            if image_resp.clicked() {
-                self.finish_text_edit();
-                self.tool = Tool::Image;
-                self.pending_image = Some(self.drop_spot());
-            }
-        }
-        if !self.parked_tools.is_empty() {
-            let storage = self.round_well(ui, self.slot(), self.look.paper, |p, c, fg| {
-                p.rect_stroke(
-                    Rect::from_center_size(c, vec2(20.0, 14.0)),
-                    4.0,
-                    Stroke::new(1.6, fg),
-                    StrokeKind::Inside,
-                );
-                p.circle_filled(c + vec2(-5.0, 0.0), 2.0, fg);
-                p.circle_filled(c + vec2(5.0, 0.0), 2.0, fg);
-            });
-            ui.ctx()
-                .data_mut(|d| d.insert_temp(Id::new("dock-storage-button"), storage.rect));
-            storage.widget_info(|| {
-                WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Tool storage")
-            });
-            if storage.on_hover_text("Stored tools").clicked() {
-                self.set_ink_panel(true);
-                self.ink_panel_view = InkPanelView::Tools;
-                self.color_mixer_open = false;
-            }
-        }
-        if self
-            .ink_well(
-                ui,
-                self.ink_panel_open() && self.ink_panel_view == InkPanelView::Colors,
-            )
-            .clicked()
-        {
-            if self.ink_panel_open() && self.ink_panel_view == InkPanelView::Colors {
-                self.set_ink_panel(false);
-            } else {
-                self.set_ink_panel(true);
-                self.ink_panel_view = InkPanelView::Colors;
-                self.color_mixer_open = false;
             }
         }
     }
@@ -7629,7 +8268,7 @@ impl InkarchyApp {
     /// Current ink at the current nib size. The well opens the colour palette.
     fn ink_well(&self, ui: &mut Ui, open: bool) -> Response {
         let s = self.slot();
-        let (rect, resp) = ui.allocate_exact_size(vec2(s, s), Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(vec2(s, s), Sense::click_and_drag());
         ui.ctx()
             .data_mut(|d| d.insert_temp(Id::new("ink-well-rect"), rect));
         let c = rect.center();
@@ -7661,12 +8300,8 @@ impl InkarchyApp {
             r * 0.20,
             self.look.paper.gamma_multiply(0.28),
         );
-        if open || resp.hovered() || resp.is_pointer_button_down_on() || resp.has_focus() {
-            p.circle_stroke(
-                c,
-                19.5,
-                Stroke::new(if open { 2.0 } else { 1.0 }, self.look.paper),
-            );
+        if open {
+            p.circle_stroke(c, 19.5, Stroke::new(2.0, self.look.paper));
         }
         resp.widget_info(|| WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), open, "Ink"));
         resp.on_hover_cursor(CursorIcon::PointingHand)
@@ -7714,6 +8349,17 @@ impl InkarchyApp {
         self.paint_tool_well_sized(ui, tool, active, self.slot())
     }
 
+    /// Empty seat left behind while a well rides the pointer.
+    fn paint_drag_hole(&mut self, ui: &mut Ui) {
+        let size = self.slot();
+        let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+        ui.painter().circle_stroke(
+            rect.center(),
+            size * 0.32,
+            Stroke::new(1.2, self.look.paper.gamma_multiply(0.28)),
+        );
+    }
+
     fn paint_tool_well_sized(
         &mut self,
         ui: &mut Ui,
@@ -7732,45 +8378,12 @@ impl InkarchyApp {
         );
         ui.ctx()
             .data_mut(|d| d.insert_temp(Id::new(("tool-well", dock_tool_key(tool))), resp.rect));
-        let scroll_key = resp.id.with("tool-touch-scroll");
-        if resp.drag_started() {
-            let tools_panel = self.ink_panel_open() && self.ink_panel_view == InkPanelView::Tools;
-            let scroll = !(self.parked_tools.contains(&dock_tool_key(tool)) || tools_panel)
-                && ui.input(|i| {
-                    let delta = i.pointer.interact_pos().unwrap_or_default()
-                        - i.pointer.press_origin().unwrap_or_default();
-                    let along = if self.dock_layout_edge().vertical() {
-                        delta.y.abs() > delta.x.abs()
-                    } else {
-                        delta.x.abs() > delta.y.abs()
-                    };
-                    i.any_touches() && along
-                });
-            ui.ctx().data_mut(|d| d.insert_temp(scroll_key, scroll));
-            if !scroll {
-                self.dock_tool_drag = Some(dock_tool_key(tool));
-                self.set_ink_panel(true);
-                self.ink_panel_view = InkPanelView::Tools;
-                self.color_mixer_open = false;
-            }
-        }
-        if resp.dragged()
-            && ui
-                .ctx()
-                .data(|d| d.get_temp::<bool>(scroll_key))
-                .unwrap_or(false)
-        {
-            let delta = resp.drag_delta();
-            let delta = if self.dock_layout_edge().vertical() {
-                vec2(0.0, delta.y)
-            } else {
-                vec2(delta.x, 0.0)
-            };
-            ui.scroll_with_delta_animation(delta, egui::style::ScrollAnimation::none());
-        }
-        if resp.drag_stopped() {
-            ui.ctx().data_mut(|d| d.remove::<bool>(scroll_key));
-        }
+        self.dock_item_response(
+            ui,
+            &resp,
+            DockItem::Tool(dock_tool_key(tool)),
+            self.tool_is_parked(tool),
+        );
         if active {
             // Selection stays legible without relying on the pigment alone.
             ui.painter().rect_stroke(
@@ -7795,6 +8408,84 @@ impl InkarchyApp {
         } else {
             tool.label().to_string()
         })
+    }
+
+    fn dock_item_response(&mut self, ui: &mut Ui, resp: &Response, item: DockItem, stored: bool) {
+        if !stored {
+            let visible = resp.rect.intersect(ui.clip_rect());
+            if visible.is_positive() {
+                self.dock_tool_wells.push((item, visible));
+            }
+        }
+        let scroll_key = resp.id.with("tool-touch-scroll");
+        let hold_key = resp.id.with("tool-touch-hold");
+        if resp.is_pointer_button_down_on() && ui.input(|i| i.any_touches()) {
+            let now = ui.input(|i| i.time);
+            ui.ctx().data_mut(|data| {
+                if data.get_temp::<f64>(hold_key).is_none() {
+                    data.insert_temp(hold_key, now);
+                }
+            });
+        }
+        if resp.drag_started() {
+            let vertical = self.dock_layout_edge().vertical();
+            let available = if vertical {
+                ui.clip_rect().height()
+            } else {
+                ui.clip_rect().width()
+            };
+            let count = self.tool_order.len().saturating_sub(self.parked_count());
+            let pitch = self.slot() + if vertical { 2.0 } else { 3.0 };
+            let now = ui.input(|i| i.time);
+            let held = ui
+                .ctx()
+                .data(|data| data.get_temp::<f64>(hold_key))
+                .is_some_and(|start| now - start >= 0.35);
+            let scroll = ui.input(|i| {
+                let delta = i.pointer.interact_pos().unwrap_or_default()
+                    - i.pointer.press_origin().unwrap_or_default();
+                let along = if vertical {
+                    delta.y.abs() > delta.x.abs()
+                } else {
+                    delta.x.abs() > delta.y.abs()
+                };
+                i.any_touches()
+                    && along
+                    && !held
+                    && !stored
+                    && !(self.ink_panel_open() && self.ink_panel_view == InkPanelView::Tools)
+                    && count as f32 * pitch > available
+            });
+            ui.ctx().data_mut(|d| d.insert_temp(scroll_key, scroll));
+            if !scroll {
+                self.dock_tool_drag = Some(item);
+                self.set_ink_panel(true);
+                self.ink_panel_view = InkPanelView::Tools;
+                self.color_mixer_open = false;
+            }
+        }
+        if resp.dragged()
+            && ui
+                .ctx()
+                .data(|d| d.get_temp::<bool>(scroll_key))
+                .unwrap_or(false)
+        {
+            let delta = resp.drag_delta();
+            let delta = if self.dock_layout_edge().vertical() {
+                vec2(0.0, delta.y)
+            } else {
+                vec2(delta.x, 0.0)
+            };
+            ui.scroll_with_delta_animation(delta, ScrollAnimation::none());
+        }
+        if resp.drag_stopped() {
+            ui.ctx().data_mut(|d| {
+                d.remove::<bool>(scroll_key);
+                d.remove::<f64>(hold_key);
+            });
+        } else if !resp.is_pointer_button_down_on() {
+            ui.ctx().data_mut(|d| d.remove::<f64>(hold_key));
+        }
     }
 
     fn ui_canvas(&mut self, ui: &mut Ui) {
@@ -7843,6 +8534,7 @@ impl InkarchyApp {
             return;
         }
         self.paint_overlays(ui, rect);
+        self.paint_video_controls(ui, &painter, rect);
         self.paint_area_eraser_lens(ui, &painter, rect);
         self.cursor_for_tool(ui, &resp);
         self.paint_selection_handles(ui, &painter, rect);
@@ -8129,6 +8821,29 @@ impl InkarchyApp {
                 return;
             }
         }
+        if self.video_press.is_some() {
+            if primary_released || !primary_down {
+                self.video_press = None;
+            } else {
+                self.drag_last = None;
+                self.selection_resize = None;
+                return;
+            }
+        }
+        if primary_pressed {
+            if let Some((page, id)) = self.video_button_at(screen, rect) {
+                self.video_press = Some(id);
+                self.sel = vec![Sel {
+                    page,
+                    id,
+                    kind: SelKind::Image,
+                }];
+                self.toggle_video(id, ui.ctx());
+                self.drag_last = None;
+                self.selection_resize = None;
+                return;
+            }
+        }
         if self.take_pages_manage_hold(
             ui,
             resp,
@@ -8339,7 +9054,7 @@ impl InkarchyApp {
             self.activate_text(paper);
         }
 
-        if tool == Tool::Image && tap && self.image_import.is_none() {
+        if tool == Tool::Image && tap && self.media_import.is_none() {
             self.pending_image = Some((page, local));
         }
     }
@@ -8728,8 +9443,8 @@ impl InkarchyApp {
             .map(|t| (page, t.id))
     }
 
-    fn pick_image(&mut self, ctx: &Context, page: usize, local: Pos2, replace: Option<Uuid>) {
-        if self.image_import.is_some() {
+    fn pick_media(&mut self, ctx: &Context, page: usize, local: Pos2, replace: Option<Uuid>) {
+        if self.media_import.is_some() {
             return;
         }
         let Some(note) = &self.note else { return };
@@ -8738,40 +9453,57 @@ impl InkarchyApp {
         };
         let (note, cell) = (note.id, (target.col, target.row));
         let task = rfd::AsyncFileDialog::new()
-            .set_title("Place an image")
+            .set_title("Place media")
+            .add_filter(
+                "Media",
+                &[
+                    "png", "jpg", "jpeg", "webp", "gif", "bmp", "svg", "mp4", "m4v", "mov", "webm",
+                    "mkv", "avi", "ogv",
+                ],
+            )
             .add_filter(
                 "Images",
                 &["png", "jpg", "jpeg", "webp", "gif", "bmp", "svg"],
+            )
+            .add_filter(
+                "Videos",
+                &["mp4", "m4v", "mov", "webm", "mkv", "avi", "ogv"],
             )
             .pick_file();
         let (send, result) = mpsc::channel();
         let repaint = ctx.clone();
         let spawned = std::thread::Builder::new()
-            .name("inkarchy-image-picker".into())
+            .name("inkarchy-media-picker".into())
             .spawn(move || {
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let Some(file) = pollster::block_on(task) else {
-                        return ImageImportResult::Cancelled;
+                        return MediaImportResult::Cancelled;
                     };
                     let path = file.path().to_path_buf();
-                    if crate::import::is_placeable_image(&path) {
-                        return crate::import::load_placed_image(&path)
-                            .map(ImageImportResult::Ready)
-                            .unwrap_or(ImageImportResult::Failed);
+                    if crate::import::is_placeable_media(&path) {
+                        return match crate::import::load_placed_media(&path) {
+                            Ok(crate::import::PlacedMedia::Image(png)) => {
+                                MediaImportResult::Image(png)
+                            }
+                            Ok(crate::import::PlacedMedia::Video { ext, meta }) => {
+                                MediaImportResult::Video { path, ext, meta }
+                            }
+                            Err(err) => MediaImportResult::Failed(err.to_string()),
+                        };
                     }
                     let Ok(bytes) = std::fs::read(&path) else {
-                        return ImageImportResult::Failed;
+                        return MediaImportResult::Failed("Could not read the file".into());
                     };
                     ensure_png(&bytes)
-                        .map(ImageImportResult::Ready)
-                        .unwrap_or(ImageImportResult::Failed)
+                        .map(MediaImportResult::Image)
+                        .unwrap_or_else(|| MediaImportResult::Failed("Could not load image".into()))
                 }))
-                .unwrap_or(ImageImportResult::Failed);
+                .unwrap_or_else(|_| MediaImportResult::Failed("Could not load media".into()));
                 let _ = send.send(outcome);
                 repaint.request_repaint();
             });
         if spawned.is_ok() {
-            self.image_import = Some(ImageImport {
+            self.media_import = Some(MediaImport {
                 note,
                 cell,
                 local,
@@ -8779,23 +9511,25 @@ impl InkarchyApp {
                 result,
             });
         } else {
-            self.toast("Could not open image picker", ctx.input(|i| i.time));
+            self.toast("Could not open media picker", ctx.input(|i| i.time));
         }
     }
 
-    fn poll_image_import(&mut self, ctx: &Context) {
-        let Some(job) = &self.image_import else {
+    fn poll_media_import(&mut self, ctx: &Context) {
+        let Some(job) = &self.media_import else {
             return;
         };
         let outcome = match job.result.try_recv() {
             Ok(outcome) => Some(outcome),
             Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => Some(ImageImportResult::Failed),
+            Err(TryRecvError::Disconnected) => {
+                Some(MediaImportResult::Failed("Could not load media".into()))
+            }
         };
         let Some(outcome) = outcome else {
             return;
         };
-        let job = self.image_import.take().expect("image import was present");
+        let job = self.media_import.take().expect("media import was present");
         let Some(page) = self
             .note
             .as_ref()
@@ -8805,9 +9539,16 @@ impl InkarchyApp {
             return;
         };
         match outcome {
-            ImageImportResult::Ready(png) => self.insert_png(&png, page, job.local, job.replace),
-            ImageImportResult::Cancelled => {}
-            ImageImportResult::Failed => self.toast("Could not load image", ctx.input(|i| i.time)),
+            MediaImportResult::Image(png) => self.insert_png(&png, page, job.local, job.replace),
+            MediaImportResult::Video { path, ext, meta } => {
+                if let Err(msg) =
+                    self.insert_video_path(&path, &ext, meta, page, job.local, job.replace)
+                {
+                    self.toast(msg, ctx.input(|i| i.time));
+                }
+            }
+            MediaImportResult::Cancelled => {}
+            MediaImportResult::Failed(msg) => self.toast(msg, ctx.input(|i| i.time)),
         }
     }
 
@@ -8861,6 +9602,231 @@ impl InkarchyApp {
             kind: SelKind::Image,
         }];
         self.mark_dirty();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_video_path(
+        &mut self,
+        src: &std::path::Path,
+        ext: &str,
+        meta: crate::video::Meta,
+        page: usize,
+        local: Pos2,
+        replace: Option<Uuid>,
+    ) -> Result<(), String> {
+        let Some(note) = &self.note else {
+            return Err("Could not place the video".into());
+        };
+        let Some(target) = note.pages.get(page) else {
+            return Err("Could not place the video".into());
+        };
+        if replace.is_some_and(|id| !target.images.iter().any(|im| im.id == id)) {
+            return Err("Could not place the video".into());
+        }
+        let id = note.id;
+        let Some(file) = self.lib.copy_media(id, src, ext) else {
+            return Err("Could not store the video".into());
+        };
+        let video_path = self.lib.media_path(id, &file);
+        if let Some(poster) = crate::video::poster_png(&video_path, &meta) {
+            self.lib
+                .write_media_named(id, &crate::video::poster_name(&file), &poster);
+        }
+        self.push_snapshot();
+        let video_id = replace.unwrap_or_else(Uuid::new_v4);
+        self.videos.remove(&video_id);
+        self.video_textures.remove(&video_id);
+        self.video_failed.remove(&video_id);
+        let (w, h) = (meta.width.max(1) as f32, meta.height.max(1) as f32);
+        let scale = (420.0 / w.max(h)).min(1.0);
+        if let Some(n) = &mut self.note {
+            if let Some(pg) = n.pages.get_mut(page) {
+                if let Some(image) = pg.images.iter_mut().find(|im| im.id == video_id) {
+                    let scale = (image.size[0] / w).min(image.size[1] / h);
+                    image.size = [w * scale, h * scale];
+                    image.file = file;
+                } else {
+                    pg.images.push(ImageObj {
+                        id: video_id,
+                        pos: [local.x, local.y],
+                        size: [w * scale, h * scale],
+                        file,
+                    });
+                }
+            }
+        }
+        self.finish_text_edit();
+        self.tool = Tool::Hand;
+        self.sel = vec![Sel {
+            page,
+            id: video_id,
+            kind: SelKind::Image,
+        }];
+        self.mark_dirty();
+        Ok(())
+    }
+
+    /// Keep one player per placed video, upload whichever frames arrived, and
+    /// drop players whose object was deleted or undone.
+    fn sync_videos(&mut self, ctx: &Context) {
+        let Some(note) = self.note.as_ref() else {
+            self.videos.clear();
+            self.video_textures.clear();
+            self.video_press = None;
+            self.video_failed.clear();
+            return;
+        };
+        let note_id = note.id;
+        let mut live = HashSet::new();
+        let mut items = Vec::new();
+        for page in &note.pages {
+            for image in &page.images {
+                if crate::video::is_video_file(&image.file) {
+                    live.insert(image.id);
+                    items.push((image.id, image.file.clone()));
+                }
+            }
+        }
+        self.videos.retain(|id, _| live.contains(id));
+        self.video_textures.retain(|id, _| live.contains(id));
+        self.video_failed.retain(|id| live.contains(id));
+        if self.video_press.is_some_and(|id| !live.contains(&id)) {
+            self.video_press = None;
+        }
+        for (id, file) in items {
+            if self.videos.contains_key(&id) || self.video_failed.contains(&id) {
+                continue;
+            }
+            let path = self.lib.media_path(note_id, &file);
+            if let Some(player) = crate::video::Player::load(path) {
+                self.videos.insert(id, player);
+            } else {
+                self.video_failed.insert(id);
+            }
+        }
+        let mut playing = false;
+        for (id, player) in &mut self.videos {
+            while let Some(frame) = player.poll() {
+                let image = ColorImage::from_rgba_unmultiplied(
+                    [frame.width as usize, frame.height as usize],
+                    &frame.rgba,
+                );
+                if let Some(texture) = self.video_textures.get_mut(id) {
+                    texture.set(image, TextureOptions::LINEAR);
+                } else {
+                    let texture =
+                        ctx.load_texture(format!("video-{id}"), image, TextureOptions::LINEAR);
+                    self.video_textures.insert(*id, texture);
+                }
+            }
+            playing |= player.is_playing();
+        }
+        if playing {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+    }
+
+    fn toggle_video(&mut self, id: Uuid, ctx: &Context) {
+        let was_playing = self
+            .videos
+            .get(&id)
+            .is_some_and(crate::video::Player::is_playing);
+        if was_playing {
+            if let Some(player) = self.videos.get_mut(&id) {
+                player.pause();
+            }
+            return;
+        }
+        for (other, player) in &mut self.videos {
+            if *other != id {
+                player.pause();
+            }
+        }
+        let started = self.videos.get_mut(&id).is_some_and(|player| player.play());
+        if !started {
+            self.toast("Could not play this video", ctx.input(|i| i.time));
+        }
+    }
+
+    fn video_button_rect(&self, canvas: Rect, page: usize, image: &ImageObj) -> Option<Rect> {
+        if !crate::video::is_video_file(&image.file) {
+            return None;
+        }
+        let rect = self.image_screen_rect(canvas, page, image);
+        if !rect.is_finite() || !rect.intersects(canvas) {
+            return None;
+        }
+        let radius = (rect.width().min(rect.height()) * 0.12)
+            .clamp(6.0, 22.0)
+            .min(rect.width().min(rect.height()) * 0.5);
+        Some(Rect::from_center_size(
+            rect.center(),
+            Vec2::splat(radius * 2.0),
+        ))
+    }
+
+    /// Topmost play button under `screen`, with the page and object it controls.
+    fn video_button_at(&self, screen: Pos2, canvas: Rect) -> Option<(usize, Uuid)> {
+        let note = self.note.as_ref()?;
+        for (page_index, page) in note.pages.iter().enumerate().rev() {
+            for image in page.images.iter().rev() {
+                if self
+                    .video_button_rect(canvas, page_index, image)
+                    .is_some_and(|rect| rect.contains(screen))
+                {
+                    return Some((page_index, image.id));
+                }
+            }
+        }
+        None
+    }
+
+    fn paint_video_controls(&self, ui: &Ui, painter: &Painter, canvas: Rect) {
+        let Some(note) = self.note.as_ref() else {
+            return;
+        };
+        let hover = ui.input(|i| i.pointer.hover_pos());
+        for (page_index, page) in note.pages.iter().enumerate() {
+            for image in &page.images {
+                let Some(button) = self.video_button_rect(canvas, page_index, image) else {
+                    continue;
+                };
+                let playing = self
+                    .videos
+                    .get(&image.id)
+                    .is_some_and(crate::video::Player::is_playing);
+                let hot = hover.is_some_and(|p| button.contains(p));
+                let radius = button.width() * 0.5;
+                let glyph = self.look.ink;
+                let alpha = if hot { 1.0 } else { 0.78 };
+                paint_video_glyph(
+                    painter,
+                    button.center(),
+                    radius,
+                    playing,
+                    glyph.gamma_multiply(alpha),
+                );
+                if let Some(video) = self.videos.get(&image.id).filter(|v| v.progress() > 0.0) {
+                    let width = (button.width() * 2.4).clamp(36.0, 120.0);
+                    let bar = Rect::from_min_max(
+                        pos2(
+                            button.center().x - width * 0.5,
+                            button.center().y + radius + 6.0,
+                        ),
+                        pos2(
+                            button.center().x + width * 0.5,
+                            button.center().y + radius + 9.0,
+                        ),
+                    );
+                    painter.rect_filled(bar, 1.5, glyph.gamma_multiply(0.22));
+                    let filled = Rect::from_min_max(
+                        bar.min,
+                        pos2(bar.min.x + bar.width() * video.progress(), bar.max.y),
+                    );
+                    painter.rect_filled(filled, 1.5, glyph.gamma_multiply(alpha));
+                }
+            }
+        }
     }
 
     fn handle_drops_and_paste(&mut self, ctx: &Context) {
@@ -9116,7 +10082,15 @@ impl InkarchyApp {
                     map(im.min() + origin) + jiggle,
                     vec2(im.size[0] * cam.zoom, im.size[1] * cam.zoom_y()),
                 );
-                if let Some(tex) = self.texture_for(painter.ctx(), &note.id, &im.file) {
+                let tex = if crate::video::is_video_file(&im.file) {
+                    self.video_textures.get(&im.id).cloned().or_else(|| {
+                        let poster = crate::video::poster_name(&im.file);
+                        self.texture_for(painter.ctx(), &note.id, &poster)
+                    })
+                } else {
+                    self.texture_for(painter.ctx(), &note.id, &im.file)
+                };
+                if let Some(tex) = tex {
                     painter.image(
                         tex.id(),
                         r,
@@ -9409,6 +10383,10 @@ impl InkarchyApp {
         self.finish_live();
         self.finish_text_edit();
         self.clear_shape_hold();
+        for player in self.videos.values_mut() {
+            player.pause();
+        }
+        self.video_press = None;
         self.sel.clear();
         self.lasso.clear();
         self.reset_canvas_gesture();
@@ -10536,7 +11514,8 @@ impl InkarchyApp {
     }
 
     fn cursor_for_tool(&self, ui: &Ui, resp: &Response) {
-        if self.cursor_off {
+        let pen = self.tablet.snapshot();
+        if self.cursor_off && (pen.in_proximity || pen.down || !self.mouse_moved) {
             ui.ctx().set_cursor_icon(CursorIcon::None);
             return;
         }
@@ -10556,6 +11535,10 @@ impl InkarchyApp {
         }
         if let Some(p) = ui.input(|i| i.pointer.hover_pos()) {
             if self.sheet_tab_at(p, self.canvas_rect).is_some() {
+                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                return;
+            }
+            if !self.sheet_tabs_on && self.video_button_at(p, self.canvas_rect).is_some() {
                 ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
                 return;
             }
@@ -10738,10 +11721,11 @@ impl InkarchyApp {
                 ctx.send_viewport_cmd(ViewportCommand::CursorVisible(false));
                 self.cursor_off = true;
             }
-        } else if self.cursor_off {
+        } else if self.cursor_off && self.mouse_moved {
             ctx.send_viewport_cmd(ViewportCommand::CursorVisible(true));
             self.cursor_off = false;
         }
+        self.mouse_moved = false;
     }
 
     fn ingest_pdf_rasters(&mut self, ctx: &Context) {
@@ -10929,12 +11913,7 @@ impl InkarchyApp {
             return;
         };
         let media = MediaLoader {
-            root: self
-                .lib
-                .media_path(note.id, "")
-                .parent()
-                .unwrap_or(&self.lib.root)
-                .to_path_buf(),
+            root: self.lib.note_dir(note.id).join("media"),
         };
         let Some(path) = rfd::FileDialog::new()
             .set_file_name(format!("{}.png", slug(&note.title)))
@@ -11212,18 +12191,18 @@ fn nib_t(width: f32) -> f32 {
     u.sqrt()
 }
 
+fn nib_preset_t(i: usize, n: usize) -> f32 {
+    if n <= 1 {
+        0.5
+    } else {
+        1.0 - i as f32 / (n - 1) as f32
+    }
+}
+
 fn width_from_nib_t(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
-    NIB_MIN + (NIB_MAX - NIB_MIN) * t * t
-}
-
-fn nib_track_t(track: Rect, p: Pos2) -> f32 {
-    ((p.x - track.left()) / track.width().max(1.0)).clamp(0.0, 1.0)
-}
-
-fn nib_handle_pos(track: Rect, t: f32) -> Pos2 {
-    let t = t.clamp(0.0, 1.0);
-    pos2(track.left() + track.width() * t, track.center().y)
+    let width = NIB_MIN + (NIB_MAX - NIB_MIN) * t * t;
+    (width * 10.0).round() / 10.0
 }
 
 fn shade_rgb(c: Color32, k: f32) -> Color32 {
@@ -11250,101 +12229,38 @@ fn note_controls_bounds(ctx: &Context) -> Rect {
     )
 }
 
-/// Pack a floating accessory into the free space around the existing controls.
-fn accessory_rect(
-    bounds: Rect,
-    blockers: &[Rect],
-    wanted: Vec2,
-    minimum: Vec2,
-    edge: DockEdge,
-) -> Rect {
-    let anchor = blockers.last().copied().unwrap_or(bounds);
-    let preferred = match edge {
-        DockEdge::Left => pos2(anchor.right() + 8.0, anchor.center().y - wanted.y * 0.5),
-        DockEdge::Right => pos2(
-            anchor.left() - 8.0 - wanted.x,
-            anchor.center().y - wanted.y * 0.5,
-        ),
-        DockEdge::Top => pos2(anchor.center().x - wanted.x * 0.5, anchor.bottom() + 8.0),
-        DockEdge::Bottom => pos2(
-            anchor.center().x - wanted.x * 0.5,
-            anchor.top() - 8.0 - wanted.y,
-        ),
-    };
-    let mut spaces = vec![bounds];
-    for blocker in blockers {
-        let cut = blocker.expand(8.0);
-        spaces = spaces
-            .into_iter()
-            .flat_map(|r| {
-                if !r.intersects(cut) {
-                    return vec![r];
-                }
-                vec![
-                    Rect::from_min_max(r.min, pos2(r.right(), cut.top().min(r.bottom()))),
-                    Rect::from_min_max(pos2(r.left(), cut.bottom().max(r.top())), r.max),
-                    Rect::from_min_max(r.min, pos2(cut.left().min(r.right()), r.bottom())),
-                    Rect::from_min_max(pos2(cut.right().max(r.left()), r.top()), r.max),
-                ]
-                .into_iter()
-                .filter(|r| r.width() >= 44.0 && r.height() >= 44.0)
-                .collect()
-            })
-            .collect();
+/// Layout room for the floating case. A top dock may sit under the transparent
+/// header so it rests against the window edge like the other sides.
+fn dock_bounds(ctx: &Context, edge: DockEdge) -> Rect {
+    let screen = ctx.screen_rect();
+    let mut bounds = note_controls_bounds(ctx);
+    if matches!(edge, DockEdge::Top) {
+        bounds.min.y = (screen.top() + 4.0).min(bounds.bottom() - 1.0);
     }
-    spaces
-        .into_iter()
-        .filter(|space| space.width() >= minimum.x && space.height() >= minimum.y)
-        .map(|space| {
-            let size = wanted.min(space.size());
-            let pos = preferred.clamp(space.min, space.max - size);
-            let rect = Rect::from_min_size(pos, size);
-            let fit = (size.x / wanted.x).min(size.y / wanted.y);
-            let score = fit * 1_000_000.0 - pos.distance(preferred);
-            (rect, score)
-        })
-        .max_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|r| r.0)
-        .unwrap_or_else(|| Rect::from_min_size(bounds.min, wanted.min(bounds.size())))
+    bounds
 }
 
-fn sticky_pad_place(dock: Rect, edge: DockEdge, bounds: Rect) -> Rect {
-    let size = vec2(48.0, 48.0);
-    let gap = 8.0;
-    let candidates = match edge {
-        DockEdge::Bottom => [
-            pos2(dock.max.x + gap, dock.center().y - size.y * 0.5),
-            pos2(dock.max.x - size.x, dock.min.y - gap - size.y),
-            pos2(dock.min.x - gap - size.x, dock.center().y - size.y * 0.5),
-        ],
-        DockEdge::Top => [
-            pos2(dock.max.x + gap, dock.center().y - size.y * 0.5),
-            pos2(dock.max.x - size.x, dock.max.y + gap),
-            pos2(dock.min.x - gap - size.x, dock.center().y - size.y * 0.5),
-        ],
-        DockEdge::Left => [
-            pos2(dock.center().x - size.x * 0.5, dock.max.y + gap),
-            pos2(dock.max.x + gap, dock.max.y - size.y),
-            pos2(dock.center().x - size.x * 0.5, dock.min.y - gap - size.y),
-        ],
-        DockEdge::Right => [
-            pos2(dock.center().x - size.x * 0.5, dock.max.y + gap),
-            pos2(dock.min.x - gap - size.x, dock.max.y - size.y),
-            pos2(dock.center().x - size.x * 0.5, dock.min.y - gap - size.y),
-        ],
+/// Color strip twin: same size as the toolbar, flush on its free side.
+fn dock_twin_place(dock: Rect, wanted: Vec2, edge: DockEdge, bounds: Rect) -> Rect {
+    let size = vec2(
+        wanted.x.min(bounds.width()).max(44.0),
+        wanted.y.min(bounds.height()).max(44.0),
+    );
+    // A small paper-colored seam makes the twin feel attached, not fused.
+    let gap = 9.0;
+    let min = match edge {
+        DockEdge::Bottom => pos2(dock.left(), dock.top() - gap - size.y),
+        DockEdge::Top => pos2(dock.left(), dock.bottom() + gap),
+        DockEdge::Left => pos2(dock.right() + gap, dock.top()),
+        DockEdge::Right => pos2(dock.left() - gap - size.x, dock.top()),
     };
-    let clamp = |p: Pos2| {
-        pos2(
-            p.x.clamp(bounds.min.x, (bounds.max.x - size.x).max(bounds.min.x)),
-            p.y.clamp(bounds.min.y, (bounds.max.y - size.y).max(bounds.min.y)),
-        )
-    };
-    let keepout = dock.expand(4.0);
-    candidates
-        .into_iter()
-        .map(|p| Rect::from_min_size(clamp(p), size))
-        .find(|r| bounds.contains_rect(*r) && !r.intersects(keepout))
-        .unwrap_or_else(|| Rect::from_min_size(clamp(candidates[0]), size))
+    let min = pos2(
+        min.x
+            .clamp(bounds.left(), (bounds.right() - size.x).max(bounds.left())),
+        min.y
+            .clamp(bounds.top(), (bounds.bottom() - size.y).max(bounds.top())),
+    );
+    Rect::from_min_size(min, size)
 }
 
 /// A note with a soft drop, a lit top edge, and a folded corner.
@@ -11759,6 +12675,43 @@ fn paint_grid_icon_sized(
     }
 }
 
+/// The wrapped layout for a chosen number of pages per row.
+fn flow_layout(per_row: u8) -> PageArrangement {
+    match per_row {
+        2 => PageArrangement::TwoColumns,
+        3 => PageArrangement::ThreeColumns,
+        4 => PageArrangement::FourColumns,
+        5 => PageArrangement::FiveColumns,
+        6 => PageArrangement::SixColumns,
+        _ => PageArrangement::Column,
+    }
+}
+
+/// Which cell of the per-row stepper a pill region serves.
+#[derive(Clone, Copy, PartialEq)]
+enum Choice {
+    Less,
+    Count,
+    More,
+}
+
+/// A closing cross for the pages-edit tray.
+fn paint_close_icon(p: &Painter, c: Pos2, fg: Color32) {
+    let arm = Stroke::new(1.9, fg);
+    p.line_segment([c - vec2(6.0, 6.0), c + vec2(6.0, 6.0)], arm);
+    p.line_segment([c + vec2(-6.0, 6.0), c + vec2(6.0, -6.0)], arm);
+}
+
+/// Stepper glyphs for pages per row.
+fn paint_minus_icon(p: &Painter, c: Pos2, fg: Color32) {
+    p.hline((c.x - 6.5)..=(c.x + 6.5), c.y, Stroke::new(2.0, fg));
+}
+
+fn paint_plus_icon(p: &Painter, c: Pos2, fg: Color32) {
+    paint_minus_icon(p, c, fg);
+    p.vline(c.x, (c.y - 6.5)..=(c.y + 6.5), Stroke::new(2.0, fg));
+}
+
 /// A miniature portrait sheet: light fill, ink edge, one quiet rule.
 fn paint_sheet(p: &Painter, rect: Rect, fill: Color32, fg: Color32) {
     p.rect_filled(rect, 1.6, fill);
@@ -11953,6 +12906,27 @@ fn paint_curved_arrow(p: &egui::Painter, c: Pos2, fg: Color32, flip: f32) {
     }
 }
 
+/// Bin for removing a saved ink, drawn in the same wire as the other chrome.
+fn paint_trash_icon(p: &egui::Painter, c: Pos2, fg: Color32) {
+    let wire = Stroke::new(2.0, fg);
+    p.line_segment([c + vec2(-9.0, -7.0), c + vec2(9.0, -7.0)], wire);
+    p.line_segment([c + vec2(-3.5, -7.0), c + vec2(-2.5, -10.0)], wire);
+    p.line_segment([c + vec2(3.5, -7.0), c + vec2(2.5, -10.0)], wire);
+    p.line_segment([c + vec2(-2.5, -10.0), c + vec2(2.5, -10.0)], wire);
+    p.add(Shape::line(
+        vec![
+            c + vec2(-6.5, -7.0),
+            c + vec2(-5.5, 8.0),
+            c + vec2(5.5, 8.0),
+            c + vec2(6.5, -7.0),
+        ],
+        wire,
+    ));
+    for x in [-2.5, 0.0, 2.5] {
+        p.line_segment([c + vec2(x, -3.5), c + vec2(x, 4.5)], Stroke::new(1.4, fg));
+    }
+}
+
 fn paint_undo(p: &egui::Painter, c: Pos2, fg: Color32) {
     paint_curved_arrow(p, c, fg, 1.0);
 }
@@ -11995,6 +12969,34 @@ fn paint_image_icon(p: &egui::Painter, c: Pos2, fg: Color32) {
         ],
         wire,
     ));
+}
+
+/// Play triangle or pause bars inside the small video button.
+fn paint_video_glyph(p: &Painter, c: Pos2, radius: f32, playing: bool, fg: Color32) {
+    let r = radius * 0.42;
+    if playing {
+        let bar = vec2(r * 0.42, r * 1.7);
+        p.rect_filled(
+            Rect::from_center_size(c + vec2(-r * 0.42, 0.0), bar),
+            1.0,
+            fg,
+        );
+        p.rect_filled(
+            Rect::from_center_size(c + vec2(r * 0.42, 0.0), bar),
+            1.0,
+            fg,
+        );
+    } else {
+        p.add(Shape::convex_polygon(
+            vec![
+                c + vec2(-r * 0.45, -r),
+                c + vec2(-r * 0.45, r),
+                c + vec2(r * 0.72, 0.0),
+            ],
+            fg,
+            Stroke::NONE,
+        ));
+    }
 }
 
 /// Open hand for selecting, moving and resizing stationery on the page.

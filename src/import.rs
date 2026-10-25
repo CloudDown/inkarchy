@@ -27,6 +27,7 @@ pub enum FileKind {
     Pdf,
     RasterImage,
     Svg,
+    Video,
     Text,
     Unsupported,
 }
@@ -36,6 +37,7 @@ pub fn classify(path: &Path) -> FileKind {
         "pdf" => FileKind::Pdf,
         "png" | "jpg" | "jpeg" | "webp" => FileKind::RasterImage,
         "svg" => FileKind::Svg,
+        "mp4" | "m4v" | "mov" | "webm" | "mkv" | "avi" | "ogv" => FileKind::Video,
         "txt" | "md" | "markdown" => FileKind::Text,
         _ => sniff(path),
     }
@@ -43,6 +45,41 @@ pub fn classify(path: &Path) -> FileKind {
 
 pub fn is_placeable_image(path: &Path) -> bool {
     matches!(classify(path), FileKind::RasterImage | FileKind::Svg)
+}
+
+pub fn is_placeable_video(path: &Path) -> bool {
+    matches!(classify(path), FileKind::Video)
+}
+
+/// Images and videos both land directly on the open page.
+pub fn is_placeable_media(path: &Path) -> bool {
+    is_placeable_image(path) || is_placeable_video(path)
+}
+
+/// What the media tool should place on the page.
+pub enum PlacedMedia {
+    Image(Vec<u8>),
+    Video {
+        ext: String,
+        meta: crate::video::Meta,
+    },
+}
+
+/// Decode images now; videos are only probed so a large file is copied, not
+/// loaded into the event loop.
+pub fn load_placed_media(path: &Path) -> Result<PlacedMedia, ImportError> {
+    if is_placeable_video(path) {
+        let ext = crate::video::extension(path)
+            .ok_or_else(|| ImportError::Message(format!("Can't place {}", display_name(path))))?;
+        let meta = crate::video::probe(path).ok_or_else(|| {
+            ImportError::Message(format!(
+                "Could not read {} (ffmpeg and ffprobe are needed for videos)",
+                display_name(path)
+            ))
+        })?;
+        return Ok(PlacedMedia::Video { ext, meta });
+    }
+    load_placed_image(path).map(PlacedMedia::Image)
 }
 
 /// PNG bytes for an image placed on the current page.
@@ -72,6 +109,10 @@ pub fn import_new_note(lib: &mut Library, path: &Path) -> Result<Note, ImportErr
     match classify(path) {
         FileKind::Pdf => import_pdf(lib, path),
         FileKind::RasterImage | FileKind::Svg => import_image_note(lib, path),
+        FileKind::Video => Err(ImportError::Message(format!(
+            "Place {} on an open page",
+            display_name(path)
+        ))),
         FileKind::Text => import_text(lib, path),
         FileKind::Unsupported => Err(ImportError::Message(format!(
             "Can't open {}",
@@ -239,6 +280,11 @@ fn sniff(path: &Path) -> FileKind {
         || (head.len() >= 12 && &head[0..4] == b"RIFF" && &head[8..12] == b"WEBP")
     {
         FileKind::RasterImage
+    } else if (head.len() >= 12 && &head[4..8] == b"ftyp")
+        || head.starts_with(&[0x1a, 0x45, 0xdf, 0xa3])
+        || (head.len() >= 12 && &head[0..4] == b"RIFF" && &head[8..12] == b"AVI ")
+    {
+        FileKind::Video
     } else if head.starts_with(b"<svg") || head.starts_with(b"<?xml") {
         FileKind::Svg
     } else {
@@ -391,6 +437,8 @@ mod tests {
         assert_eq!(classify(&pdf), FileKind::Pdf);
         assert_eq!(classify(Path::new("a.WEBP")), FileKind::RasterImage);
         assert_eq!(classify(Path::new("a.svg")), FileKind::Svg);
+        assert_eq!(classify(Path::new("a.MP4")), FileKind::Video);
+        assert_eq!(classify(Path::new("a.mkv")), FileKind::Video);
         assert_eq!(classify(Path::new("a.md")), FileKind::Text);
         assert_eq!(classify(Path::new("a.zip")), FileKind::Unsupported);
         let _ = fs::remove_dir_all(&dir);

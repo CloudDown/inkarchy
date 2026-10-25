@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- The media tool also places videos. A small on-video button plays or pauses; the still poster is exported with the note, and videos move and resize like images.
+
 ## 0.5.0 — 2026-10-20
 
 ### Added

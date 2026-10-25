@@ -16,6 +16,8 @@ enum CanvasGesture {
     },
     Text,
     Tool,
+    /// Press started on a video play button; it owns the finger until lift.
+    Video,
 }
 
 pub(super) struct TouchGesture {
@@ -143,6 +145,7 @@ impl InkarchyApp {
             self.drag_last = None;
             self.selection_resize = None;
             self.lasso.clear();
+            self.video_press = None;
             if !self.live_from_pen {
                 self.live = None;
                 self.clear_shape_hold();
@@ -154,6 +157,7 @@ impl InkarchyApp {
             self.canvas_touch = None;
             self.drag_last = None;
             self.selection_resize = None;
+            self.video_press = None;
             return true;
         }
 
@@ -167,6 +171,9 @@ impl InkarchyApp {
         }
         for (device, id, phase, screen) in events {
             if phase == TouchPhase::Start {
+                // This contact is a touch rather than a mouse button release.
+                // Do not leave a stale mouse press owning the next gesture.
+                self.video_press = None;
                 // A new finger replaces a gesture whose End never arrived.
                 if self
                     .canvas_touch
@@ -202,8 +209,15 @@ impl InkarchyApp {
                     continue; // TextEdit owns caret placement and text selection.
                 }
                 let hit = self.hit_object(paper);
+                let video = if self.sheet_tabs_on {
+                    None
+                } else {
+                    self.video_button_at(screen, canvas)
+                };
                 let mode = if self.sheet_tabs_on {
                     CanvasGesture::Pan(None)
+                } else if video.is_some() {
+                    CanvasGesture::Video
                 } else if self.tool.is_eraser()
                     || (self.lib.index.finger_draw && self.tool.is_ink())
                 {
@@ -245,6 +259,15 @@ impl InkarchyApp {
                     moved: false,
                     snapshot: false,
                 });
+                if let Some((page, id)) = video {
+                    self.video_press = Some(id);
+                    self.sel = vec![Sel {
+                        page,
+                        id,
+                        kind: SelKind::Image,
+                    }];
+                    self.toggle_video(id, ui.ctx());
+                }
             }
             let Some(mut gesture) = self.canvas_touch.take() else {
                 continue;
@@ -257,6 +280,7 @@ impl InkarchyApp {
                 self.drag_last = None;
                 self.selection_resize = None;
                 self.lasso.clear();
+                self.video_press = None;
                 if !self.live_from_pen {
                     self.live = None;
                     self.clear_shape_hold();
@@ -315,12 +339,16 @@ impl InkarchyApp {
                         self.fitted_cell = None;
                     }
                     CanvasGesture::Tool => {}
+                    CanvasGesture::Video => {}
                 }
             }
             gesture.last = screen;
             if phase == TouchPhase::End {
                 self.drag_last = None;
                 self.selection_resize = None;
+                if matches!(gesture.mode, CanvasGesture::Video) {
+                    self.video_press = None;
+                }
                 if !gesture.moved {
                     match gesture.mode {
                         CanvasGesture::Text => {

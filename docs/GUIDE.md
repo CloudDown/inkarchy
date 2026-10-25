@@ -116,6 +116,8 @@ Each PDF page becomes a page. The rendered page stays put as the background, and
 
 PNG, JPEG, WEBP, and SVG become a page background when you open them from the shelf or the command line. If a notebook is already open, the same image is placed on the current page. A short `.txt` or `.md` file (up to 64 KiB of text) becomes one text block.
 
+The media tool (`i`) places images and videos on the open page. Videos use the system `ffmpeg` and `ffprobe` (install the `ffmpeg` package); they show a still poster with a small play button. Click the button to play or pause (playback is silent), and drag the video’s corners with the Hand tool to resize it like an image. Dropping a video on an open page places it too.
+
 Open is the sheet button at the top right of the shelf, and a row in the notebook menu. `Ctrl+O` opens the same dialog.
 
 PDFs appear progressively: a quick preview is replaced by a sharp render matched to zoom and display density, up to 432 dpi within a per-page pixel budget. Existing pixels stay visible during zoom; detail is refreshed after the gesture settles. Rendering, cache decoding and pixel preparation run in the background, with visible pages prioritized and obsolete queued pages discarded. A texture LRU and a lossless disk cache speed up revisiting pages.
@@ -158,13 +160,13 @@ windowrule = float, class:^(com\.clouddown\.inkarchy)$
 
 The lectern follows the stylus: in range, the hand pans and the nib writes. Put it down, the mouse writes again.
 
-Choose the Hand tool (`v`) to select, move, and resize page objects with the mouse or one finger. Its corner handles resize the selection. The Lasso tool only selects a group by drawing around it. `ctrl+d` duplicates the selection and `delete` removes it. Images switch to the Hand tool and are selected as soon as they are inserted. In Pages mode, tap an image’s red `−` mark to remove it.
+Choose the Hand tool (`v`) to select, move, and resize page objects with the mouse or one finger. Its corner handles resize the selection. The Lasso tool only selects a group by drawing around it. `ctrl+d` duplicates the selection and `delete` removes it. Images and videos switch to the Hand tool and are selected as soon as they are inserted. In Pages mode, tap an object’s red `−` mark to remove it.
 
 A finger on empty paper pans the canvas; two fingers pan even when something is selected. On the trackpad, two-finger drag scrolls and two-finger pinch zooms from finger distance (one finger may stay still while the other moves in or out). If the pad ignores a resting finger, use ctrl + two-finger scroll to zoom. Three-finger swipe is left to the desktop (workspace switching). On the screen, pinch still zooms. Choose **Draw with finger** in the notebook menu to use the pens by touch. The erasers and lasso work with a finger directly. Double-tap text to type.
 
-The toolbar and size controls use 48 px touch targets; compact 36 px color swatches show more choices in the column. Tap the active pen again, or hold a pen or eraser, to adjust its size with four presets and a precise slider. Tap the ink drop for the color column; **+** replaces the swatches with a rainbow slider and one continuous white–color–black slider. The checkmark saves the color; the back arrow returns to the swatches.
+The toolbar and size controls use 48 px touch targets; compact 36 px color swatches show more choices in the column. Tap the active pen again, or hold a pen or eraser, to adjust its size with four presets and a precise slider. Tap the ink drop for the color column; **+** replaces the swatches with a rainbow slider and one continuous white–color–black slider. The checkmark saves the color; the back arrow returns to the swatches. Hold a saved color, then tap the bin at the foot of the column, to remove it; theme colors stay.
 
-Swipe along the toolbar to reach tools on a small screen. Pull a tool out across the toolbar to open its storage tray, then release it there to hide it. Tap the storage button to find hidden tools; tap a stored tool or drag it back to restore it. Drag the dotted grip to move the toolbar. Custom colors and stored tools are remembered across restarts. The area eraser uses the size setting; its on-screen brush stays steady, so zooming out covers more of the page.
+Swipe along the toolbar to reach tools on a small screen. Drag one tool onto another to swap their places. Pull a tool out across the toolbar to open its storage tray, then release it there to hide it. Tap the storage button to find hidden tools; tap a stored tool or drag it back to restore it. The tray always shows nine slots, with no header, and closes only when you click outside it. Drag the dotted grip to move the toolbar. Custom colors, tool order, and stored tools are remembered across restarts. The area eraser uses the size setting; its on-screen brush stays steady, so zooming out covers more of the page.
 
 | | Mouse | Stylus in range |
 |---|---|---|
@@ -178,7 +180,7 @@ Swipe along the toolbar to reach tools on a small screen. Pull a tool out across
 |---|---|
 | `p` `b` `c` `h` | felt-tip, fountain pen, pencil, highlighter |
 | `e` / `shift+e` | stroke (whole stroke) / area (under cursor) |
-| `l` `t` `i` | lasso, text, image |
+| `l` `t` `i` | lasso, text, media |
 | `[` `]` `1-9` | thickness, ink |
 | `m` | cycle paper (blank, lined, grid, dotted, graph, Cornell) |
 | corners / `0` / click on % | fit to screen |

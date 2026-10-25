@@ -58,7 +58,7 @@ impl Tool {
             Tool::Hand => "Hand",
             Tool::Lasso => "Lasso",
             Tool::Text => "Text",
-            Tool::Image => "Image",
+            Tool::Image => "Media",
         }
     }
 }
