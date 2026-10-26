@@ -4,6 +4,91 @@ mod gestures;
 mod pages;
 
 #[test]
+fn pen_wheel_hit_uses_same_clockwise_sectors_as_spine_wheel() {
+    let center = pos2(250.0, 250.0);
+    assert_eq!(pen_wheel_hit(center, center, 1.0, 8), None);
+    assert_eq!(
+        pen_wheel_hit(center, center + vec2(0.0, -100.0), 1.0, 8),
+        Some(0)
+    );
+    assert_eq!(
+        pen_wheel_hit(center, center + vec2(100.0, 0.0), 1.0, 8),
+        Some(2)
+    );
+    assert_eq!(
+        pen_wheel_hit(center, center + vec2(0.0, -50.0), 1.0, 8),
+        None
+    );
+    assert_eq!(
+        pen_wheel_hit(center, center + vec2(0.0, -50.0), 0.5, 8),
+        Some(0)
+    );
+}
+
+#[test]
+fn pen_wheel_selects_toolbar_ink_and_nib_without_drawing() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Pen wheel");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let center = pos2(550.0, 440.0);
+    let swatches = app.ink_colors();
+    let color_pos = slice_mid(center, 7, swatches.len(), 100.0);
+    app.pen_wheel = Some((center, PenWheelKind::Colors));
+    app.tablet.set_test_pen(Some(PenSnapshot {
+        in_proximity: true,
+        pos: Some(color_pos),
+        down: true,
+        pressed: true,
+        ..Default::default()
+    }));
+    frames.step(app, vec![]);
+    app.tablet.set_test_pen(Some(PenSnapshot {
+        in_proximity: true,
+        pos: Some(color_pos),
+        down: true,
+        ..Default::default()
+    }));
+    frames.step(app, vec![]);
+    frames.snapshot("wheel-ink-colors");
+    assert!(
+        app.live.is_none(),
+        "selecting a sector must not start an ink stroke"
+    );
+    app.tablet.set_test_pen(Some(PenSnapshot {
+        in_proximity: true,
+        pos: Some(color_pos),
+        released: true,
+        ..Default::default()
+    }));
+    frames.step(app, vec![]);
+    assert_eq!(app.ink, swatches[7]);
+    assert!(app.pen_wheel.is_none());
+
+    let size_pos = slice_mid(center, 6, 8, 100.0);
+    app.pen_wheel = Some((center, PenWheelKind::Sizes));
+    app.tablet.set_test_pen(Some(PenSnapshot {
+        in_proximity: true,
+        pos: Some(size_pos),
+        down: true,
+        ..Default::default()
+    }));
+    frames.step(app, vec![]);
+    frames.snapshot("wheel-nib-sizes");
+    app.tablet.set_test_pen(Some(PenSnapshot {
+        in_proximity: true,
+        pos: Some(size_pos),
+        released: true,
+        ..Default::default()
+    }));
+    frames.step(app, vec![]);
+    assert!((app.width - width_from_nib_t(nib_preset_t(6, 8))).abs() < 0.01);
+    assert!(app.live.is_none());
+}
+
+#[test]
 fn pen_hides_cursor_until_real_mouse_motion_after_proximity_ends() {
     let mut fixture = Fixture::new();
     let app = &mut fixture.app;
@@ -531,7 +616,7 @@ fn many_pdf_pages_do_not_block_the_first_frames() {
 }
 
 #[test]
-fn pdf_page_chip_steps_once_and_accelerates_when_held() {
+fn pdf_page_chip_shows_a_preview_above_the_finger() {
     let mut fixture = Fixture::new();
     let mut note = Note::blank("Pages", 0);
     note.sheet_join = SheetJoin::Separate;
@@ -556,53 +641,54 @@ fn pdf_page_chip_steps_once_and_accelerates_when_held() {
         .ctx
         .data(|d| d.get_temp::<Rect>(Id::new("pdf-page-number-rect")));
     let chip = chip.expect("PDF page chip is visible");
-    frames.drag(app, chip.center(), chip.center());
-    frames.settle(app);
-    frames.snapshot("pdf-page-picker");
-    let next = frames.text_center("+");
-    frames.drag(app, next, next);
-    frames.settle(app);
-    assert_eq!(app.pdf_page_target, 2);
-    assert_eq!(app.page_in_view(app.canvas_rect), 1);
-    frames.step(app, vec![Event::PointerMoved(next)]);
-    frames.step(
-        app,
-        vec![Event::PointerButton {
-            pos: next,
-            button: PointerButton::Primary,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-        }],
-    );
-    assert_eq!(app.pdf_page_target, 3, "a page turns when the finger lands");
-    for _ in 0..150 {
+    let start = chip.center();
+    let end = start + vec2(48.0, 0.0);
+    frames.touch(app, TouchPhase::Start, start);
+    for _ in 0..90 {
         frames.step(app, vec![]);
     }
-    assert!(
-        app.pdf_page_target >= 12,
-        "holding accelerates the page turns"
-    );
-    let target = app.pdf_page_target;
-    frames.step(
-        app,
-        vec![Event::PointerButton {
-            pos: next,
-            button: PointerButton::Primary,
-            pressed: false,
-            modifiers: Modifiers::NONE,
-        }],
-    );
+    assert!(!app.sheet_tabs_on, "holding the counter must not edit pages");
+    frames.touch(app, TouchPhase::Move, end);
+    frames.step(app, vec![]);
+    let preview = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("page-scrub-preview-rect")))
+        .expect("preview appears during touch scrubbing");
+    assert!(preview.bottom() < end.y - 32.0);
+    assert_eq!(app.page_in_view(app.canvas_rect), 2);
+    assert!(!app.pdf_page_picker_open);
+    frames.snapshot("pdf-page-picker");
+    frames.touch(app, TouchPhase::End, end);
     frames.settle(app);
-    assert_eq!(
-        app.pdf_page_target, target,
-        "release does not turn an extra page"
-    );
-    assert_eq!(app.page_in_view(app.canvas_rect), target - 1);
-    assert_eq!(
-        app.page_cells()[1],
-        (0, 1),
-        "holding the stepper must not move pages"
-    );
+    assert!(frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("page-scrub-preview-rect"))).is_none());
+    assert_eq!(app.page_in_view(app.canvas_rect), 2);
+}
+
+#[test]
+fn plain_notebook_page_counter_scrubs_with_a_finger() {
+    let mut fixture = Fixture::new();
+    let mut note = Note::blank("Finger page navigation", 0);
+    note.sheet_join = SheetJoin::Separate;
+    note.pages = (0..8).map(|row| crate::document::Page::at(0, row)).collect();
+    let id = note.id;
+    fixture.app.lib.insert_new(&note).unwrap();
+    fixture.app.open_note(id);
+    let app = &mut fixture.app;
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let chip = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("pdf-page-number-rect")))
+        .expect("plain notebooks also show the page counter");
+    let start = chip.center();
+    frames.touch(app, TouchPhase::Start, start);
+    frames.touch(app, TouchPhase::Move, start + vec2(48.0, 0.0));
+    frames.touch(app, TouchPhase::End, start + vec2(48.0, 0.0));
+    frames.settle(app);
+    assert_eq!(app.page_in_view(app.canvas_rect), 2);
+    assert!(!app.pdf_page_picker_open, "scrubbing must not open the popup");
+    frames.touch(app, TouchPhase::Start, start);
+    frames.touch(app, TouchPhase::Move, start + vec2(240.0, 0.0));
+    frames.touch(app, TouchPhase::End, start + vec2(240.0, 0.0));
+    frames.settle(app);
+    assert_eq!(app.page_in_view(app.canvas_rect), 7, "clamp at the last page");
+    assert_eq!(app.page_cells(), (0..8).map(|row| (0, row)).collect::<Vec<_>>());
 }
 
 #[test]
@@ -2341,7 +2427,10 @@ fn pages_edit_replaces_the_header_with_a_canvas_tray() {
                 frames.touch(app, TouchPhase::End, tab);
                 frames.settle(app);
             }
-            frames.snapshot(artifact);
+            frames.snapshot(&format!(
+                "{artifact}-{}",
+                if material { "paper" } else { "arrange" }
+            ));
             let tray = frames
                 .ctx
                 .data(|d| d.get_temp::<Rect>(Id::new("pages-strip-rect")))
@@ -3935,7 +4024,7 @@ fn pen_long_press_on_page_enters_pages_mode() {
         released,
         eraser: false,
         lasso_btn: false,
-        air_toggle: false,
+        air_clicks: 0,
         pressure: Some(0.5),
         in_proximity: true,
         pinch_zoom: 1.0,

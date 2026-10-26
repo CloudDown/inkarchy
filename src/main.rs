@@ -53,7 +53,8 @@ Gestures (inside a notebook):
   stylus in range: stylus writes · finger pans · two-finger tap = undo
   trackpad: pinch or two fingers (vertical) = zoom
   screen pinch / ctrl+scroll zoom
-  stylus button = last eraser (hold)   air-click = pen ↔ eraser
+  stylus button = last eraser (hold)   air double-click = ink wheel
+  air triple-click = nib size wheel
   2nd button = lasso (hold)
   drag the pencil-case handle → top / bottom / sides
   hold the pen still ~1s ≈ line, arrow, triangle, square, diamond, ellipse, circle

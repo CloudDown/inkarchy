@@ -84,18 +84,23 @@ impl InkarchyApp {
     }
 
     pub(super) fn paint_layout_instrument(&self, p: &Painter, rect: Rect) {
+        // Same leather case language as the floating tool dock: notebook cover
+        // pigment, soft shadow, and a quiet edge sheen.
+        let radius = 22.0;
+        let case = self.note_case_color();
         p.rect_filled(
-            rect.translate(vec2(1.0, 3.0)),
-            10.0,
-            self.look.shadow.gamma_multiply(0.28),
+            rect.translate(vec2(0.0, 3.0)),
+            radius,
+            self.look.shadow.gamma_multiply(0.55),
         );
-        p.rect_filled(rect, 10.0, self.look.paper);
+        p.rect_filled(rect, radius, case);
         p.rect_stroke(
             rect.shrink(0.5),
-            10.0,
-            Stroke::new(1.0, self.look.ink.gamma_multiply(0.18)),
+            radius,
+            Stroke::new(1.0, mix_col(case, self.look.paper, 0.22)),
             StrokeKind::Inside,
         );
+        paint_case_sheen(p, rect, self.look.paper, self.look.shadow);
     }
 
     pub(super) fn paint_stock_leaf(

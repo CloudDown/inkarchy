@@ -46,6 +46,7 @@ fn pinch_frame_zoom(armed: &mut bool, last_scale: &mut f32, scale: f32, arm: f32
 }
 
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use egui::{Pos2, Vec2};
 use raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
@@ -85,8 +86,8 @@ pub struct PenSnapshot {
     pub eraser: bool,
     /// Button 2 held: lasso for the length of the gesture.
     pub lasso_btn: bool,
-    /// Button 1 click in the air (in proximity, tip not down).
-    pub air_toggle: bool,
+    /// Second or third successive button-1 click in the air.
+    pub air_clicks: u8,
     pub pressure: Option<f32>,
     pub in_proximity: bool,
     /// Trackpad two-finger pinch zoom factor (1.0 = none), relative to this frame.
@@ -105,7 +106,7 @@ impl Default for PenSnapshot {
             released: false,
             eraser: false,
             lasso_btn: false,
-            air_toggle: false,
+            air_clicks: 0,
             pressure: None,
             in_proximity: false,
             pinch_zoom: 1.0,
@@ -149,7 +150,9 @@ struct TabletState {
     stylus2_btn: bool,
     /// Down seen while button 1 was held, so this is a tip press and not an air click.
     stylus_btn_saw_down: bool,
-    air_toggle: bool,
+    air_clicks: u8,
+    air_click_count: u8,
+    last_air_click: Option<Instant>,
     pressure: Option<f32>,
     gestures: Option<ZwpPointerGesturesV1>,
     #[allow(dead_code)]
@@ -162,6 +165,27 @@ struct TabletState {
     pinch_zoom: f32,
     pinch_pan: Vec2,
     pinching: bool,
+}
+
+impl TabletState {
+    fn register_air_click(&mut self, now: Instant) {
+        self.air_click_count = if self
+            .last_air_click
+            .is_some_and(|last| now.duration_since(last) <= Duration::from_millis(400))
+        {
+            self.air_click_count + 1
+        } else {
+            1
+        };
+        self.last_air_click = Some(now);
+        if self.air_click_count >= 2 {
+            self.air_clicks = self.air_click_count;
+        }
+        if self.air_click_count == 3 {
+            self.air_click_count = 0;
+            self.last_air_click = None;
+        }
+    }
 }
 
 impl TabletBridge {
@@ -205,7 +229,7 @@ impl TabletBridge {
         };
         inner.state.pressed = false;
         inner.state.released = false;
-        inner.state.air_toggle = false;
+        inner.state.air_clicks = 0;
         inner.state.samples.clear();
         inner.state.pinch_zoom = 1.0;
         inner.state.pinch_pan = Vec2::ZERO;
@@ -235,7 +259,7 @@ impl TabletBridge {
             released: s.released,
             eraser: s.eraser_tool || s.stylus_btn,
             lasso_btn: s.stylus2_btn,
-            air_toggle: s.air_toggle,
+            air_clicks: s.air_clicks,
             pressure: s.pressure,
             in_proximity: s.in_proximity,
             pinch_zoom: s.pinch_zoom,
@@ -504,6 +528,8 @@ impl Dispatch<ZwpTabletToolV2, ()> for TabletState {
                 state.stylus_btn = false;
                 state.stylus2_btn = false;
                 state.stylus_btn_saw_down = false;
+                state.air_click_count = 0;
+                state.last_air_click = None;
                 state.pressure = None;
             }
             zwp_tablet_tool_v2::Event::Down { .. } => {
@@ -512,6 +538,8 @@ impl Dispatch<ZwpTabletToolV2, ()> for TabletState {
                 if state.stylus_btn {
                     state.stylus_btn_saw_down = true;
                 }
+                state.air_click_count = 0;
+                state.last_air_click = None;
             }
             zwp_tablet_tool_v2::Event::Up => {
                 state.down = false;
@@ -545,7 +573,7 @@ impl Dispatch<ZwpTabletToolV2, ()> for TabletState {
                             && state.in_proximity
                             && !state.eraser_tool
                         {
-                            state.air_toggle = true;
+                            state.register_air_click(Instant::now());
                         }
                         state.stylus_btn = false;
                         state.stylus_btn_saw_down = false;
@@ -560,6 +588,8 @@ impl Dispatch<ZwpTabletToolV2, ()> for TabletState {
                     state.released = true;
                 }
                 state.in_proximity = false;
+                state.air_click_count = 0;
+                state.last_air_click = None;
                 tool.destroy();
             }
             _ => {}
@@ -629,9 +659,31 @@ noop_dispatch!(ZwpTabletPadDialV2, zwp_tablet_pad_dial_v2::Event);
 #[cfg(test)]
 mod tests {
     use super::{
-        pinch_frame_zoom, PINCH_ZOOM_ARM, PINCH_ZOOM_FRAME_MAX, PINCH_ZOOM_FRAME_MIN,
+        pinch_frame_zoom, TabletState, PINCH_ZOOM_ARM, PINCH_ZOOM_FRAME_MAX, PINCH_ZOOM_FRAME_MIN,
         PINCH_ZOOM_GAIN,
     };
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn air_clicks_only_signal_double_and_triple_within_the_window() {
+        let mut state = TabletState::default();
+        let start = Instant::now();
+        state.register_air_click(start);
+        assert_eq!(state.air_clicks, 0, "one release never latches the eraser");
+        state.register_air_click(start + Duration::from_millis(200));
+        assert_eq!(state.air_clicks, 2);
+        state.air_clicks = 0; // next Wayland pump
+        state.register_air_click(start + Duration::from_millis(380));
+        assert_eq!(state.air_clicks, 3);
+        state.air_clicks = 0;
+        state.register_air_click(start + Duration::from_millis(500));
+        assert_eq!(state.air_clicks, 0);
+        state.register_air_click(start + Duration::from_millis(1000));
+        assert_eq!(
+            state.air_clicks, 0,
+            "a slow second click starts a new sequence"
+        );
+    }
 
     #[test]
     fn pinch_zoom_ignores_scale_inside_deadzone() {

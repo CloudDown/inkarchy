@@ -181,7 +181,7 @@ Swipe along the toolbar to reach tools on a small screen. Drag one tool onto ano
 |---|---|---|
 | Writes | mouse | stylus |
 | Pan | space + drag, middle-click, two-finger trackpad | finger, two-finger drag |
-| Eraser | right-click hold (last kind), `e` / `shift+e` | stylus button hold, air-click to toggle |
+| Eraser | right-click hold (last kind), `e` / `shift+e` | stylus button hold (release returns to ink); air double-click opens the ink wheel, triple-click opens nib sizes |
 | Undo | `ctrl+z` | two-finger tap |
 | Zoom | two-finger pinch (one finger may stay still), ctrl + two-finger scroll, `+` `−` | pinch |
 
