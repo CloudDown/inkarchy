@@ -642,15 +642,20 @@ fn pdf_page_chip_shows_a_preview_above_the_finger() {
         .data(|d| d.get_temp::<Rect>(Id::new("pdf-page-number-rect")));
     let chip = chip.expect("PDF page chip is visible");
     let start = chip.center();
-    let end = start + vec2(48.0, 0.0);
+    let end = start + vec2((app.canvas_rect.right() - start.x) * 2.0 / 29.0, 0.0);
     frames.touch(app, TouchPhase::Start, start);
     for _ in 0..90 {
         frames.step(app, vec![]);
     }
-    assert!(!app.sheet_tabs_on, "holding the counter must not edit pages");
+    assert!(
+        !app.sheet_tabs_on,
+        "holding the counter must not edit pages"
+    );
     frames.touch(app, TouchPhase::Move, end);
     frames.step(app, vec![]);
-    let preview = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("page-scrub-preview-rect")))
+    let preview = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("page-scrub-preview-rect")))
         .expect("preview appears during touch scrubbing");
     assert!(preview.bottom() < end.y - 32.0);
     assert_eq!(app.page_in_view(app.canvas_rect), 2);
@@ -658,37 +663,109 @@ fn pdf_page_chip_shows_a_preview_above_the_finger() {
     frames.snapshot("pdf-page-picker");
     frames.touch(app, TouchPhase::End, end);
     frames.settle(app);
-    assert!(frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("page-scrub-preview-rect"))).is_none());
+    assert!(frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("page-scrub-preview-rect")))
+        .is_none());
     assert_eq!(app.page_in_view(app.canvas_rect), 2);
+    assert!(!app.pdf_page_picker_open);
 }
 
 #[test]
-fn plain_notebook_page_counter_scrubs_with_a_finger() {
+fn page_ruler_can_navigate_backwards_from_the_last_page() {
     let mut fixture = Fixture::new();
-    let mut note = Note::blank("Finger page navigation", 0);
+    let mut note = Note::blank("Page ruler", 0);
     note.sheet_join = SheetJoin::Separate;
-    note.pages = (0..8).map(|row| crate::document::Page::at(0, row)).collect();
+    note.pages = (0..30).map(|row| crate::document::Page::at(0, row)).collect();
     let id = note.id;
     fixture.app.lib.insert_new(&note).unwrap();
     fixture.app.open_note(id);
     let app = &mut fixture.app;
     let mut frames = Frames::new(app);
     frames.settle(app);
-    let chip = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("pdf-page-number-rect")))
+    app.jump_to_page(29);
+    frames.settle(app);
+    app.pdf_page_picker_open = true;
+    let chip = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("pdf-page-number-rect"))).unwrap();
+    frames.touch(app, TouchPhase::Start, chip.center());
+    frames.touch(app, TouchPhase::End, chip.center());
+    frames.settle(app);
+    let ruler = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("page-scrub-ruler-rect")))
+        .expect("tapping the counter opens the ruler");
+    assert_eq!(app.page_in_view(app.canvas_rect), 29, "opening does not jump");
+    let start = pos2(ruler.right() - 24.0, ruler.bottom() - 22.0);
+    let end = pos2(ruler.left() + 24.0, start.y);
+    frames.touch(app, TouchPhase::Start, start);
+    frames.touch(app, TouchPhase::Move, end);
+    frames.touch(app, TouchPhase::End, end);
+    frames.settle(app);
+    assert_eq!(app.page_in_view(app.canvas_rect), 0);
+    frames.snapshot("page-navigation-ruler");
+    frames.key(app, Key::Escape);
+    frames.settle(app);
+    assert!(!app.pdf_page_picker_open);
+}
+
+#[test]
+fn plain_notebook_counter_navigates_right_and_up() {
+    let mut fixture = Fixture::new();
+    let mut note = Note::blank("Finger page navigation", 0);
+    note.sheet_join = SheetJoin::Separate;
+    note.pages = (0..8)
+        .map(|row| crate::document::Page::at(0, row))
+        .collect();
+    let id = note.id;
+    fixture.app.lib.insert_new(&note).unwrap();
+    fixture.app.open_note(id);
+    let app = &mut fixture.app;
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let chip = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("pdf-page-number-rect")))
         .expect("plain notebooks also show the page counter");
     let start = chip.center();
+    let third_page = start + vec2((app.canvas_rect.right() - start.x) * 2.0 / 7.0, 0.0);
     frames.touch(app, TouchPhase::Start, start);
-    frames.touch(app, TouchPhase::Move, start + vec2(48.0, 0.0));
-    frames.touch(app, TouchPhase::End, start + vec2(48.0, 0.0));
+    frames.touch(app, TouchPhase::Move, third_page);
+    frames.touch(app, TouchPhase::End, third_page);
     frames.settle(app);
     assert_eq!(app.page_in_view(app.canvas_rect), 2);
-    assert!(!app.pdf_page_picker_open, "scrubbing must not open the popup");
+    assert!(
+        !app.pdf_page_picker_open,
+        "direct navigation does not open a ruler"
+    );
     frames.touch(app, TouchPhase::Start, start);
-    frames.touch(app, TouchPhase::Move, start + vec2(240.0, 0.0));
-    frames.touch(app, TouchPhase::End, start + vec2(240.0, 0.0));
+    let last_page = pos2(start.x, app.canvas_rect.top());
+    frames.touch(app, TouchPhase::Move, last_page);
+    frames.touch(app, TouchPhase::End, last_page);
     frames.settle(app);
-    assert_eq!(app.page_in_view(app.canvas_rect), 7, "clamp at the last page");
-    assert_eq!(app.page_cells(), (0..8).map(|row| (0, row)).collect::<Vec<_>>());
+    assert_eq!(
+        app.page_in_view(app.canvas_rect),
+        0,
+        "moving up reaches the first page"
+    );
+    assert_eq!(
+        app.page_cells(),
+        (0..8).map(|row| (0, row)).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn page_scrub_reaches_edges_and_uses_vertical_precision() {
+    let bounds = Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0));
+    let origin = pos2(30.0, 770.0);
+    for count in [1, 8, 300, 10000] {
+        for start in [1, count] {
+            assert_eq!(scrub_page_target(start, count, origin, bounds.right_bottom(), bounds), count);
+            assert_eq!(scrub_page_target(start, count, origin, bounds.right_top(), bounds), count);
+            assert_eq!(scrub_page_target(start, count, origin, bounds.left_top(), bounds), 1);
+            assert_eq!(scrub_page_target(start, count, origin, origin, bounds), start);
+        }
+    }
+    let horizontal = scrub_page_target(1, 300, origin, pos2(600.0, origin.y), bounds);
+    let diagonal = scrub_page_target(1, 300, origin, pos2(600.0, 0.0), bounds);
+    assert!(diagonal < horizontal, "raising the finger gives finer control near the starting page");
 }
 
 #[test]
@@ -1470,9 +1547,6 @@ fn pages_mode_adds_a_sheet_and_toggle_hides_the_pluses() {
         .center();
     frames.drag(app, more, more);
     frames.settle(app);
-    let edit = frames.text_center("Edit pages");
-    frames.drag(app, edit, edit);
-    frames.settle(app);
     assert!(app.sheet_tabs_on);
     let canvas = app.canvas_rect;
     let tabs = app.sheet_tabs(canvas);
@@ -2218,12 +2292,6 @@ fn fit_page_button_is_in_the_header_not_the_notebook_menu() {
         full.top() < 52.0,
         "fullscreen control belongs in the top bar"
     );
-    let more = frames
-        .ctx
-        .data(|d| d.get_temp::<Rect>(Id::new("notebook-menu-button-rect")))
-        .unwrap();
-    frames.drag(app, more.center(), more.center());
-    frames.settle(app);
     assert!(!frames.output.as_ref().unwrap().shapes.iter().any(|shape| {
         matches!(&shape.shape, Shape::Text(text) if text.galley.text() == "Fit page")
     }));
@@ -2234,8 +2302,15 @@ fn fit_page_button_is_in_the_header_not_the_notebook_menu() {
     assert_eq!(
         app.fitted_cell,
         Some((0, 0)),
-        "button fits the current page"
+        "button keeps the current page fitted"
     );
+    assert!(app.page_fit_inside, "first press shows the whole page");
+    let (pw, ph) = app.note.as_ref().unwrap().page_size();
+    assert!((app.camera.zoom - Camera::fit_zoom(app.canvas_rect, pw, ph)).abs() < 0.001);
+    frames.drag(app, full.center(), full.center());
+    frames.step(app, vec![]);
+    assert!(!app.page_fit_inside, "second press restores the close framing");
+    assert!(app.camera.zoom > Camera::fit_zoom(app.canvas_rect, pw, ph));
     assert!(!frames
         .output
         .as_ref()
@@ -2251,31 +2326,29 @@ fn fit_page_button_is_in_the_header_not_the_notebook_menu() {
 }
 
 #[test]
-fn notebook_menu_keeps_actions_and_keyboard_dismissal() {
+fn hand_options_keep_finger_toggle_and_keyboard_dismissal() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Notebook menu");
     let app = &mut fixture.app;
     app.open_note(id);
     let mut frames = Frames::new(app);
     frames.settle(app);
-    let more = frames
+    let hand = frames
         .ctx
-        .data(|d| d.get_temp::<Rect>(Id::new("notebook-menu-button-rect")))
+        .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", Tool::Hand))))
         .unwrap()
         .center();
-    frames.drag(app, more, more);
+    frames.drag(app, hand, hand);
     frames.settle(app);
     assert!(Popup::is_any_open(&frames.ctx));
-    let last = frames.text_center("Area eraser");
-    frames.text_center("Stroke eraser");
+    let last = frames.text_center("Draw with finger");
     assert!(
         frames.output.as_ref().unwrap().shapes.iter().any(|shape| {
-            matches!(&shape.shape, Shape::Text(text) if text.galley.text() == "Area eraser")
+            matches!(&shape.shape, Shape::Text(text) if text.galley.text() == "Draw with finger")
                 && shape.clip_rect.contains(last)
         }),
         "all menu actions should fit in a normal window"
     );
-    frames.snapshot("notebook-menu");
     frames.step_with_modifiers(
         app,
         vec![Event::Key {
@@ -2299,18 +2372,18 @@ fn notebook_menu_keeps_actions_and_keyboard_dismissal() {
     frames.drag(app, cancel, cancel);
     frames.settle(app);
     assert!(!app.export_picker_open);
-    frames.drag(app, more, more);
+    frames.drag(app, hand, hand);
     frames.settle(app);
     let finger = frames.text_center("Draw with finger");
     let was_finger = app.lib.index.finger_draw;
     frames.drag(app, finger, finger);
     assert_eq!(
         app.lib.index.finger_draw, !was_finger,
-        "the ⋮ menu applies a settings toggle on the first click"
+        "the hand options apply a toggle on the first click"
     );
     assert!(
         Popup::is_any_open(&frames.ctx),
-        "toggling a setting keeps the ⋮ menu open until an outside click"
+        "toggling a setting keeps the hand options open until an outside click"
     );
     frames.drag(app, finger, finger);
     assert_eq!(
@@ -2323,17 +2396,21 @@ fn notebook_menu_keeps_actions_and_keyboard_dismissal() {
     assert!(matches!(app.scene, Scene::Desk));
     frames.size.y = 400.0;
     frames.settle(app);
-    frames.drag(app, more, more);
+    let hand = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", Tool::Hand))))
+        .unwrap()
+        .center();
+    frames.drag(app, hand, hand);
     frames.settle(app);
     assert!(Popup::is_any_open(&frames.ctx));
-    frames.snapshot("notebook-menu-short");
     let save = frames.text_center("Draw with finger");
     assert!(save.y > 0.0 && save.y < frames.size.y);
     let mut reached_last = false;
     for _ in 0..48 {
         frames.key(app, Key::Tab);
         frames.settle(app);
-        let last = frames.text_center("Area eraser");
+        let last = frames.text_center("Draw with finger");
         if frames
             .ctx
             .memory(|m| m.focused())
@@ -2394,9 +2471,6 @@ fn pages_edit_replaces_the_header_with_a_canvas_tray() {
         .unwrap()
         .center();
     frames.drag(app, more, more);
-    frames.settle(app);
-    let edit = frames.text_center("Edit pages");
-    frames.drag(app, edit, edit);
     frames.settle(app);
     assert!(app.sheet_tabs_on);
     let header_visible = |frames: &Frames| {
@@ -2584,38 +2658,40 @@ fn pdf_pages_can_be_arranged_horizontally_or_two_per_row() {
 }
 
 #[test]
-fn notebook_menu_stays_clear_of_right_tool_case() {
+fn eraser_options_fit_with_right_tool_case() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Menu beside tools");
     let app = &mut fixture.app;
     app.open_note(id);
     app.dock_edge = DockEdge::Right;
+    app.tool_order
+        .retain(|item| *item != DockItem::Tool(Tool::EraserStroke));
+    app.tool_order.insert(0, DockItem::Tool(Tool::EraserStroke));
     let mut frames = Frames::new(app);
     for size in [vec2(1280.0, 860.0), vec2(360.0, 640.0), vec2(320.0, 280.0)] {
         frames.size = size;
         frames.settle(app);
-        let more = frames
+        let eraser = frames
             .ctx
-            .data(|d| d.get_temp::<Rect>(Id::new("notebook-menu-button-rect")))
+            .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", Tool::EraserStroke))))
             .unwrap();
-        frames.drag(app, more.center(), more.center());
+        frames.drag(app, eraser.center(), eraser.center());
         frames.settle(app);
-        let menu = frames
-            .ctx
-            .data(|d| d.get_temp::<Rect>(Id::new("notebook-menu-rect")))
-            .unwrap();
-        let dock = frames
-            .ctx
-            .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
-            .unwrap();
         assert!(
-            menu.right() + 4.0 <= dock.left(),
-            "{size:?}: menu {menu:?} covers dock {dock:?}"
+            Popup::is_any_open(&frames.ctx),
+            "eraser options at {size:?}, button {eraser:?}"
         );
-        assert!(
-            menu.left() >= 0.0 && menu.bottom() <= size.y,
-            "{size:?}: menu {menu:?} outside window"
-        );
+        for (label, kind) in [
+            ("Area eraser", Tool::EraserArea),
+            ("Stroke eraser", Tool::EraserStroke),
+        ] {
+            let target = frames.text_center(label);
+            assert!(Rect::from_min_size(Pos2::ZERO, size).contains(target));
+            frames.drag(app, target, target);
+            frames.settle(app);
+            assert_eq!(app.tool, kind);
+            assert_eq!(app.last_eraser, kind);
+        }
         frames.key(app, Key::Escape);
     }
 }
@@ -3958,7 +4034,7 @@ fn double_tap_on_page_leaves_pages_mode_without_moving_it() {
 }
 
 #[test]
-fn long_press_on_page_enters_pages_mode() {
+fn long_press_on_page_does_not_enter_pages_mode() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Long press pages");
     let app = &mut fixture.app;
@@ -3985,11 +4061,9 @@ fn long_press_on_page_enters_pages_mode() {
         frames.step(app, vec![Event::PointerMoved(screen)]);
     }
     assert!(
-        app.sheet_tabs_on,
-        "long press on empty paper opens Pages manage mode"
+        !app.sheet_tabs_on,
+        "long press on empty paper must not open Pages manage mode"
     );
-    assert_eq!(app.pages_jiggle_cell, Some((0, 0)));
-    assert!(!app.sheet_tabs(app.canvas_rect).is_empty());
     frames.step(
         app,
         vec![Event::PointerButton {
@@ -4002,7 +4076,7 @@ fn long_press_on_page_enters_pages_mode() {
 }
 
 #[test]
-fn pen_long_press_on_page_enters_pages_mode() {
+fn pen_long_press_on_page_does_not_enter_pages_mode() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Pen hold pages");
     let app = &mut fixture.app;
@@ -4015,7 +4089,7 @@ fn pen_long_press_on_page_enters_pages_mode() {
         .to_screen(pos2(PAGE_W * 0.5, PAGE_H * 0.5), app.canvas_rect);
     // A stylus press on lectern paper never injects Pointer events
     // (inject_pen_pointer only forwards chrome presses), so egui's pointer
-    // stays idle; the tablet snapshot alone must drive the pages long-hold.
+    // stays idle; neither input path should open Pages mode.
     let pen = |pressed: bool, down: bool, released: bool| PenSnapshot {
         pos: Some(screen),
         samples: Vec::new(),
@@ -4038,20 +4112,21 @@ fn pen_long_press_on_page_enters_pages_mode() {
         frames.step(app, vec![]);
     }
     assert!(
-        app.sheet_tabs_on,
-        "stylus hold on empty paper opens Pages manage mode"
+        !app.sheet_tabs_on,
+        "stylus hold on empty paper must not open Pages manage mode"
     );
-    assert_eq!(app.pages_jiggle_cell, Some((0, 0)));
-    assert!(!app.sheet_tabs(app.canvas_rect).is_empty());
     app.tablet.set_test_pen(Some(pen(false, false, true)));
     frames.step(app, vec![]);
     app.tablet.set_test_pen(None);
     frames.settle(app);
-    assert!(app.sheet_tabs_on, "released hold keeps Pages manage mode");
+    assert!(
+        !app.sheet_tabs_on,
+        "release must not open Pages manage mode"
+    );
 }
 
 #[test]
-fn finger_long_press_on_page_shows_progress_ring() {
+fn finger_long_press_on_page_does_not_show_progress_ring() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Finger hold progress");
     let app = &mut fixture.app;
@@ -4078,7 +4153,7 @@ fn finger_long_press_on_page_shows_progress_ring() {
     frames.time += HOLD_RING_DELAY + 0.02;
     frames.step(app, vec![]);
     assert!(
-        frames.output.as_ref().unwrap().shapes.iter().any(|shape| {
+        !frames.output.as_ref().unwrap().shapes.iter().any(|shape| {
             matches!(
                 &shape.shape,
                 Shape::Circle(circle)
@@ -4087,12 +4162,13 @@ fn finger_long_press_on_page_shows_progress_ring() {
                         && (circle.stroke.width - 2.5).abs() < 0.1
             )
         }),
-        "the hold indicator appears only after the finger has paused"
+        "there is no Pages hold indicator on the writing canvas"
     );
-    assert!(
-        !app.sheet_tabs_on,
-        "the hold must complete before Pages mode"
-    );
+    assert!(!app.sheet_tabs_on, "a finger hold must not open Pages mode");
+    frames.time += WHEEL_HOLD;
+    frames.step(app, vec![]);
+    frames.touch(app, TouchPhase::End, screen);
+    assert!(!app.sheet_tabs_on);
 }
 
 #[test]

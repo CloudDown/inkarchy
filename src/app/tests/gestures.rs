@@ -477,6 +477,61 @@ fn selected_image_stays_usable_on_small_windows_without_an_action_bar() {
 }
 
 #[test]
+fn tool_options_and_direct_pages_button_accept_touch_without_marking_paper() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Touch options");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let before = serde_json::to_value(&app.note.as_ref().unwrap().pages).unwrap();
+    let tap = |frames: &mut Frames, app: &mut InkarchyApp, pos| {
+        frames.touch(app, TouchPhase::Start, pos);
+        frames.touch(app, TouchPhase::End, pos);
+        frames.settle(app);
+    };
+    let hand = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", Tool::Hand))))
+        .unwrap();
+    tap(&mut frames, app, hand.center());
+    assert_eq!(app.tool, Tool::Hand);
+    let finger = frames.text_center("Draw with finger");
+    let was_finger = app.lib.index.finger_draw;
+    tap(&mut frames, app, finger);
+    assert_eq!(app.lib.index.finger_draw, !was_finger);
+    frames.key(app, Key::Escape);
+    frames.settle(app);
+    let eraser = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new(("tool-well", Tool::EraserStroke))))
+        .unwrap();
+    tap(&mut frames, app, eraser.center());
+    for (label, kind) in [
+        ("Area eraser", Tool::EraserArea),
+        ("Stroke eraser", Tool::EraserStroke),
+    ] {
+        let target = frames.text_center(label);
+        tap(&mut frames, app, target);
+        assert_eq!(app.tool, kind);
+        assert_eq!(app.last_eraser, kind);
+    }
+    frames.key(app, Key::Escape);
+    frames.settle(app);
+    let pages = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("notebook-menu-button-rect")))
+        .unwrap();
+    tap(&mut frames, app, pages.center());
+    assert!(app.sheet_tabs_on);
+    assert!(!Popup::is_any_open(&frames.ctx));
+    assert_eq!(
+        serde_json::to_value(&app.note.as_ref().unwrap().pages).unwrap(),
+        before
+    );
+}
+
+#[test]
 fn held_tool_opens_settings_and_all_swatches_have_finger_sized_targets() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Tool settings");

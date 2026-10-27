@@ -119,6 +119,20 @@ impl Camera {
         );
     }
 
+    /// Fit the entire sheet inside the viewport, leaving letterbox gutters on
+    /// the loose axis instead of cropping it to fill the screen.
+    pub fn fit_page_inside(&mut self, rect: Rect, origin: Vec2, page_w: f32, page_h: f32) {
+        let page_w = page_w.max(1.0);
+        let page_h = page_h.max(1.0);
+        let zoom = Self::fit_zoom(rect, page_w, page_h);
+        self.zoom = zoom;
+        self.stretch_y = None;
+        self.pan = Vec2::new(
+            (rect.width() - page_w * zoom) * 0.5 - origin.x * zoom,
+            (rect.height() - page_h * zoom) * 0.5 - origin.y * zoom,
+        );
+    }
+
     /// Top-left corner: write into it, zoomed out enough to see the whole sheet.
     pub fn show_writing(&mut self, rect: Rect, origin: Vec2, page_w: f32, page_h: f32) {
         let margin = 8.0;

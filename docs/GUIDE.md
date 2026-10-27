@@ -10,7 +10,7 @@ Your notes stay on your computer in `~/.local/share/inkarchy`. Writing needs no 
 
 ### Exercise coach
 
-Click the **graduation cap** beside the toolbar, or **Notebook menu → Exercise coach**. The panel has one switch, **Coach this book**; the choice is remembered for that notebook. Once on, the slim bar under the cap shows a qualitative verdict on the latest completed, readable maths or physics step: on track, check this step, possible error, or not enough information. It is an estimate, not a grade.
+Click the **graduation cap** beside the toolbar. The panel has one switch, **Coach this book**; the choice is remembered for that notebook. Once on, the slim bar under the cap shows a qualitative verdict on the latest completed, readable maths or physics step: on track, check this step, possible error, or not enough information. It is an estimate, not a grade.
 
 The coach reads the `ai` block of `~/.local/share/inkarchy/library.json`: `provider` (`"Ollama"` or `"Gemini"`), `local_url`, `local_model` and `api_model`.
 
@@ -38,7 +38,7 @@ Add pages around the current sheet. Display them edge to edge in *Linked* mode, 
   <img src="screens/separees.png" alt="Separate pages with a gap" width="49%">
 </p>
 
-Open **Pages** from **⋯ → Edit pages**, or long-press empty paper. The lectern becomes a workbench: pages stay in the middle, a **composition gauge** sits on one side, a **fan of paper stock** on the other.
+Click the **Edit pages** grid button at the top right to open **Pages**. The lectern becomes a workbench: pages stay in the middle, a **composition gauge** sits on one side, a **fan of paper stock** on the other.
 
 - **Join:** two miniature sheets on the gauge. One pair touching, one pair with a gutter.
 - **Arrange:** stack or a single row, then drag the column number, scroll over it, or use the `−` / `+` stepper. One drag or wheel burst is one undo step.
@@ -127,7 +127,7 @@ PNG, JPEG, WEBP, and SVG become a page background when you open them from the sh
 
 The media tool (`i`) places images and videos on the open page. Videos use the system `ffmpeg` and `ffprobe` (install the `ffmpeg` package); they show a still poster with a small play button. Click the button to play or pause (playback is silent), and drag the video’s corners with the Hand tool to resize it like an image. Dropping a video on an open page places it too.
 
-Open is the sheet button at the top right of the shelf, and a row in the notebook menu. `Ctrl+O` opens the same dialog.
+Open is the sheet button at the top right of the shelf. `Ctrl+O` opens the same dialog from a notebook.
 
 PDFs appear progressively: a quick preview is replaced by a sharp render matched to zoom and display density, up to 432 dpi within a per-page pixel budget. Existing pixels stay visible during zoom; detail is refreshed after the gesture settles. Rendering, cache decoding and pixel preparation run in the background, with visible pages prioritized and obsolete queued pages discarded. A texture LRU and a lossless disk cache speed up revisiting pages.
 
@@ -171,7 +171,7 @@ The lectern follows the stylus: in range, the hand pans and the nib writes. Put 
 
 Choose the Hand tool (`v`) to select, move, and resize page objects with the mouse or one finger. Its corner handles resize the selection. The Lasso tool only selects a group by drawing around it. `ctrl+d` duplicates the selection and `delete` removes it. Images and videos switch to the Hand tool and are selected as soon as they are inserted. In Pages mode, tap an object’s red `−` mark to remove it.
 
-A finger on empty paper pans the canvas; two fingers pan even when something is selected. On the trackpad, two-finger drag scrolls and two-finger pinch zooms from finger distance (one finger may stay still while the other moves in or out). If the pad ignores a resting finger, use ctrl + two-finger scroll to zoom. Three-finger swipe is left to the desktop (workspace switching). On the screen, pinch still zooms. Choose **Draw with finger** in the notebook menu to use the pens by touch. The erasers and lasso work with a finger directly. Double-tap text to type.
+A finger on empty paper pans the canvas; two fingers pan even when something is selected. On the trackpad, two-finger drag scrolls and two-finger pinch zooms from finger distance (one finger may stay still while the other moves in or out). If the pad ignores a resting finger, use ctrl + two-finger scroll to zoom. Three-finger swipe is left to the desktop (workspace switching). On the screen, pinch still zooms. Click the **Hand** tool and enable **Draw with finger** to use the pens by touch. Click the **Eraser** tool to choose **Stroke eraser** or **Area eraser**; hold it to adjust its size. The erasers and lasso work with a finger directly. Double-tap text to type.
 
 The toolbar and size controls use 48 px touch targets; compact 36 px color swatches show more choices in the column. Tap the active pen again, or hold a pen or eraser, to adjust its size with four presets and a precise slider. Tap the ink drop for the color column; **+** replaces the swatches with a rainbow slider and one continuous white–color–black slider. The checkmark saves the color; the back arrow returns to the swatches. Hold a saved color, then tap the bin at the foot of the column, to remove it; theme colors stay.
 

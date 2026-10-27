@@ -379,49 +379,11 @@ impl InkarchyApp {
             }
         }
 
-        // Still finger on empty paper opens Pages manage mode.
-        let manage_hold = self.canvas_touch.as_ref().and_then(|gesture| {
-            (!self.sheet_tabs_on
-                && !gesture.moved
-                && matches!(gesture.mode, CanvasGesture::Pan(None)))
-            .then_some((gesture.origin, gesture.since))
-        });
-        if let Some((origin, since)) = manage_hold {
-            let held = time - since;
-            if held >= super::WHEEL_HOLD {
-                self.canvas_touch = None;
-                self.drag_last = None;
-                if let Some((col, row)) = self.page_unit_at(origin, canvas) {
-                    self.enter_pages_mode_at(Some((col, row)));
-                    self.start_page_drag(col, row, origin, canvas);
-                } else {
-                    self.enter_pages_mode();
-                }
-            } else {
-                ui.ctx().request_repaint_after(Duration::from_millis(16));
-            }
-        }
-
         !tool_input
     }
 
     pub(super) fn paint_touch_hold(&self, ui: &Ui, painter: &Painter) {
         let Some(g) = &self.canvas_touch else { return };
-        if !self.sheet_tabs_on && !g.moved && matches!(g.mode, CanvasGesture::Pan(None)) {
-            let elapsed = ui.input(|i| i.time) - g.since;
-            if elapsed >= super::HOLD_RING_DELAY {
-                let progress = ((elapsed - super::HOLD_RING_DELAY)
-                    / (super::WHEEL_HOLD - super::HOLD_RING_DELAY))
-                    .clamp(0.0, 1.0) as f32;
-                paint_hold_progress(
-                    painter,
-                    g.origin,
-                    progress,
-                    self.look.accent,
-                    self.look.paper,
-                );
-            }
-        }
         if !g.moved && matches!(g.mode, CanvasGesture::Pan(Some(_))) {
             let progress = ((ui.input(|i| i.time) - g.since) / HOLD_TIME).clamp(0.0, 1.0) as f32;
             if progress < 0.2 {
@@ -464,27 +426,5 @@ impl InkarchyApp {
             self.tool = Tool::Text;
             self.sel.clear();
         }
-    }
-}
-
-fn paint_hold_progress(
-    painter: &Painter,
-    center: Pos2,
-    progress: f32,
-    accent: Color32,
-    paper: Color32,
-) {
-    // Keep the ring outside the fingertip so it remains visible while holding.
-    const RADIUS: f32 = 44.0;
-    painter.circle_stroke(center, RADIUS, Stroke::new(2.5, paper.gamma_multiply(0.75)));
-    let points: Vec<Pos2> = (0..=32)
-        .map(|step| {
-            let angle = -std::f32::consts::FRAC_PI_2
-                + std::f32::consts::TAU * progress * step as f32 / 32.0;
-            center + Vec2::angled(angle) * RADIUS
-        })
-        .collect();
-    if points.len() > 1 {
-        painter.add(Shape::line(points, Stroke::new(3.5, accent)));
     }
 }
