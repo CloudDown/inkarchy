@@ -292,6 +292,7 @@ pub fn snapshot(note: &Note, page: usize) -> Option<Note> {
             points: s.points.clone(),
             sticky: s.sticky,
             mesh: None,
+            mesh_scale: egui::Vec2::ZERO,
         })
         .collect();
     copy.pages = vec![page_copy];

@@ -6,6 +6,7 @@ mod document;
 mod emoji;
 mod export;
 mod fonts;
+mod glass;
 mod import;
 mod ink;
 mod ipc;

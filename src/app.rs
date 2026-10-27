@@ -367,6 +367,7 @@ pub struct InkarchyApp {
     last_ink: Tool,
     last_ink_width: f32,
     last_eraser: Tool,
+    eraser_glass: Option<crate::glass::SharedGlass>,
     palm_grace_until: Option<Instant>,
     touch_grace_until: Option<Instant>,
     two_finger: Option<(f64, f32, f32)>,
@@ -418,6 +419,7 @@ pub struct InkarchyApp {
     /// 0 = tools open, 1 = case closed on the six-dot grip.
     dock_fold: f32,
     dock_fold_vel: f32,
+    dock_folded: bool,
     canvas_rect: Rect,
     /// Click held on a sheet ear: do not lay ink.
     tab_held: bool,
@@ -604,6 +606,12 @@ impl InkarchyApp {
         let mut lib = Library::open();
         seed::seed_if_needed(&mut lib);
         let mut app = Self::with_library(look, lib);
+        if let Some(gl) = &cc.gl {
+            match crate::glass::Glass::new(gl) {
+                Ok(glass) => app.eraser_glass = Some(glass),
+                Err(error) => eprintln!("inkarchy: eraser backdrop blur unavailable: {error}"),
+            }
+        }
         if files.is_empty() {
             // INKARCHY_OPEN wins. CAHIER_OPEN is a deprecated alias.
             let open = std::env::var("INKARCHY_OPEN").or_else(|_| std::env::var("CAHIER_OPEN"));
@@ -658,6 +666,7 @@ impl InkarchyApp {
             last_ink: Tool::Fineliner,
             last_ink_width: width,
             last_eraser: Tool::EraserStroke,
+            eraser_glass: None,
             palm_grace_until: None,
             touch_grace_until: None,
             two_finger: None,
@@ -698,6 +707,7 @@ impl InkarchyApp {
             dock_slide: None,
             dock_fold: 0.0,
             dock_fold_vel: 0.0,
+            dock_folded: false,
             canvas_rect: Rect::ZERO,
             tab_held: false,
             page_press_owned: false,
@@ -1617,7 +1627,12 @@ impl eframe::App for InkarchyApp {
         }
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+        if let (Some(gl), Some(glass)) = (gl, self.eraser_glass.take()) {
+            if let Ok(glass) = glass.lock() {
+                glass.destroy(gl);
+            }
+        }
         let saved = if let Some(n) = &self.note {
             self.lib.save_note(n)
         } else {
@@ -7967,7 +7982,7 @@ impl InkarchyApp {
     /// Spring the case closed onto the grip while held, open after release.
     fn step_dock_fold(&mut self, ctx: &Context) {
         let traveling = self.dock_slide.is_some_and(|slide| !slide.arrived);
-        let target = if self.dock_held || traveling {
+        let target = if self.dock_held || traveling || self.dock_folded {
             1.0
         } else {
             0.0
@@ -8047,6 +8062,10 @@ impl InkarchyApp {
 
     fn dock_handle(&mut self, ui: &mut Ui, vertical: bool) {
         let grip = self.dock_grip(ui, vertical);
+        if grip.clicked() && !self.dock_held {
+            self.dock_folded = !self.dock_folded;
+            self.dock_fold_vel = 0.0;
+        }
         let grab_now = !self.dock_held && (grip.drag_started() || grip.is_pointer_button_down_on());
         if grab_now {
             let pointer = grip.interact_pointer_pos().unwrap_or(grip.rect.center());
@@ -10232,7 +10251,13 @@ impl InkarchyApp {
                             if !ink_visible(s, ox, oy, sx, sy, rect) {
                                 continue;
                             }
-                            painter.add(Shape::mesh(map_mesh(s.tessellate(), ox, oy, sx, sy)));
+                            painter.add(Shape::mesh(map_mesh(
+                                s.tessellate_at(vec2(sx, sy) * pixels_per_point),
+                                ox,
+                                oy,
+                                sx,
+                                sy,
+                            )));
                         }
                     }
                 }
@@ -10301,12 +10326,13 @@ impl InkarchyApp {
             let sy = cam.zoom_y();
             let ox = rect.min.x + cam.pan.x + origin.x * sx;
             let oy = rect.min.y + cam.pan.y + origin.y * sy;
+            let scale = vec2(sx, sy) * pixels_per_point;
             let mesh = if let Some(preview) = self.shape_preview.as_mut() {
-                Some(map_mesh(preview.tessellate(), ox, oy, sx, sy))
+                Some(map_mesh(preview.tessellate_at(scale), ox, oy, sx, sy))
             } else {
                 self.live
                     .as_mut()
-                    .map(|(_, stroke)| map_mesh(stroke.tessellate(), ox, oy, sx, sy))
+                    .map(|(_, stroke)| map_mesh(stroke.tessellate_at(scale), ox, oy, sx, sy))
             };
             if let Some(mesh) = mesh {
                 painter.add(Shape::mesh(mesh));
@@ -11768,7 +11794,7 @@ impl InkarchyApp {
             }
             Tool::Lasso => CursorIcon::Crosshair,
             Tool::Image => CursorIcon::Copy,
-            Tool::EraserArea => CursorIcon::None, // soft blur disk is the cursor
+            Tool::EraserArea => CursorIcon::None, // frosted glass is the cursor
             Tool::EraserStroke => CursorIcon::NotAllowed,
             _ => CursorIcon::Crosshair,
         };
@@ -11798,7 +11824,7 @@ impl InkarchyApp {
         (pen.eraser || secondary) && self.last_eraser == Tool::EraserArea
     }
 
-    /// Soft round blur disk under the pointer — only the zone, no chrome.
+    /// A frosted glass footprint, tracked 1:1 without easing the pointer.
     fn paint_area_eraser_lens(&self, ui: &Ui, painter: &Painter, canvas: Rect) {
         self.paint_area_eraser_lens_at(ui.ctx(), painter, canvas);
     }
@@ -11818,7 +11844,14 @@ impl InkarchyApp {
         if !clip.contains(screen) || Self::pen_over_chrome(ctx, screen) {
             return;
         }
-        paint_soft_blur_disk(painter, screen, self.eraser_radius_screen(true));
+        let radius = self.eraser_radius_screen(true);
+        let painter = painter.with_clip_rect(clip.intersect(painter.clip_rect()));
+        if let Some(glass) = &self.eraser_glass {
+            crate::glass::Glass::paint(glass, &painter, screen, radius, self.look.paper);
+        } else {
+            painter.circle_filled(screen, radius, self.look.paper.gamma_multiply(0.20));
+        }
+        paint_glass_rim(&painter, screen, radius, &self.look);
     }
 
     fn pen_over_chrome(ctx: &Context, pos: Pos2) -> bool {
@@ -12710,20 +12743,25 @@ fn paint_sheet_tab(
     }
 }
 
-/// Soft round blur disk for the area eraser — concentric washes, no rim.
-fn paint_soft_blur_disk(p: &Painter, c: Pos2, radius: f32) {
-    const RINGS: i32 = 14;
-    for i in (1..=RINGS).rev() {
-        let t = i as f32 / RINGS as f32;
-        let r = radius * t;
-        // Stronger in the middle, feathered to nothing at the edge.
-        let fall = (1.0 - t).powi(2);
-        let a = (fall * 42.0).round() as u8;
-        if a < 2 {
-            continue;
-        }
-        p.circle_filled(c, r, Color32::from_rgba_unmultiplied(255, 255, 255, a));
-    }
+/// A thin bevel and directional glint make the actual erasing radius legible
+/// on both light paper and dark media, without covering the nib with an icon.
+fn paint_glass_rim(p: &Painter, c: Pos2, radius: f32, look: &Look) {
+    p.circle_stroke(
+        c + vec2(0.0, 0.7),
+        radius + 0.5,
+        Stroke::new(1.5, look.shadow.gamma_multiply(0.55)),
+    );
+    p.circle_stroke(c, radius, Stroke::new(1.0, look.paper.gamma_multiply(0.65)));
+    let glint: Vec<_> = (0..=24)
+        .map(|i| {
+            let angle = std::f32::consts::PI * (1.05 + 0.60 * i as f32 / 24.0);
+            c + Vec2::angled(angle) * (radius - 0.7)
+        })
+        .collect();
+    p.add(Shape::line(
+        glint,
+        Stroke::new(1.2, look.paper.gamma_multiply(0.80)),
+    ));
 }
 
 /// Up arrow in the lectern tray.

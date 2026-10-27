@@ -1,6 +1,6 @@
 //! Vector ink: points, pressure, ribbon, shapes.
 
-use egui::{epaint::Vertex, Color32, Mesh, Pos2, TextureId, Vec2};
+use egui::{Color32, Mesh, Pos2, TextureId, Vec2};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -96,6 +96,9 @@ pub struct InkStroke {
     pub sticky: Option<Uuid>,
     #[serde(skip)]
     pub mesh: Option<Mesh>,
+    /// Physical pixels per paper unit used by the antialiasing fringe.
+    #[serde(skip)]
+    pub mesh_scale: Vec2,
 }
 
 impl InkStroke {
@@ -108,6 +111,7 @@ impl InkStroke {
             points: Vec::with_capacity(64),
             sticky: None,
             mesh: None,
+            mesh_scale: Vec2::ZERO,
         }
     }
 
@@ -207,10 +211,17 @@ impl InkStroke {
         false
     }
 
+    #[cfg(test)]
     pub fn tessellate(&mut self) -> &Mesh {
-        if self.mesh.is_none() {
-            let mesh = ribbon_mesh(&self.points, self.width, self.nib, self.color32());
+        self.tessellate_at(Vec2::splat(1.0))
+    }
+
+    pub fn tessellate_at(&mut self, pixels_per_paper: Vec2) -> &Mesh {
+        let scale = pixels_per_paper.max(Vec2::splat(1e-3));
+        if self.mesh.is_none() || self.mesh_scale != scale {
+            let mesh = ribbon_mesh(&self.points, self.width, self.nib, self.color32(), scale);
             self.mesh = Some(mesh);
+            self.mesh_scale = scale;
         }
         self.mesh.as_ref().expect("ribbon mesh was stored above")
     }
@@ -227,6 +238,7 @@ impl Clone for InkStroke {
             points: self.points.clone(),
             sticky: self.sticky,
             mesh: None,
+            mesh_scale: Vec2::ZERO,
         }
     }
 }
@@ -241,95 +253,91 @@ pub fn map_mesh(src: &Mesh, ox: f32, oy: f32, sx: f32, sy: f32) -> Mesh {
     mesh
 }
 
-pub fn ribbon_mesh(points: &[InkPoint], width: f32, nib: Nib, color: Color32) -> Mesh {
+/// A solid ribbon with a one-physical-pixel coverage fringe. Egui does not
+/// antialias custom meshes for us. Keep the fringe screen-sized at every zoom.
+pub fn ribbon_mesh(points: &[InkPoint], width: f32, nib: Nib, color: Color32, scale: Vec2) -> Mesh {
     let mut mesh = Mesh::with_texture(TextureId::default());
     if points.is_empty() {
         return mesh;
     }
-    let color = premultiply(color);
+    // Color32 is already premultiplied, including translucent highlighter ink.
     if points.len() == 1 {
-        add_disc(
+        add_round_cap(
             &mut mesh,
             points[0].pos(),
-            width * 0.45 * points[0].p,
+            nib_radius(width, nib, points[0].p),
+            (0.0, std::f32::consts::TAU),
             color,
+            scale,
         );
         return mesh;
     }
 
     let n = points.len();
-    // Two end discs (13 rim verts) plus a shared-vertex strip: 2 verts per sample.
-    mesh.vertices.reserve(2 * 14 + 2 * n);
-    mesh.indices.reserve(2 * 36 + (n - 1) * 6);
-
-    let mut left = Vec::with_capacity(n);
-    let mut right = Vec::with_capacity(n);
+    mesh.vertices.reserve(4 * n + 64);
+    mesh.indices.reserve((n - 1) * 18 + 192);
     for (i, pt) in points.iter().enumerate() {
-        let tan = if i == 0 {
-            points[1].pos() - points[0].pos()
-        } else if i + 1 == points.len() {
-            points[i].pos() - points[i - 1].pos()
-        } else {
-            points[i + 1].pos() - points[i - 1].pos()
-        };
-        let n = rot90(tan.normalized());
-        let mut press = pt.p;
-        match nib {
-            Nib::Fineliner => press = 1.0,
-            Nib::Highlighter => press = 1.0,
-            Nib::Pencil => press = 0.35 + press * 0.65,
-            Nib::Brush => press = 0.18 + press * 0.82,
+        let normal = ribbon_normal(points, i);
+        let r = nib_radius(width, nib, pt.p);
+        let (inner, outer, coverage) = feather_radii(r, normal, scale);
+        let ink = color.gamma_multiply(coverage);
+        for (offset, color) in [
+            (outer, Color32::TRANSPARENT),
+            (inner, ink),
+            (-inner, ink),
+            (-outer, Color32::TRANSPARENT),
+        ] {
+            mesh.colored_vertex(pt.pos() + normal * offset, color);
         }
-        let mut r = width * 0.5 * press;
-        if nib == Nib::Highlighter {
-            r = width * 0.5;
-        }
-        r = r.max(0.25);
-        left.push(pt.pos() + n * r);
-        right.push(pt.pos() - n * r);
-    }
-
-    let Some(first) = points.first() else {
-        return mesh;
-    };
-    let Some(last) = points.last() else {
-        return mesh;
-    };
-    let Some(left_first) = left.first() else {
-        return mesh;
-    };
-    let Some(left_last) = left.last() else {
-        return mesh;
-    };
-    add_disc(
-        &mut mesh,
-        first.pos(),
-        dist(first.pos(), *left_first),
-        color,
-    );
-    add_disc(&mut mesh, last.pos(), dist(last.pos(), *left_last), color);
-
-    let body = mesh.vertices.len() as u32;
-    for i in 0..n {
-        mesh.vertices.push(Vertex {
-            pos: left[i],
-            uv: Pos2::ZERO,
-            color,
-        });
-        mesh.vertices.push(Vertex {
-            pos: right[i],
-            uv: Pos2::ZERO,
-            color,
-        });
     }
     for i in 0..n - 1 {
-        let l0 = body + (i as u32) * 2;
-        let r0 = l0 + 1;
-        let l1 = l0 + 2;
-        let r1 = l0 + 3;
-        mesh.indices.extend_from_slice(&[l0, r0, l1, r0, r1, l1]);
+        for strip in 0..3 {
+            let a = i as u32 * 4 + strip;
+            mesh.indices
+                .extend_from_slice(&[a, a + 1, a + 4, a + 1, a + 5, a + 4]);
+        }
+    }
+    // Half-discs meet the body without painting over it: translucent ink must
+    // not acquire a darker blot at either end.
+    for (i, start) in [(0, true), (n - 1, false)] {
+        let normal = ribbon_normal(points, i) * if start { 1.0 } else { -1.0 };
+        add_round_cap(
+            &mut mesh,
+            points[i].pos(),
+            nib_radius(width, nib, points[i].p),
+            (normal.angle(), std::f32::consts::PI),
+            color,
+            scale,
+        );
     }
     mesh
+}
+
+fn nib_radius(width: f32, nib: Nib, pressure: f32) -> f32 {
+    let pressure = match nib {
+        Nib::Fineliner | Nib::Highlighter => 1.0,
+        Nib::Pencil => 0.35 + pressure * 0.65,
+        Nib::Brush => 0.18 + pressure * 0.82,
+    };
+    (width * 0.5 * pressure).max(0.25)
+}
+
+fn ribbon_normal(points: &[InkPoint], i: usize) -> Vec2 {
+    let before = points[i.saturating_sub(1)].pos();
+    let after = points[(i + 1).min(points.len() - 1)].pos();
+    let mut tangent = after - before;
+    if tangent.length_sq() < 1e-8 {
+        tangent = points[i].pos() - before;
+    }
+    rot90(tangent.normalized())
+}
+
+fn feather_radii(radius: f32, normal: Vec2, scale: Vec2) -> (f32, f32, f32) {
+    // The transformed edge's normal is inverse-scaled. This also keeps a
+    // one-pixel perpendicular fringe when the page has non-uniform scaling.
+    let pixel = (normal / scale).length();
+    let inner = (radius - pixel * 0.5).max(0.0);
+    (inner, inner + pixel, (2.0 * radius / pixel).min(1.0))
 }
 
 pub fn ribbon_outline(points: &[InkPoint], width: f32, nib: Nib) -> Vec<Pos2> {
@@ -364,26 +372,31 @@ pub fn ribbon_outline(points: &[InkPoint], width: f32, nib: Nib) -> Vec<Pos2> {
     left
 }
 
-fn add_disc(mesh: &mut Mesh, c: Pos2, r: f32, color: Color32) {
-    let r = r.max(0.3);
-    let n = 12u32;
+fn add_round_cap(
+    mesh: &mut Mesh,
+    c: Pos2,
+    r: f32,
+    (angle, sweep): (f32, f32),
+    color: Color32,
+    scale: Vec2,
+) {
+    // Bound the polygon's deviation from the true arc to 0.15 physical pixels.
+    let screen_radius = r * scale.max_elem();
+    let step = 2.0 * (1.0 - 0.15 / screen_radius.max(0.15)).acos();
+    let n = (sweep / step).ceil().clamp(8.0, 256.0) as u32;
     let start = mesh.vertices.len() as u32;
-    mesh.vertices.push(Vertex {
-        pos: c,
-        uv: Pos2::ZERO,
-        color,
-    });
+    let (_, _, coverage) = feather_radii(r, Vec2::angled(angle), scale);
+    mesh.colored_vertex(c, color.gamma_multiply(coverage));
     for i in 0..=n {
-        let a = i as f32 / n as f32 * std::f32::consts::TAU;
-        mesh.vertices.push(Vertex {
-            pos: c + Vec2::angled(a) * r,
-            uv: Pos2::ZERO,
-            color,
-        });
+        let normal = Vec2::angled(angle + i as f32 / n as f32 * sweep);
+        let (inner, outer, coverage) = feather_radii(r, normal, scale);
+        mesh.colored_vertex(c + normal * inner, color.gamma_multiply(coverage));
+        mesh.colored_vertex(c + normal * outer, Color32::TRANSPARENT);
     }
     for i in 0..n {
+        let a = start + 1 + i * 2;
         mesh.indices
-            .extend_from_slice(&[start, start + i + 1, start + i + 2]);
+            .extend_from_slice(&[start, a, a + 2, a, a + 1, a + 2, a + 1, a + 3, a + 2]);
     }
 }
 
@@ -399,10 +412,6 @@ fn rot90(v: Vec2) -> Vec2 {
     } else {
         Vec2::new(-v.y, v.x)
     }
-}
-
-fn dist(a: Pos2, b: Pos2) -> f32 {
-    a.distance(b)
 }
 
 fn dist2_seg(p: Pos2, a: Pos2, b: Pos2) -> f32 {
@@ -428,16 +437,6 @@ pub fn point_in_poly(p: Pos2, poly: &[Pos2]) -> bool {
         j = i;
     }
     inside
-}
-
-pub fn premultiply(c: Color32) -> Color32 {
-    let a = c.a() as u16;
-    Color32::from_rgba_premultiplied(
-        (c.r() as u16 * a / 255) as u8,
-        (c.g() as u16 * a / 255) as u8,
-        (c.b() as u16 * a / 255) as u8,
-        c.a(),
-    )
 }
 
 /// Hardware pressure, otherwise speed (fountain pen: slow means fatter).
@@ -968,7 +967,7 @@ mod tests {
 
     #[test]
     fn empty_stroke_does_not_panic() {
-        let mesh = ribbon_mesh(&[], 2.2, Nib::Fineliner, Color32::BLACK);
+        let mesh = ribbon_mesh(&[], 2.2, Nib::Fineliner, Color32::BLACK, Vec2::splat(1.0));
         assert!(mesh.vertices.is_empty());
 
         let mut stroke = InkStroke::new(Nib::Brush, Color32::BLACK, 4.0);
@@ -993,15 +992,24 @@ mod tests {
             InkPoint::new(pos2(0.0, 0.0), 1.0),
             InkPoint::new(pos2(40.0, 0.0), 1.0),
         ];
-        let mesh = ribbon_mesh(&points, 3.0, Nib::Fineliner, Color32::BLACK);
+        let mesh = ribbon_mesh(
+            &points,
+            3.0,
+            Nib::Fineliner,
+            Color32::BLACK,
+            Vec2::splat(1.0),
+        );
         assert!(!mesh.vertices.is_empty());
         assert!(!mesh.indices.is_empty());
         assert!(mesh.is_valid());
-        // Two discs plus one shared quad, not six fresh vertices per triangle.
-        assert_eq!(mesh.vertices.len(), 2 * 14 + 4);
-        assert_eq!(mesh.indices.len(), 2 * 36 + 6);
-        let left = mesh.vertices.iter().any(|v| (v.pos.y - 1.5).abs() < 0.01);
-        let right = mesh.vertices.iter().any(|v| (v.pos.y + 1.5).abs() < 0.01);
+        let left = mesh
+            .vertices
+            .iter()
+            .any(|v| (v.pos.y - 2.0).abs() < 0.01 && v.color.a() == 0);
+        let right = mesh
+            .vertices
+            .iter()
+            .any(|v| (v.pos.y + 2.0).abs() < 0.01 && v.color.a() == 0);
         assert!(left && right);
     }
 
@@ -1024,7 +1032,13 @@ mod tests {
             InkPoint::new(pos2(0.0, 0.0), 1.0),
             InkPoint::new(pos2(10.0, 0.0), 1.0),
         ];
-        let src = ribbon_mesh(&points, 2.0, Nib::Fineliner, Color32::BLACK);
+        let src = ribbon_mesh(
+            &points,
+            2.0,
+            Nib::Fineliner,
+            Color32::BLACK,
+            Vec2::splat(1.0),
+        );
         let mapped = map_mesh(&src, 5.0, -3.0, 2.0, 4.0);
         assert_eq!(mapped.indices, src.indices);
         assert_eq!(mapped.vertices.len(), src.vertices.len());
@@ -1033,6 +1047,147 @@ mod tests {
             assert!((after.pos.y - (-3.0 + before.pos.y * 4.0)).abs() < 1e-4);
             assert_eq!(after.color, before.color);
         }
+    }
+
+    /// Sample the same premultiplied triangle blending used by the GPU.
+    fn sample(mesh: &Mesh, point: Pos2) -> [f32; 4] {
+        let cross = |a: Vec2, b: Vec2| a.x * b.y - a.y * b.x;
+        let mut result = [0.0; 4];
+        for indices in mesh.indices.chunks_exact(3) {
+            let v = [0, 1, 2].map(|i| mesh.vertices[indices[i] as usize]);
+            let area = cross(v[1].pos - v[0].pos, v[2].pos - v[0].pos);
+            if area.abs() < 1e-8 {
+                continue;
+            }
+            let a = cross(v[1].pos - point, v[2].pos - point) / area;
+            let b = cross(v[2].pos - point, v[0].pos - point) / area;
+            let c = 1.0 - a - b;
+            if a < 0.0 || b < 0.0 || c < 0.0 {
+                continue;
+            }
+            let colors = v.map(|v| v.color.to_array());
+            let source: [f32; 4] = std::array::from_fn(|i| {
+                (colors[0][i] as f32 * a + colors[1][i] as f32 * b + colors[2][i] as f32 * c)
+                    / 255.0
+            });
+            for i in 0..4 {
+                result[i] = source[i] + result[i] * (1.0 - source[3]);
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn ink_edges_have_subpixel_coverage_at_every_zoom_and_density() {
+        let direction = Vec2::angled(0.37);
+        let normal = rot90(direction);
+        for nib in [Nib::Fineliner, Nib::Brush, Nib::Pencil, Nib::Highlighter] {
+            let mut stroke = InkStroke::new(nib, Color32::BLACK, 12.0);
+            stroke.push(InkPoint::new(Pos2::ZERO, 0.7));
+            stroke.push(InkPoint::new((direction * 100.0).to_pos2(), 0.7));
+            for zoom in [0.25, 0.75, 1.0, 3.0, 8.0] {
+                for density in [1.0, 1.5, 2.0] {
+                    let scale = zoom * density;
+                    let radius = nib_radius(12.0, nib, 0.7) * scale;
+                    let mesh = map_mesh(
+                        stroke.tessellate_at(Vec2::splat(scale)),
+                        0.0,
+                        0.0,
+                        scale,
+                        scale,
+                    );
+                    let center = (direction * 41.3 * scale).to_pos2();
+                    for (offset, expected) in [(-0.6, 1.0), (-0.25, 0.75), (0.25, 0.25), (0.6, 0.0)]
+                    {
+                        let alpha = sample(&mesh, center + normal * (radius + offset))[3];
+                        assert!(
+                            (alpha - expected).abs() < 0.01,
+                            "{nib:?}, scale={scale}: {alpha} != {expected}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn translucent_caps_do_not_double_blend_or_darken_the_pigment() {
+        let color = Color32::from_rgba_unmultiplied(240, 180, 60, 90);
+        let points = [
+            InkPoint::new(Pos2::ZERO, 1.0),
+            InkPoint::new(pos2(80.0, 0.0), 1.0),
+        ];
+        let mesh = ribbon_mesh(&points, 16.0, Nib::Highlighter, color, Vec2::splat(1.0));
+        for x in [-3.7, 0.37, 3.7, 40.3, 79.63, 83.7] {
+            let rendered = sample(&mesh, pos2(x, 0.43));
+            for (actual, expected) in rendered.into_iter().zip(color.to_array()) {
+                assert!(
+                    (actual * 255.0 - expected as f32).abs() < 0.01,
+                    "cap at {x} changes pigment"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stretched_page_keeps_a_one_pixel_perpendicular_ink_edge() {
+        let direction = Vec2::angled(0.63);
+        let normal = rot90(direction);
+        let points = [
+            InkPoint::new(Pos2::ZERO, 1.0),
+            InkPoint::new((direction * 100.0).to_pos2(), 1.0),
+        ];
+        let scale = Vec2::new(3.0, 0.5);
+        let source = ribbon_mesh(&points, 12.0, Nib::Brush, Color32::BLACK, scale);
+        let mesh = map_mesh(&source, 0.0, 0.0, scale.x, scale.y);
+        let edge = ((direction * 41.3 + normal * 6.0) * scale).to_pos2();
+        let screen_normal = (normal / scale).normalized();
+        for (offset, expected) in [(-0.25, 0.75), (0.25, 0.25)] {
+            let alpha = sample(&mesh, edge + screen_normal * offset)[3];
+            assert!((alpha - expected).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn thin_zoomed_out_ink_preserves_coverage_instead_of_becoming_a_heavy_line() {
+        let points = [
+            InkPoint::new(Pos2::ZERO, 1.0),
+            InkPoint::new(pos2(80.0, 0.0), 1.0),
+        ];
+        let scale = 0.25;
+        let mesh = map_mesh(
+            &ribbon_mesh(
+                &points,
+                0.9,
+                Nib::Fineliner,
+                Color32::BLACK,
+                Vec2::splat(scale),
+            ),
+            0.0,
+            0.0,
+            scale,
+            scale,
+        );
+        let coverage: f32 = (0..400)
+            .map(|i| sample(&mesh, pos2(10.13, -2.0 + (i as f32 + 0.5) * 0.01))[3] * 0.01)
+            .sum();
+        assert!((coverage - 0.9 * scale).abs() < 0.005);
+    }
+
+    #[test]
+    fn repeated_points_and_reversals_keep_finite_ink_geometry() {
+        let points: Vec<_> = [
+            pos2(0.0, 0.0),
+            pos2(0.0, 0.0),
+            pos2(10.0, 2.0),
+            pos2(0.0, 0.0),
+        ]
+        .into_iter()
+        .map(|p| InkPoint::new(p, 0.4))
+        .collect();
+        let mesh = ribbon_mesh(&points, 6.5, Nib::Brush, Color32::BLACK, Vec2::splat(2.0));
+        assert!(mesh.is_valid());
+        assert!(mesh.vertices.iter().all(|v| v.pos.is_finite()));
     }
 
     #[test]
