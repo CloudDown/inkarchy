@@ -676,7 +676,9 @@ fn page_ruler_can_navigate_backwards_from_the_last_page() {
     let mut fixture = Fixture::new();
     let mut note = Note::blank("Page ruler", 0);
     note.sheet_join = SheetJoin::Separate;
-    note.pages = (0..30).map(|row| crate::document::Page::at(0, row)).collect();
+    note.pages = (0..30)
+        .map(|row| crate::document::Page::at(0, row))
+        .collect();
     let id = note.id;
     fixture.app.lib.insert_new(&note).unwrap();
     fixture.app.open_note(id);
@@ -685,14 +687,24 @@ fn page_ruler_can_navigate_backwards_from_the_last_page() {
     frames.settle(app);
     app.jump_to_page(29);
     frames.settle(app);
-    app.pdf_page_picker_open = true;
-    let chip = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("pdf-page-number-rect"))).unwrap();
+    let chip = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("pdf-page-number-rect")))
+        .unwrap();
     frames.touch(app, TouchPhase::Start, chip.center());
     frames.touch(app, TouchPhase::End, chip.center());
+    // The counter scrubs directly; open the ruler to test its reverse drag.
+    app.pdf_page_picker_open = true;
     frames.settle(app);
-    let ruler = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("page-scrub-ruler-rect")))
-        .expect("tapping the counter opens the ruler");
-    assert_eq!(app.page_in_view(app.canvas_rect), 29, "opening does not jump");
+    let ruler = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("page-scrub-ruler-rect")))
+        .expect("the page ruler is visible");
+    assert_eq!(
+        app.page_in_view(app.canvas_rect),
+        29,
+        "opening does not jump"
+    );
     let start = pos2(ruler.right() - 24.0, ruler.bottom() - 22.0);
     let end = pos2(ruler.left() + 24.0, start.y);
     frames.touch(app, TouchPhase::Start, start);
@@ -757,15 +769,30 @@ fn page_scrub_reaches_edges_and_uses_vertical_precision() {
     let origin = pos2(30.0, 770.0);
     for count in [1, 8, 300, 10000] {
         for start in [1, count] {
-            assert_eq!(scrub_page_target(start, count, origin, bounds.right_bottom(), bounds), count);
-            assert_eq!(scrub_page_target(start, count, origin, bounds.right_top(), bounds), count);
-            assert_eq!(scrub_page_target(start, count, origin, bounds.left_top(), bounds), 1);
-            assert_eq!(scrub_page_target(start, count, origin, origin, bounds), start);
+            assert_eq!(
+                scrub_page_target(start, count, origin, bounds.right_bottom(), bounds),
+                count
+            );
+            assert_eq!(
+                scrub_page_target(start, count, origin, bounds.right_top(), bounds),
+                count
+            );
+            assert_eq!(
+                scrub_page_target(start, count, origin, bounds.left_top(), bounds),
+                1
+            );
+            assert_eq!(
+                scrub_page_target(start, count, origin, origin, bounds),
+                start
+            );
         }
     }
     let horizontal = scrub_page_target(1, 300, origin, pos2(600.0, origin.y), bounds);
     let diagonal = scrub_page_target(1, 300, origin, pos2(600.0, 0.0), bounds);
-    assert!(diagonal < horizontal, "raising the finger gives finer control near the starting page");
+    assert!(
+        diagonal < horizontal,
+        "raising the finger gives finer control near the starting page"
+    );
 }
 
 #[test]
@@ -1954,10 +1981,13 @@ fn dock_folds_to_the_grip_while_held_and_opens_on_release() {
         (folded.width() - folded.height()).abs() < 24.0,
         "folded case is a pill on the grip, got {folded:?}"
     );
+    let drop = grip + vec2(50.0, 0.0);
+    frames.step(app, vec![Event::PointerMoved(drop)]);
     frames.step(
         app,
         vec![Event::PointerButton {
-            pos: grip,
+            // Release away from the grip: a click on it toggles the folded case.
+            pos: drop,
             button: PointerButton::Primary,
             pressed: false,
             modifiers: Modifiers::NONE,
@@ -2309,7 +2339,10 @@ fn fit_page_button_is_in_the_header_not_the_notebook_menu() {
     assert!((app.camera.zoom - Camera::fit_zoom(app.canvas_rect, pw, ph)).abs() < 0.001);
     frames.drag(app, full.center(), full.center());
     frames.step(app, vec![]);
-    assert!(!app.page_fit_inside, "second press restores the close framing");
+    assert!(
+        !app.page_fit_inside,
+        "second press restores the close framing"
+    );
     assert!(app.camera.zoom > Camera::fit_zoom(app.canvas_rect, pw, ph));
     assert!(!frames
         .output
@@ -2976,7 +3009,7 @@ fn tools_can_be_stored_and_restored_by_dragging_between_panel_and_dock() {
         }
         assert!(app.tool_is_parked(tool), "store {tool:?} touch={touch}");
         assert!(
-            app.parked_slots.iter().any(|slot| *slot == Some(tool)),
+            app.parked_slots.contains(&Some(tool)),
             "tool lands in a storage seat"
         );
         assert!(

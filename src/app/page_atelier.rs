@@ -133,19 +133,23 @@ impl InkarchyApp {
         let ink = self.look.paper_ink(tone);
         let rule = mix_col(fill, ink, 0.48);
         let margin = self.look.paper_margin(tone);
-        let corners = vec![
-            point(-30.0, -46.0),
-            point(30.0, -46.0),
-            point(30.0, 46.0),
-            point(-30.0, 46.0),
-        ];
+        // A superellipse keeps the page recognisably sheet-like while softening
+        // every corner more naturally than a rounded rectangle.
+        let leaf = (0..48)
+            .map(|step| {
+                let angle = std::f32::consts::TAU * step as f32 / 48.0;
+                let x = angle.cos().signum() * angle.cos().abs().sqrt() * 30.0;
+                let y = angle.sin().signum() * angle.sin().abs().sqrt() * 46.0;
+                point(x, y)
+            })
+            .collect::<Vec<_>>();
         p.add(Shape::convex_polygon(
-            corners.iter().map(|v| *v + vec2(2.0, 5.0)).collect(),
+            leaf.iter().map(|v| *v + vec2(2.0, 5.0)).collect(),
             self.look.shadow.gamma_multiply(0.35),
             Stroke::NONE,
         ));
         p.add(Shape::convex_polygon(
-            corners,
+            leaf,
             fill,
             Stroke::new(
                 if hot || selected { 1.5 } else { 0.8 },
@@ -210,17 +214,18 @@ impl InkarchyApp {
         selected: bool,
         hot: bool,
     ) {
-        let face = cell.shrink2(vec2(4.0, 6.0));
-        p.rect_filled(
-            face.translate(vec2(2.0, 3.0)),
-            1.0,
+        let centre = cell.center();
+        let radius = 15.0;
+        p.circle_filled(
+            centre + vec2(2.0, 3.0),
+            radius,
             self.look.shadow.gamma_multiply(0.3),
         );
         let fill = self.look.paper_surface(tone);
-        p.rect_filled(face, 1.0, fill);
-        p.rect_stroke(
-            face,
-            1.0,
+        p.circle_filled(centre, radius, fill);
+        p.circle_stroke(
+            centre,
+            radius,
             Stroke::new(
                 if selected || hot { 1.8 } else { 0.8 },
                 if selected || hot {
@@ -229,14 +234,9 @@ impl InkarchyApp {
                     self.look.ink.gamma_multiply(0.35)
                 },
             ),
-            StrokeKind::Inside,
         );
         if selected {
-            paint_check(
-                p,
-                face.center(),
-                well_glyph(fill, self.look.paper, self.look.ink),
-            );
+            paint_check(p, centre, well_glyph(fill, self.look.paper, self.look.ink));
         }
     }
 }

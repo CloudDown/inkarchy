@@ -5477,8 +5477,11 @@ impl InkarchyApp {
         if number.inner.dragged() || number.inner.drag_stopped() {
             if let Some((start, origin)) = ctx.data(|d| d.get_temp::<(usize, Pos2)>(drag_key)) {
                 if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
-                    let right = ((pos.x - origin.x) / (self.canvas_rect.right() - origin.x).max(1.0)).clamp(0.0, 1.0);
-                    let up = ((origin.y - pos.y) / (origin.y - self.canvas_rect.top()).max(1.0)).clamp(0.0, 1.0);
+                    let right = ((pos.x - origin.x)
+                        / (self.canvas_rect.right() - origin.x).max(1.0))
+                    .clamp(0.0, 1.0);
+                    let up = ((origin.y - pos.y) / (origin.y - self.canvas_rect.top()).max(1.0))
+                        .clamp(0.0, 1.0);
                     let target = directional_page_target(start, page_count, right, up);
                     self.pdf_page_target = target;
                     if target != current {
@@ -5508,7 +5511,11 @@ impl InkarchyApp {
             let rect = Rect::from_center_size(center, vec2(64.0, 48.0));
             let p = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::new("page-scrub-preview")));
             self.paint_layout_instrument(&p, rect);
-            let page = if number.inner.dragged() { self.pdf_page_target } else { current };
+            let page = if number.inner.dragged() {
+                self.pdf_page_target
+            } else {
+                current
+            };
             p.text(
                 center,
                 Align2::CENTER_CENTER,
@@ -5523,7 +5530,10 @@ impl InkarchyApp {
         if self.pdf_page_picker_open {
             let width = (self.canvas_rect.width() - 32.0).clamp(100.0, 440.0);
             let rect = Rect::from_min_size(
-                pos2(self.canvas_rect.left() + 16.0, self.canvas_rect.bottom() - 136.0),
+                pos2(
+                    self.canvas_rect.left() + 16.0,
+                    self.canvas_rect.bottom() - 136.0,
+                ),
                 vec2(width, 64.0),
             );
             let track = Rect::from_min_max(
@@ -5538,29 +5548,49 @@ impl InkarchyApp {
                     let p = ui.painter();
                     self.paint_layout_instrument(p, rect);
                     let fg = self.look.paper;
-                    let fraction = (current - 1) as f32 / page_count.saturating_sub(1).max(1) as f32;
+                    let fraction =
+                        (current - 1) as f32 / page_count.saturating_sub(1).max(1) as f32;
                     let x = egui::lerp(track.x_range(), fraction);
-                    p.hline(track.x_range(), track.center().y, Stroke::new(2.0, fg.gamma_multiply(0.25)));
+                    p.hline(
+                        track.x_range(),
+                        track.center().y,
+                        Stroke::new(2.0, fg.gamma_multiply(0.25)),
+                    );
                     p.hline(track.left()..=x, track.center().y, Stroke::new(2.0, fg));
                     p.circle_filled(pos2(x, track.center().y), 5.0, fg);
-                    p.text(pos2(x.clamp(rect.left() + 32.0, rect.right() - 32.0), rect.top() + 18.0),
-                        Align2::CENTER_CENTER, current.to_string(), self.look.mono(18.0), fg);
+                    p.text(
+                        pos2(
+                            x.clamp(rect.left() + 32.0, rect.right() - 32.0),
+                            rect.top() + 18.0,
+                        ),
+                        Align2::CENTER_CENTER,
+                        current.to_string(),
+                        self.look.mono(18.0),
+                        fg,
+                    );
                     let response = ui.interact(rect, ui.id().with("track"), Sense::drag());
                     let key = response.id.with("origin");
                     if response.drag_started() {
-                        let origin = ctx.input(|i| i.pointer.press_origin()).unwrap_or(rect.center());
+                        let origin = ctx
+                            .input(|i| i.pointer.press_origin())
+                            .unwrap_or(rect.center());
                         ctx.data_mut(|d| d.insert_temp(key, (current, origin)));
                     }
                     if response.dragged() || response.drag_stopped() {
-                        if let Some((start, origin)) = ctx.data(|d| d.get_temp::<(usize, Pos2)>(key)) {
+                        if let Some((start, origin)) =
+                            ctx.data(|d| d.get_temp::<(usize, Pos2)>(key))
+                        {
                             if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
                                 // Anchor the gesture to the visible handle, not the finger,
                                 // so grabbing its generous hit area never jumps a page.
-                                let handle = egui::lerp(track.x_range(),
-                                    (start - 1) as f32 / page_count.saturating_sub(1).max(1) as f32);
+                                let handle = egui::lerp(
+                                    track.x_range(),
+                                    (start - 1) as f32 / page_count.saturating_sub(1).max(1) as f32,
+                                );
                                 let anchor = pos2(handle, origin.y);
                                 let pointer = pos2(handle + pos.x - origin.x, pos.y);
-                                let target = scrub_page_target(start, page_count, anchor, pointer, track);
+                                let target =
+                                    scrub_page_target(start, page_count, anchor, pointer, track);
                                 if target != current {
                                     self.jump_to_page(target - 1);
                                 }
@@ -5573,23 +5603,37 @@ impl InkarchyApp {
                     if response.dragged() {
                         if let Some(pointer) = ctx.input(|i| i.pointer.interact_pos()) {
                             let center = pos2(
-                                pointer.x.clamp(self.canvas_rect.left() + 36.0, self.canvas_rect.right() - 36.0),
+                                pointer.x.clamp(
+                                    self.canvas_rect.left() + 36.0,
+                                    self.canvas_rect.right() - 36.0,
+                                ),
                                 (pointer.y - 72.0).max(self.canvas_rect.top() + 28.0),
                             );
                             let preview = Rect::from_center_size(center, vec2(64.0, 48.0));
-                            let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::new("page-ruler-preview")));
+                            let painter = ctx.layer_painter(LayerId::new(
+                                Order::Tooltip,
+                                Id::new("page-ruler-preview"),
+                            ));
                             self.paint_layout_instrument(&painter, preview);
-                            painter.text(center, Align2::CENTER_CENTER,
+                            painter.text(
+                                center,
+                                Align2::CENTER_CENTER,
                                 self.land_page.map_or(current, |page| page + 1).to_string(),
-                                self.look.mono(24.0), fg);
+                                self.look.mono(24.0),
+                                fg,
+                            );
                         }
                     }
                     response.on_hover_cursor(CursorIcon::ResizeHorizontal);
                 });
             ctx.data_mut(|d| d.insert_temp(Id::new("page-scrub-ruler-rect"), rect));
-            if ctx.input(|i| i.key_pressed(Key::Escape)
-                || (i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|pos|
-                    !rect.contains(pos) && !number.inner.rect.contains(pos)))) {
+            if ctx.input(|i| {
+                i.key_pressed(Key::Escape)
+                    || (i.pointer.any_pressed()
+                        && i.pointer.interact_pos().is_some_and(|pos| {
+                            !rect.contains(pos) && !number.inner.rect.contains(pos)
+                        }))
+            }) {
                 self.pdf_page_picker_open = false;
             }
         } else {
@@ -6468,17 +6512,18 @@ impl InkarchyApp {
                     paper.id(),
                 );
                 palette.paint();
-                for i in 0..n {
-                    let hot = hit == Some(i);
-                    if kind == PenWheelKind::Colors {
-                        palette.color(i, n, colors[i], hot, colors[i] == self.ink);
-                    } else {
+                if kind == PenWheelKind::Colors {
+                    for (i, &color) in colors.iter().enumerate() {
+                        palette.color(i, n, color, hit == Some(i), color == self.ink);
+                    }
+                } else {
+                    for i in 0..n {
                         palette.nib(
                             i,
                             n,
                             width_from_nib_t(nib_preset_t(i, n)),
                             self.ink,
-                            hot,
+                            hit == Some(i),
                             nearest_size == Some(i),
                         );
                     }
@@ -7265,7 +7310,7 @@ impl InkarchyApp {
 
     fn tool_is_parked(&self, tool: Tool) -> bool {
         let key = dock_tool_key(tool);
-        self.parked_slots.iter().any(|slot| *slot == Some(key))
+        self.parked_slots.contains(&Some(key))
     }
 
     fn parked_count(&self) -> usize {
@@ -7308,15 +7353,10 @@ impl InkarchyApp {
     }
 
     fn storage_slot_under(&self, ctx: &Context, pointer: Pos2) -> Option<usize> {
-        for i in 0..STORAGE_SLOTS {
-            if ctx
-                .data(|d| d.get_temp::<Rect>(Id::new(("storage-slot", i))))
+        (0..STORAGE_SLOTS).find(|&i| {
+            ctx.data(|d| d.get_temp::<Rect>(Id::new(("storage-slot", i))))
                 .is_some_and(|rect| rect.contains(pointer))
-            {
-                return Some(i);
-            }
-        }
-        None
+        })
     }
 
     fn dock_tool_storage_ui(&mut self, ui: &mut Ui, size: Vec2) {
@@ -8519,7 +8559,7 @@ impl InkarchyApp {
             return;
         }
 
-        if !self.pdf_page_picker_open && !(self.sheet_tabs_on && Popup::is_any_open(ui.ctx())) {
+        if !(self.pdf_page_picker_open || self.sheet_tabs_on && Popup::is_any_open(ui.ctx())) {
             if self.sheet_tabs_on {
                 self.arm_page_marks(ui);
             }
@@ -12716,13 +12756,25 @@ fn directional_page_target(start: usize, count: usize, right: f32, up: f32) -> u
     let count = count.max(1);
     let start = start.clamp(1, count);
     let direction = right.clamp(0.0, 1.0) - up.clamp(0.0, 1.0);
-    let remaining = if direction >= 0.0 { count - start } else { start - 1 };
-    (start as f32 + direction * remaining as f32).round().clamp(1.0, count as f32) as usize
+    let remaining = if direction >= 0.0 {
+        count - start
+    } else {
+        start - 1
+    };
+    (start as f32 + direction * remaining as f32)
+        .round()
+        .clamp(1.0, count as f32) as usize
 }
 
 /// Edge-normalized page scrub. Vertical travel increases precision near the
 /// starting page without making either endpoint unreachable.
-fn scrub_page_target(start: usize, count: usize, origin: Pos2, pointer: Pos2, bounds: Rect) -> usize {
+fn scrub_page_target(
+    start: usize,
+    count: usize,
+    origin: Pos2,
+    pointer: Pos2,
+    bounds: Rect,
+) -> usize {
     let count = count.max(1);
     let start = start.clamp(1, count);
     let dx = pointer.x - origin.x;
@@ -12733,7 +12785,9 @@ fn scrub_page_target(start: usize, count: usize, origin: Pos2, pointer: Pos2, bo
         ((origin.x - bounds.left()).max(1.0), -((start - 1) as f32))
     };
     let fraction = (dx.abs() / distance).clamp(0.0, 1.0).powf(precision);
-    (start as f32 + fraction * pages).round().clamp(1.0, count as f32) as usize
+    (start as f32 + fraction * pages)
+        .round()
+        .clamp(1.0, count as f32) as usize
 }
 
 /// The wrapped layout for a chosen number of pages per row.

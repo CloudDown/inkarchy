@@ -183,7 +183,7 @@ impl<'a> WheelPalette<'a> {
     ) {
         let (at, radius) = self.seat(index, count, hot);
         self.p.circle_filled(
-            at + vec2(0.0, -1.0 * self.scale),
+            at + vec2(0.0, -self.scale),
             (radius + 2.0) * self.scale,
             shade_rgb(self.case, 0.65),
         );
